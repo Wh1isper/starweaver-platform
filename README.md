@@ -78,3 +78,13 @@ make docs-build
 
 The GitHub Actions docs workflow deploys `book/` to Cloudflare Pages project
 `starweaver-platform-docs`.
+
+Detailed service design lives under `spec/`:
+
+- `spec/shared/` - repository and service-suite boundaries.
+- `spec/platform/` - hosted agent platform control-plane direction.
+- `spec/gateway/` - enterprise LLM gateway specs for tenancy, provider
+  credentials, routing groups, runtime protocol, usage, cost budgets,
+  notifications, admin API, API keys, authorization, security, operations, and
+  rollout.
+- `spec/ops/` - release, deployment, migration, and artifact strategy.
