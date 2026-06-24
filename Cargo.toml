@@ -1,0 +1,31 @@
+[workspace]
+members = [
+    "crates/starweaver-platform",
+    "crates/starweaver-gateway",
+    "xtask",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.80"
+authors = ["wh1isper"]
+license = "BSD-3-Clause"
+repository = "https://github.com/Wh1isper/starweaver-platform"
+homepage = "https://github.com/Wh1isper/starweaver-platform"
+description = "Enterprise service workspace for the Starweaver agent platform and LLM gateway"
+readme = "README.md"
+keywords = ["agent", "gateway", "ai", "platform"]
+categories = ["development-tools"]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+nursery = "warn"
+unwrap_used = "warn"
+expect_used = "warn"

@@ -1,0 +1,23 @@
+[book]
+title = "Starweaver Platform"
+description = "Enterprise agent platform and LLM gateway documentation"
+authors = ["Wh1isper"]
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/Wh1isper/starweaver-platform"
+edit-url-template = "https://github.com/Wh1isper/starweaver-platform/edit/main/{path}"
+site-url = "/"
+additional-js = ["docs/mermaid-init.js"]
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.print]
+enable = false

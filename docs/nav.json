@@ -1,0 +1,10 @@
+[
+  {
+    "label": "Getting Started",
+    "items": ["index", "install", "testing"]
+  },
+  {
+    "label": "Architecture",
+    "items": ["architecture", "agent-platform", "gateway", "operations"]
+  }
+]

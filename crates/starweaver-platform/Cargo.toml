@@ -1,0 +1,17 @@
+[package]
+name = "starweaver-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Agent platform service crate for Starweaver enterprise deployments"
+readme.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

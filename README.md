@@ -1,0 +1,80 @@
+# Starweaver Platform
+
+[![CI](https://github.com/Wh1isper/starweaver-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/Wh1isper/starweaver-platform/actions/workflows/ci.yml)
+[![Docs](https://github.com/Wh1isper/starweaver-platform/actions/workflows/docs.yml/badge.svg)](https://github.com/Wh1isper/starweaver-platform/actions/workflows/docs.yml)
+[![Pre-commit](https://github.com/Wh1isper/starweaver-platform/actions/workflows/pre-commit.yml/badge.svg)](https://github.com/Wh1isper/starweaver-platform/actions/workflows/pre-commit.yml)
+
+Starweaver Platform is the enterprise service workspace for the Starweaver agent
+platform and LLM gateway.
+
+This repository is separate from the core
+[`starweaver`](https://github.com/Wh1isper/starweaver) SDK/runtime repository.
+The core repository owns the local runtime, CLI, model/provider abstraction,
+tools, envd integration, and host protocols. This repository owns service-side
+infrastructure such as tenancy, credentials, policy, audit, usage, deployment,
+and hosted APIs.
+
+## Workspace
+
+- `crates/starweaver-platform` - agent control-plane crate.
+- `crates/starweaver-gateway` - LLM gateway crate.
+- `xtask` - repository automation for docs and CI checks.
+- `docs/` - mdBook documentation site.
+- `spec/` - design specs and architecture notes.
+
+## Service Boundary
+
+```mermaid
+flowchart TD
+    client[Client]
+    platform[Agent platform service]
+    gateway[LLM gateway]
+    core[Starweaver SDK and runtime]
+    provider[Upstream LLM provider]
+
+    client --> platform
+    client --> gateway
+    platform --> gateway
+    gateway --> provider
+    platform -. uses public runtime contracts .-> core
+```
+
+The platform service may route model traffic through the gateway, but that is a
+deployment topology. The gateway must remain the model egress plane and should
+not import the agent runtime.
+
+## Local Development
+
+Install the Rust toolchain from `rust-toolchain.toml`, then run:
+
+```bash
+make ci
+```
+
+Useful targets:
+
+```bash
+make fmt-check
+make check
+make test
+make docs-check
+make docs-build
+make scripts-check
+```
+
+Install local pre-commit hooks with:
+
+```bash
+make install
+```
+
+## Documentation
+
+The docs site is built with mdBook:
+
+```bash
+make docs-build
+```
+
+The GitHub Actions docs workflow deploys `book/` to Cloudflare Pages project
+`starweaver-platform-docs`.
