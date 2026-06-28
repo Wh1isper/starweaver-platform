@@ -1,6 +1,6 @@
 //! Gateway HTTP service skeleton.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -118,6 +118,12 @@ const ADMIN_ROUTE_DECISION_GET_PATH: &str =
 const ADMIN_ROUTE_ATTEMPT_LIST_PATH: &str = "/admin/v1/route-attempts";
 const ADMIN_ROUTE_ATTEMPT_GET_PATH: &str =
     concat!("/admin/v1/route-attempts/", "{route_attempt_event_id}");
+const ADMIN_REALTIME_OVERVIEW_PATH: &str = "/admin/v1/realtime/overview";
+const ADMIN_REALTIME_PROVIDERS_PATH: &str = "/admin/v1/realtime/providers";
+const ADMIN_REALTIME_ROUTES_PATH: &str = "/admin/v1/realtime/routes";
+const ADMIN_REALTIME_BUDGETS_PATH: &str = "/admin/v1/realtime/budgets";
+const ADMIN_REALTIME_QUOTAS_PATH: &str = "/admin/v1/realtime/quotas";
+const ADMIN_REALTIME_WORKERS_PATH: &str = "/admin/v1/realtime/workers";
 const ADMIN_AUDIT_EVENT_LIST_PATH: &str = "/admin/v1/audit/events";
 const ADMIN_EXPORT_JOB_LIST_PATH: &str = "/admin/v1/exports/jobs";
 const ADMIN_EXPORT_JOB_GET_PATH: &str = concat!("/admin/v1/exports/jobs/", "{export_job_id}");
@@ -320,6 +326,10 @@ const ADMIN_MODEL_ALIAS_DASHBOARD_PATH: &str = concat!(
     "{model_alias_id}",
     "/dashboard"
 );
+const ADMIN_MODEL_ALIAS_ROUTES_PATH: &str =
+    concat!("/admin/v1/models/aliases/", "{model_alias_id}", "/routes");
+const ADMIN_MODEL_ALIAS_QUALITY_PATH: &str =
+    concat!("/admin/v1/models/aliases/", "{model_alias_id}", "/quality");
 const ADMIN_MODEL_TARGET_DASHBOARD_PATH: &str = concat!(
     "/admin/v1/models/targets/",
     "{model_target_id}",
@@ -330,6 +340,32 @@ const ADMIN_PROVIDER_ENDPOINT_OBSERVABILITY_USAGE_PATH: &str = concat!(
     "{provider_endpoint_id}",
     "/observability/usage"
 );
+const ADMIN_PROVIDER_ENDPOINT_OBSERVABILITY_HEALTH_PATH: &str = concat!(
+    "/admin/v1/provider-endpoints/",
+    "{provider_endpoint_id}",
+    "/observability/health"
+);
+const ADMIN_PROVIDER_ENDPOINT_OBSERVABILITY_FAILOVER_PATH: &str = concat!(
+    "/admin/v1/provider-endpoints/",
+    "{provider_endpoint_id}",
+    "/observability/failover"
+);
+const ADMIN_PROVIDER_ENDPOINT_OBSERVABILITY_CREDENTIALS_PATH: &str = concat!(
+    "/admin/v1/provider-endpoints/",
+    "{provider_endpoint_id}",
+    "/observability/credentials"
+);
+const ADMIN_PROVIDER_ENDPOINT_OBSERVABILITY_MODEL_TARGETS_PATH: &str = concat!(
+    "/admin/v1/provider-endpoints/",
+    "{provider_endpoint_id}",
+    "/observability/model-targets"
+);
+const ADMIN_BUDGET_DASHBOARD_PATH: &str = "/admin/v1/budgets/dashboard";
+const ADMIN_BUDGET_TIMESERIES_PATH: &str =
+    concat!("/admin/v1/budgets/", "{budget_policy_id}", "/timeseries");
+const ADMIN_QUOTA_DASHBOARD_PATH: &str = "/admin/v1/quotas/dashboard";
+const ADMIN_RATE_LIMIT_TIMESERIES_PATH: &str =
+    concat!("/admin/v1/rate-limits/", "{quota_policy_id}", "/timeseries");
 const ADMIN_USAGE_SUMMARY_PATH: &str = "/admin/v1/usage/summary";
 const ADMIN_USAGE_TIMESERIES_PATH: &str = "/admin/v1/usage/timeseries";
 const ADMIN_USAGE_EVENTS_PATH: &str = "/admin/v1/usage/events";
@@ -1456,7 +1492,12 @@ fn auth_routes() -> Router<AppState> {
 
 fn dashboard_admin_routes() -> Router<AppState> {
     Router::new()
-        .route("/admin/v1/realtime/overview", get(get_realtime_overview))
+        .route(ADMIN_REALTIME_OVERVIEW_PATH, get(get_realtime_overview))
+        .route(ADMIN_REALTIME_PROVIDERS_PATH, get(get_realtime_providers))
+        .route(ADMIN_REALTIME_ROUTES_PATH, get(get_realtime_routes))
+        .route(ADMIN_REALTIME_BUDGETS_PATH, get(get_realtime_budgets))
+        .route(ADMIN_REALTIME_QUOTAS_PATH, get(get_realtime_quotas))
+        .route(ADMIN_REALTIME_WORKERS_PATH, get(get_realtime_workers))
         .merge(usage_admin_routes())
         .route(
             "/admin/v1/dashboards/tenant/overview",
@@ -1487,12 +1528,36 @@ fn dashboard_admin_routes() -> Router<AppState> {
             get(get_model_alias_dashboard_overview),
         )
         .route(
+            ADMIN_MODEL_ALIAS_ROUTES_PATH,
+            get(get_model_alias_routes_observability),
+        )
+        .route(
+            ADMIN_MODEL_ALIAS_QUALITY_PATH,
+            get(get_model_alias_quality_observability),
+        )
+        .route(
             ADMIN_MODEL_TARGET_DASHBOARD_PATH,
             get(get_model_target_dashboard_overview),
         )
         .route(
             ADMIN_PROVIDER_ENDPOINT_OBSERVABILITY_USAGE_PATH,
             get(get_provider_endpoint_observability_usage),
+        )
+        .route(
+            ADMIN_PROVIDER_ENDPOINT_OBSERVABILITY_HEALTH_PATH,
+            get(get_provider_endpoint_observability_health),
+        )
+        .route(
+            ADMIN_PROVIDER_ENDPOINT_OBSERVABILITY_FAILOVER_PATH,
+            get(get_provider_endpoint_observability_failover),
+        )
+        .route(
+            ADMIN_PROVIDER_ENDPOINT_OBSERVABILITY_CREDENTIALS_PATH,
+            get(get_provider_endpoint_observability_credentials),
+        )
+        .route(
+            ADMIN_PROVIDER_ENDPOINT_OBSERVABILITY_MODEL_TARGETS_PATH,
+            get(get_provider_endpoint_model_targets_observability),
         )
 }
 
@@ -1565,6 +1630,11 @@ fn pricing_sku_admin_routes() -> Router<AppState> {
 
 fn budget_policy_admin_routes() -> Router<AppState> {
     Router::new()
+        .route(ADMIN_BUDGET_DASHBOARD_PATH, get(get_budget_dashboard))
+        .route(
+            ADMIN_BUDGET_TIMESERIES_PATH,
+            get(get_budget_policy_timeseries),
+        )
         .route(
             "/admin/v1/budget-policies",
             get(list_budget_policies).post(create_budget_policy),
@@ -1581,6 +1651,11 @@ fn budget_policy_admin_routes() -> Router<AppState> {
 
 fn quota_policy_admin_routes() -> Router<AppState> {
     Router::new()
+        .route(ADMIN_QUOTA_DASHBOARD_PATH, get(get_quota_dashboard))
+        .route(
+            ADMIN_RATE_LIMIT_TIMESERIES_PATH,
+            get(get_rate_limit_timeseries),
+        )
         .route(
             "/admin/v1/quota-policies",
             get(list_quota_policies).post(create_quota_policy),
@@ -2339,6 +2414,7 @@ struct AdminCreateModelTargetRequest {
     upstream_credential_id: Option<String>,
     protocol_family: ProtocolFamily,
     upstream_model_id: String,
+    pricing_sku_id: Option<String>,
     #[serde(default = "default_true")]
     supports_streaming: bool,
 }
@@ -2872,6 +2948,11 @@ struct AdminUsageScopeQuery {
 struct AdminUsageTimeseriesQuery {
     scope_kind: Option<String>,
     scope_id: Option<String>,
+    bucket_kind: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AdminPolicyTimeseriesQuery {
     bucket_kind: Option<String>,
 }
 
@@ -4724,15 +4805,7 @@ async fn get_realtime_overview(
     Extension(actor): Extension<AuthenticatedActor>,
 ) -> Result<Json<Value>> {
     let now = chrono::Utc::now();
-    authorize_admin_route(
-        &state,
-        &actor,
-        &Method::GET,
-        "/admin/v1/realtime/overview",
-        &actor.tenant_id,
-        now,
-    )
-    .await?;
+    authorize_realtime_dashboard(&state, &actor, ADMIN_REALTIME_OVERVIEW_PATH, now).await?;
     let latest_config = state
         .store
         .latest_published_snapshot_for_tenant(&actor.tenant_id);
@@ -4744,12 +4817,7 @@ async fn get_realtime_overview(
     let otel_exporter_summary = realtime_otel_exporter_summary(&state, &actor.tenant_id);
     let validation_summary = validation_diagnostics_summary(&state, &actor.tenant_id);
     let budget_summary = realtime_budget_summary(&state, &actor.tenant_id);
-    let quota_policy_count = state
-        .store
-        .quota_policies_for_tenant(&actor.tenant_id)
-        .into_iter()
-        .filter(|policy| policy.status != ResourceStatus::Deleted)
-        .count();
+    let quota_summary = realtime_quota_summary(&state, &actor.tenant_id);
     Ok(Json(json!({
         "schema": "gateway.admin.realtime_overview.v1",
         "source": {
@@ -4778,11 +4846,7 @@ async fn get_realtime_overview(
         "routes": route_summary,
         "validation": validation_summary,
         "budgets": budget_summary,
-        "quotas": {
-            "configured_policy_count": quota_policy_count,
-            "hot_state_status": "unavailable",
-            "source": "policy_config_only"
-        },
+        "quotas": quota_summary,
         "workers": worker_summary,
         "otel_exporter": otel_exporter_summary,
         "unavailable_sources": [
@@ -4791,6 +4855,278 @@ async fn get_realtime_overview(
             "quota_hot_counters",
             "worker_heartbeats"
         ]
+    })))
+}
+
+async fn get_realtime_providers(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_realtime_dashboard(&state, &actor, ADMIN_REALTIME_PROVIDERS_PATH, now).await?;
+    let config_version = state
+        .store
+        .latest_published_snapshot_for_tenant(&actor.tenant_id)
+        .as_ref()
+        .map(|snapshot| snapshot.version);
+    Ok(Json(realtime_section_response(
+        "gateway.admin.realtime_providers.v1",
+        &actor.tenant_id,
+        now,
+        "providers",
+        realtime_provider_summary(&state, &actor.tenant_id, config_version, now),
+    )))
+}
+
+async fn get_realtime_routes(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_realtime_dashboard(&state, &actor, ADMIN_REALTIME_ROUTES_PATH, now).await?;
+    Ok(Json(realtime_section_response(
+        "gateway.admin.realtime_routes.v1",
+        &actor.tenant_id,
+        now,
+        "routes",
+        realtime_route_summary(&state, &actor.tenant_id),
+    )))
+}
+
+async fn get_realtime_budgets(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_realtime_dashboard(&state, &actor, ADMIN_REALTIME_BUDGETS_PATH, now).await?;
+    Ok(Json(realtime_section_response(
+        "gateway.admin.realtime_budgets.v1",
+        &actor.tenant_id,
+        now,
+        "budgets",
+        realtime_budget_summary(&state, &actor.tenant_id),
+    )))
+}
+
+async fn get_realtime_quotas(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_realtime_dashboard(&state, &actor, ADMIN_REALTIME_QUOTAS_PATH, now).await?;
+    Ok(Json(realtime_section_response(
+        "gateway.admin.realtime_quotas.v1",
+        &actor.tenant_id,
+        now,
+        "quotas",
+        realtime_quota_summary(&state, &actor.tenant_id),
+    )))
+}
+
+async fn get_realtime_workers(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_realtime_dashboard(&state, &actor, ADMIN_REALTIME_WORKERS_PATH, now).await?;
+    let config_version = state
+        .store
+        .latest_published_snapshot_for_tenant(&actor.tenant_id)
+        .as_ref()
+        .map(|snapshot| snapshot.version);
+    Ok(Json(realtime_section_response(
+        "gateway.admin.realtime_workers.v1",
+        &actor.tenant_id,
+        now,
+        "workers",
+        realtime_worker_summary(&state, &actor.tenant_id, config_version),
+    )))
+}
+
+async fn authorize_realtime_dashboard(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    path: &'static str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    authorize_admin_route(state, actor, &Method::GET, path, &actor.tenant_id, now).await
+}
+
+fn realtime_section_response(
+    schema: &str,
+    tenant_id: &str,
+    generated_at: chrono::DateTime<chrono::Utc>,
+    section_key: &str,
+    section_body: Value,
+) -> Value {
+    let mut response = json!({
+        "schema": schema,
+        "source": {
+            "kind": "redis_compatible_hot_state",
+            "role": "builtin_realtime_dashboard",
+            "metrics_backend_queried": false
+        },
+        "tenant_id": tenant_id,
+        "generated_at": generated_at
+    });
+    response[section_key] = section_body;
+    response
+}
+
+async fn get_budget_dashboard(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Query(query): Query<AdminUsageScopeQuery>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    let scope = usage_scope_from_query(
+        &state,
+        &actor,
+        query.scope_kind.as_deref(),
+        query.scope_id.as_deref(),
+    )?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_BUDGET_DASHBOARD_PATH,
+        &scope.scope_id,
+        now,
+    )
+    .await?;
+    let ledger_buckets = ledger_buckets_for_analytics(&state, &scope.tenant_id).await?;
+    Ok(Json(json!({
+        "schema": "gateway.admin.budget_dashboard.v1",
+        "scope": dashboard_scope_body(&scope),
+        "generated_at": now,
+        "budgets": budget_dashboard_rows(&state, &scope, &ledger_buckets, now),
+        "realtime": realtime_budget_summary(&state, &scope.tenant_id),
+        "sources": {
+            "usage_ledger_rollups": "durable_ledger_buckets",
+            "budget_hot_state": if state.store.runtime_policy_hot_state_available() {
+                "redis_compatible_hot_state"
+            } else {
+                "unavailable"
+            },
+            "metrics_backend_queried": false
+        }
+    })))
+}
+
+async fn get_budget_policy_timeseries(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(budget_policy_id): Path<String>,
+    Query(query): Query<AdminPolicyTimeseriesQuery>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    let bucket_kind = usage_bucket_kind(query.bucket_kind.as_deref())?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_BUDGET_TIMESERIES_PATH,
+        &budget_policy_id,
+        now,
+    )
+    .await?;
+    let policy = budget_policy_for_actor(&state, &actor, &budget_policy_id)?;
+    let ledger_buckets = ledger_buckets_for_analytics(&state, &actor.tenant_id).await?;
+    Ok(Json(json!({
+        "schema": "gateway.admin.budget_timeseries.v1",
+        "budget_policy": budget_policy_dashboard_body(
+            &state,
+            &policy,
+            &ledger_buckets,
+            now
+        ),
+        "bucket_kind": bucket_kind,
+        "points": budget_policy_timeseries_points(&policy, &ledger_buckets, bucket_kind),
+        "sources": {
+            "usage_ledger_rollups": "durable_ledger_buckets",
+            "budget_hot_state": if state.store.runtime_policy_hot_state_available() {
+                "redis_compatible_hot_state"
+            } else {
+                "unavailable"
+            },
+            "metrics_backend_queried": false
+        }
+    })))
+}
+
+async fn get_quota_dashboard(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Query(query): Query<AdminUsageScopeQuery>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    let scope = usage_scope_from_query(
+        &state,
+        &actor,
+        query.scope_kind.as_deref(),
+        query.scope_id.as_deref(),
+    )?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_QUOTA_DASHBOARD_PATH,
+        &scope.scope_id,
+        now,
+    )
+    .await?;
+    let ledger_buckets = ledger_buckets_for_analytics(&state, &scope.tenant_id).await?;
+    Ok(Json(json!({
+        "schema": "gateway.admin.quota_dashboard.v1",
+        "scope": dashboard_scope_body(&scope),
+        "generated_at": now,
+        "quotas": quota_dashboard_rows(&state, &scope, &ledger_buckets, now),
+        "realtime": realtime_quota_summary(&state, &scope.tenant_id),
+        "sources": {
+            "usage_ledger_rollups": "durable_ledger_buckets",
+            "quota_hot_state": if state.store.runtime_policy_hot_state_available() {
+                "redis_compatible_hot_state"
+            } else {
+                "unavailable"
+            },
+            "metrics_backend_queried": false
+        }
+    })))
+}
+
+async fn get_rate_limit_timeseries(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(quota_policy_id): Path<String>,
+    Query(query): Query<AdminPolicyTimeseriesQuery>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    let bucket_kind = usage_bucket_kind(query.bucket_kind.as_deref())?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_RATE_LIMIT_TIMESERIES_PATH,
+        &quota_policy_id,
+        now,
+    )
+    .await?;
+    let policy = quota_policy_for_actor(&state, &actor, &quota_policy_id)?;
+    let ledger_buckets = ledger_buckets_for_analytics(&state, &actor.tenant_id).await?;
+    Ok(Json(json!({
+        "schema": "gateway.admin.rate_limit_timeseries.v1",
+        "quota_policy": quota_policy_dashboard_body(&state, &policy, &ledger_buckets, now),
+        "bucket_kind": bucket_kind,
+        "points": quota_policy_timeseries_points(&policy, &ledger_buckets, bucket_kind),
+        "sources": {
+            "usage_ledger_rollups": "durable_ledger_buckets",
+            "quota_hot_state": if runtime_quota_policy_needs_hot_state(&policy) {
+                "redis_compatible_hot_state_current_only"
+            } else {
+                "not_required"
+            },
+            "metrics_backend_queried": false
+        }
     })))
 }
 
@@ -5223,6 +5559,95 @@ async fn get_model_alias_dashboard_overview(
     ))
 }
 
+async fn get_model_alias_routes_observability(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(model_alias_id): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_MODEL_ALIAS_ROUTES_PATH,
+        &model_alias_id,
+        now,
+    )
+    .await?;
+    let alias = model_alias_for_actor(&state, &actor, &model_alias_id)?;
+    let scope = DashboardScopeInput {
+        schema: "gateway.admin.model_alias_routes.v1",
+        tenant_id: actor.tenant_id,
+        scope_kind: "model_alias",
+        scope_id: alias.model_alias_id,
+        organization_id: alias.organization_id,
+        project_id: alias.project_id,
+        project_member_id: None,
+        principal_id: None,
+    };
+    let route_decisions = route_decision_evidence_for_tenant(&state, &scope.tenant_id).await?;
+    let route_attempts = route_attempt_evidence_for_tenant(&state, &scope.tenant_id).await?;
+    Ok(Json(json!({
+        "schema": scope.schema,
+        "scope": dashboard_scope_body(&scope),
+        "generated_at": now,
+        "routes": model_alias_route_observability_body(
+            &route_decisions,
+            &route_attempts,
+            &scope.scope_id
+        ),
+        "sources": {
+            "route_evidence": "durable"
+        }
+    })))
+}
+
+async fn get_model_alias_quality_observability(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(model_alias_id): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_MODEL_ALIAS_QUALITY_PATH,
+        &model_alias_id,
+        now,
+    )
+    .await?;
+    let alias = model_alias_for_actor(&state, &actor, &model_alias_id)?;
+    let scope = DashboardScopeInput {
+        schema: "gateway.admin.model_alias_quality.v1",
+        tenant_id: actor.tenant_id,
+        scope_kind: "model_alias",
+        scope_id: alias.model_alias_id,
+        organization_id: alias.organization_id,
+        project_id: alias.project_id,
+        project_member_id: None,
+        principal_id: None,
+    };
+    let usage_events = usage_events_for_analytics(&state, &scope.tenant_id).await?;
+    let route_decisions = route_decision_evidence_for_tenant(&state, &scope.tenant_id).await?;
+    let route_attempts = route_attempt_evidence_for_tenant(&state, &scope.tenant_id).await?;
+    Ok(Json(json!({
+        "schema": scope.schema,
+        "scope": dashboard_scope_body(&scope),
+        "generated_at": now,
+        "quality": model_alias_quality_observability_body(
+            &usage_events,
+            &route_decisions,
+            &route_attempts,
+            &scope
+        ),
+        "sources": {
+            "usage_events": "durable",
+            "route_evidence": "durable"
+        }
+    })))
+}
+
 async fn get_model_target_dashboard_overview(
     State(state): State<AppState>,
     Extension(actor): Extension<AuthenticatedActor>,
@@ -5257,6 +5682,152 @@ async fn get_model_target_dashboard_overview(
         )
         .await?,
     ))
+}
+
+async fn get_provider_endpoint_model_targets_observability(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(provider_endpoint_id): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_PROVIDER_ENDPOINT_OBSERVABILITY_MODEL_TARGETS_PATH,
+        &provider_endpoint_id,
+        now,
+    )
+    .await?;
+    let endpoint = provider_endpoint_for_actor(&state, &actor, &provider_endpoint_id)?;
+    let scope = DashboardScopeInput {
+        schema: "gateway.admin.observability.provider_endpoint_model_targets.v1",
+        tenant_id: actor.tenant_id,
+        scope_kind: "provider_endpoint",
+        scope_id: endpoint.provider_endpoint_id,
+        organization_id: endpoint.organization_id,
+        project_id: None,
+        project_member_id: None,
+        principal_id: None,
+    };
+    let usage_events = usage_events_for_analytics(&state, &scope.tenant_id).await?;
+    let route_decisions = route_decision_evidence_for_tenant(&state, &scope.tenant_id).await?;
+    let route_attempts = route_attempt_evidence_for_tenant(&state, &scope.tenant_id).await?;
+    Ok(Json(json!({
+        "schema": scope.schema,
+        "scope": dashboard_scope_body(&scope),
+        "generated_at": now,
+        "model_targets": provider_endpoint_model_target_rows(
+            &usage_events,
+            &route_decisions,
+            &route_attempts,
+            &scope.scope_id
+        ),
+        "sources": {
+            "usage_events": "durable",
+            "route_evidence": "durable"
+        }
+    })))
+}
+
+async fn get_provider_endpoint_observability_health(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(provider_endpoint_id): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_PROVIDER_ENDPOINT_OBSERVABILITY_HEALTH_PATH,
+        &provider_endpoint_id,
+        now,
+    )
+    .await?;
+    let endpoint = provider_endpoint_for_actor(&state, &actor, &provider_endpoint_id)?;
+    let route_decisions = route_decision_evidence_for_tenant(&state, &actor.tenant_id).await?;
+    let route_attempts = route_attempt_evidence_for_tenant(&state, &actor.tenant_id).await?;
+    Ok(Json(json!({
+        "schema": "gateway.admin.observability.provider_endpoint_health.v1",
+        "scope": provider_endpoint_observability_scope(&actor, &endpoint),
+        "generated_at": now,
+        "health": provider_endpoint_health_observability_body(
+            &state,
+            &endpoint,
+            &route_decisions,
+            &route_attempts,
+            now
+        ),
+        "sources": {
+            "hot_state": "redis_compatible_hot_state",
+            "route_evidence": "durable",
+            "metrics_backend_queried": false
+        }
+    })))
+}
+
+async fn get_provider_endpoint_observability_failover(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(provider_endpoint_id): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_PROVIDER_ENDPOINT_OBSERVABILITY_FAILOVER_PATH,
+        &provider_endpoint_id,
+        now,
+    )
+    .await?;
+    let endpoint = provider_endpoint_for_actor(&state, &actor, &provider_endpoint_id)?;
+    let route_decisions = route_decision_evidence_for_tenant(&state, &actor.tenant_id).await?;
+    let route_attempts = route_attempt_evidence_for_tenant(&state, &actor.tenant_id).await?;
+    Ok(Json(json!({
+        "schema": "gateway.admin.observability.provider_endpoint_failover.v1",
+        "scope": provider_endpoint_observability_scope(&actor, &endpoint),
+        "generated_at": now,
+        "failover": provider_endpoint_failover_observability_body(
+            &endpoint.provider_endpoint_id,
+            &route_decisions,
+            &route_attempts
+        ),
+        "sources": {
+            "route_evidence": "durable",
+            "metrics_backend_queried": false
+        }
+    })))
+}
+
+async fn get_provider_endpoint_observability_credentials(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(provider_endpoint_id): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_PROVIDER_ENDPOINT_OBSERVABILITY_CREDENTIALS_PATH,
+        &provider_endpoint_id,
+        now,
+    )
+    .await?;
+    let endpoint = provider_endpoint_for_actor(&state, &actor, &provider_endpoint_id)?;
+    Ok(Json(json!({
+        "schema": "gateway.admin.observability.provider_endpoint_credentials.v1",
+        "scope": provider_endpoint_observability_scope(&actor, &endpoint),
+        "generated_at": now,
+        "credentials": provider_endpoint_credentials_observability_body(&state, &endpoint),
+        "sources": {
+            "credential_metadata": "durable_safe_metadata",
+            "secret_material_included": false,
+            "metrics_backend_queried": false
+        }
+    })))
 }
 
 async fn get_provider_endpoint_observability_usage(
@@ -7594,6 +8165,7 @@ async fn create_model_target(
             upstream_credential_id: request.upstream_credential_id,
             protocol_family: request.protocol_family,
             upstream_model_id: request.upstream_model_id,
+            pricing_sku_id: request.pricing_sku_id,
             supports_streaming: request.supports_streaming,
             created_by: actor_principal_or_actor_id(&actor),
         },
@@ -7614,7 +8186,8 @@ async fn create_model_target(
                 "provider_endpoint_id": &target.provider_endpoint_id,
                 "upstream_credential_id": &target.upstream_credential_id,
                 "protocol_family": target.protocol_family.as_str(),
-                "upstream_model_id": &target.upstream_model_id
+                "upstream_model_id": &target.upstream_model_id,
+                "pricing_sku_id": &target.pricing_sku_id
             }),
             occurred_at: now,
         },
@@ -9284,8 +9857,7 @@ async fn otel_export_payload(
     config: &OtelExportConfigRecord,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Value> {
-    let counts = otel_export_counts(state, config).await?;
-    let time_unix_nano = otel_time_unix_nano(now);
+    let metrics = otel_export_metrics(state, config, now).await?;
     Ok(json!({
         "resourceMetrics": [{
             "resource": {
@@ -9296,29 +9868,18 @@ async fn otel_export_payload(
                     "name": SERVICE_NAME,
                     "version": env!("CARGO_PKG_VERSION")
                 },
-                "metrics": [
-                    otel_gauge_i64("gateway.export.metric_count", counts.metrics, time_unix_nano),
-                    otel_gauge_i64("gateway.ledger_bucket.count", counts.ledger_buckets, time_unix_nano),
-                    otel_gauge_i64("gateway.usage_event.count", counts.usage_events, time_unix_nano),
-                    otel_gauge_i64("gateway.route_decision.count", counts.route_decisions, time_unix_nano)
-                ]
+                "metrics": metrics
             }]
         }]
     }))
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct OtelExportCounts {
-    ledger_buckets: i64,
-    usage_events: i64,
-    route_decisions: i64,
-    metrics: i64,
-}
-
-async fn otel_export_counts(
+async fn otel_export_metrics(
     state: &AppState,
     config: &OtelExportConfigRecord,
-) -> Result<OtelExportCounts> {
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<Value>> {
+    let time_unix_nano = otel_time_unix_nano(now);
     let ledger_buckets = ledger_buckets_for_analytics(state, &config.tenant_id)
         .await?
         .into_iter()
@@ -9329,7 +9890,7 @@ async fn otel_export_counts(
                 bucket.project_id.as_deref(),
             )
         })
-        .fold(0_i64, |count, _| count.saturating_add(1));
+        .collect::<Vec<_>>();
     let usage_events = usage_events_for_analytics(state, &config.tenant_id)
         .await?
         .into_iter()
@@ -9340,7 +9901,7 @@ async fn otel_export_counts(
                 event.project_id.as_deref(),
             )
         })
-        .fold(0_i64, |count, _| count.saturating_add(1));
+        .collect::<Vec<_>>();
     let route_decisions = route_decision_evidence_for_tenant(state, &config.tenant_id)
         .await?
         .into_iter()
@@ -9351,17 +9912,214 @@ async fn otel_export_counts(
                 decision.project_id.as_deref(),
             )
         })
-        .fold(0_i64, |count, _| count.saturating_add(1));
-    let metrics = 6_i64
-        .saturating_add(ledger_buckets.saturating_mul(6))
-        .saturating_add(usage_events.saturating_mul(4))
-        .saturating_add(route_decisions.saturating_mul(3));
-    Ok(OtelExportCounts {
+        .collect::<Vec<_>>();
+    let route_attempts = route_attempt_evidence_for_tenant(state, &config.tenant_id).await?;
+    let mut metrics = vec![
+        otel_gauge_i64(
+            "gateway.ledger_bucket.count",
+            usize_to_i64(ledger_buckets.len()),
+            time_unix_nano,
+        ),
+        otel_gauge_i64(
+            "gateway.usage_event.count",
+            usize_to_i64(usage_events.len()),
+            time_unix_nano,
+        ),
+        otel_gauge_i64(
+            "gateway.route_decision.count",
+            usize_to_i64(route_decisions.len()),
+            time_unix_nano,
+        ),
+    ];
+    metrics.extend(otel_provider_metrics(
+        &ledger_buckets,
+        &usage_events,
+        &route_decisions,
+        &route_attempts,
+        time_unix_nano,
+    ));
+    metrics.insert(
+        0,
+        otel_gauge_i64(
+            "gateway.export.metric_count",
+            usize_to_i64(metrics.len().saturating_add(1)),
+            time_unix_nano,
+        ),
+    );
+    Ok(metrics)
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct OtelProviderMetricRollup {
+    request_count: i64,
+    success_count: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    estimated_cost_micros: i64,
+    latency_sum_ms: i64,
+    latency_sample_count: i64,
+    ttft_sum_ms: i64,
+    ttft_sample_count: i64,
+    attempt_count: i64,
+    failed_attempt_count: i64,
+}
+
+fn otel_provider_metrics(
+    ledger_buckets: &[LedgerBucketRecord],
+    usage_events: &[UsageEventRecord],
+    route_decisions: &[RouteDecisionRecord],
+    route_attempts: &[RouteAttemptRecord],
+    time_unix_nano: i64,
+) -> Vec<Value> {
+    otel_provider_rollups(
         ledger_buckets,
         usage_events,
         route_decisions,
-        metrics,
+        route_attempts,
+    )
+    .into_iter()
+    .flat_map(|(provider_endpoint_id, rollup)| {
+        otel_provider_metric_points(&provider_endpoint_id, &rollup, time_unix_nano)
     })
+    .collect()
+}
+
+fn otel_provider_rollups(
+    ledger_buckets: &[LedgerBucketRecord],
+    usage_events: &[UsageEventRecord],
+    route_decisions: &[RouteDecisionRecord],
+    route_attempts: &[RouteAttemptRecord],
+) -> BTreeMap<String, OtelProviderMetricRollup> {
+    let mut rollups: BTreeMap<String, OtelProviderMetricRollup> = BTreeMap::new();
+    for bucket in ledger_buckets
+        .iter()
+        .filter(|bucket| bucket.bucket_kind == "event")
+        .filter_map(|bucket| {
+            bucket
+                .provider_endpoint_id
+                .as_ref()
+                .map(|provider_endpoint_id| (provider_endpoint_id, bucket))
+        })
+    {
+        let (provider_endpoint_id, bucket) = bucket;
+        let rollup = rollups.entry(provider_endpoint_id.clone()).or_default();
+        rollup.request_count = rollup.request_count.saturating_add(bucket.request_count);
+        rollup.success_count = rollup.success_count.saturating_add(bucket.success_count);
+        rollup.input_tokens = rollup.input_tokens.saturating_add(bucket.input_tokens);
+        rollup.output_tokens = rollup.output_tokens.saturating_add(bucket.output_tokens);
+        rollup.estimated_cost_micros = rollup
+            .estimated_cost_micros
+            .saturating_add(bucket.estimated_cost_micros);
+    }
+    for event in usage_events.iter().filter_map(|event| {
+        event
+            .provider_endpoint_id
+            .as_ref()
+            .map(|provider_endpoint_id| (provider_endpoint_id, event))
+    }) {
+        let (provider_endpoint_id, event) = event;
+        let rollup = rollups.entry(provider_endpoint_id.clone()).or_default();
+        if let Some(latency_ms) = event.latency_ms {
+            rollup.latency_sum_ms = rollup.latency_sum_ms.saturating_add(latency_ms);
+            rollup.latency_sample_count = rollup.latency_sample_count.saturating_add(1);
+        }
+        if let Some(ttft_ms) = event.time_to_first_token_ms {
+            rollup.ttft_sum_ms = rollup.ttft_sum_ms.saturating_add(ttft_ms);
+            rollup.ttft_sample_count = rollup.ttft_sample_count.saturating_add(1);
+        }
+    }
+    let scoped_decision_ids = route_decisions
+        .iter()
+        .map(|decision| decision.route_decision_id.as_str())
+        .collect::<HashSet<_>>();
+    for attempt in route_attempts
+        .iter()
+        .filter(|attempt| scoped_decision_ids.contains(attempt.route_decision_id.as_str()))
+    {
+        let rollup = rollups
+            .entry(attempt.provider_endpoint_id.clone())
+            .or_default();
+        rollup.attempt_count = rollup.attempt_count.saturating_add(1);
+        if attempt.status != RouteAttemptStatus::Completed {
+            rollup.failed_attempt_count = rollup.failed_attempt_count.saturating_add(1);
+        }
+    }
+    rollups
+}
+
+fn otel_provider_metric_points(
+    provider_endpoint_id: &str,
+    rollup: &OtelProviderMetricRollup,
+    time_unix_nano: i64,
+) -> [Value; 9] {
+    let attributes = [otel_string_attribute(
+        "provider_endpoint_id",
+        provider_endpoint_id,
+    )];
+    [
+        otel_gauge_i64_with_attributes(
+            "gateway.provider.request.count",
+            rollup.request_count,
+            time_unix_nano,
+            &attributes,
+        ),
+        otel_gauge_i64_with_attributes(
+            "gateway.provider.success.count",
+            rollup.success_count,
+            time_unix_nano,
+            &attributes,
+        ),
+        otel_gauge_i64_with_attributes(
+            "gateway.provider.error.count",
+            rollup.failed_attempt_count,
+            time_unix_nano,
+            &attributes,
+        ),
+        otel_gauge_i64_with_attributes(
+            "gateway.provider.attempt.count",
+            rollup.attempt_count,
+            time_unix_nano,
+            &attributes,
+        ),
+        otel_gauge_i64_with_attributes(
+            "gateway.provider.latency_ms.avg",
+            average_i64(rollup.latency_sum_ms, rollup.latency_sample_count),
+            time_unix_nano,
+            &attributes,
+        ),
+        otel_gauge_i64_with_attributes(
+            "gateway.provider.ttft_ms.avg",
+            average_i64(rollup.ttft_sum_ms, rollup.ttft_sample_count),
+            time_unix_nano,
+            &attributes,
+        ),
+        otel_gauge_i64_with_attributes(
+            "gateway.provider.input_tokens.sum",
+            rollup.input_tokens,
+            time_unix_nano,
+            &attributes,
+        ),
+        otel_gauge_i64_with_attributes(
+            "gateway.provider.output_tokens.sum",
+            rollup.output_tokens,
+            time_unix_nano,
+            &attributes,
+        ),
+        otel_gauge_i64_with_attributes(
+            "gateway.provider.estimated_cost_micros.sum",
+            rollup.estimated_cost_micros,
+            time_unix_nano,
+            &attributes,
+        ),
+    ]
+}
+
+const fn average_i64(sum: i64, count: i64) -> i64 {
+    if count == 0 {
+        0
+    } else {
+        sum / count
+    }
 }
 
 fn otel_resource_attributes(config: &OtelExportConfigRecord) -> Vec<Value> {
@@ -9389,13 +10147,23 @@ fn otel_string_attribute(key: &str, value: &str) -> Value {
 }
 
 fn otel_gauge_i64(name: &str, value: i64, time_unix_nano: i64) -> Value {
+    otel_gauge_i64_with_attributes(name, value, time_unix_nano, &[])
+}
+
+fn otel_gauge_i64_with_attributes(
+    name: &str,
+    value: i64,
+    time_unix_nano: i64,
+    attributes: &[Value],
+) -> Value {
     json!({
         "name": name,
         "unit": "1",
         "gauge": {
             "dataPoints": [{
                 "timeUnixNano": time_unix_nano.to_string(),
-                "asInt": value.to_string()
+                "asInt": value.to_string(),
+                "attributes": attributes
             }]
         }
     })
@@ -9409,7 +10177,11 @@ async fn otel_export_metric_count(
     state: &AppState,
     config: &OtelExportConfigRecord,
 ) -> Result<i64> {
-    Ok(otel_export_counts(state, config).await?.metrics)
+    Ok(usize_to_i64(
+        otel_export_metrics(state, config, chrono::Utc::now())
+            .await?
+            .len(),
+    ))
 }
 
 fn otel_config_scope_matches(
@@ -12084,36 +12856,60 @@ async fn model_ingress(
             return Err(error);
         }
     };
-    if let (Some(route_decision_id), Some(selected)) = (
-        route_target.route_decision_id.as_deref(),
-        route_target.selected_route.as_ref(),
-    ) {
-        let attempt_ended_at = chrono::Utc::now();
-        record_completed_route_attempt_evidence(
-            &state,
-            route_decision_id,
-            selected,
-            attempt_started_at,
-            attempt_ended_at,
-        )
-        .await?;
-        record_terminal_usage_event(
-            &state,
-            &actor,
-            &TerminalUsageInput {
-                replay_case,
-                route_decision_id,
-                selected,
-                requested_model: &requested_model,
-                response: &response,
-                started_at: attempt_started_at,
-                ended_at: attempt_ended_at,
-            },
-        )
-        .await?;
-    }
+    record_successful_runtime_attempt(
+        &state,
+        &actor,
+        replay_case,
+        &requested_model,
+        &route_target,
+        &response,
+        attempt_started_at,
+    )
+    .await?;
     release_runtime_policy_reservations(&state, &preflight);
     Ok(Json(response))
+}
+
+async fn record_successful_runtime_attempt(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    replay_case: &GatewayReplayCase,
+    requested_model: &str,
+    route_target: &RuntimeRouteTarget,
+    response: &RuntimeIngressResponse,
+    attempt_started_at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let (Some(route_decision_id), Some(selected)) = (
+        route_target.route_decision_id.as_deref(),
+        route_target.selected_route.as_ref(),
+    ) else {
+        return Ok(());
+    };
+    let attempt_ended_at = chrono::Utc::now();
+    record_completed_route_attempt_evidence(
+        state,
+        route_decision_id,
+        selected,
+        attempt_started_at,
+        attempt_ended_at,
+    )
+    .await?;
+    record_terminal_usage_event(
+        state,
+        actor,
+        &TerminalUsageInput {
+            replay_case,
+            route_decision_id,
+            selected,
+            requested_model,
+            upstream_model_id: &route_target.upstream_model_id,
+            pricing_sku_id: route_target.pricing_sku_id.as_deref(),
+            response,
+            started_at: attempt_started_at,
+            ended_at: attempt_ended_at,
+        },
+    )
+    .await
 }
 
 async fn authorize_runtime_provider_target(
@@ -12402,6 +13198,8 @@ struct TerminalUsageInput<'a> {
     route_decision_id: &'a str,
     selected: &'a SelectedRouteEvidence,
     requested_model: &'a str,
+    upstream_model_id: &'a str,
+    pricing_sku_id: Option<&'a str>,
     response: &'a RuntimeIngressResponse,
     started_at: chrono::DateTime<chrono::Utc>,
     ended_at: chrono::DateTime<chrono::Utc>,
@@ -12457,7 +13255,7 @@ async fn record_terminal_usage_event(
         });
     let service_account_id =
         matches!(actor.actor_kind, ActorKind::ServiceAccount).then(|| actor.actor_id.clone());
-    let cost_payload = unpriced_cost_payload();
+    let cost_payload = runtime_cost_payload(state, actor, input, &usage_payload);
     let record = UsageEventRecord {
         usage_event_id: new_prefixed_id("use"),
         tenant_id: actor.tenant_id.clone(),
@@ -12497,11 +13295,239 @@ fn unpriced_cost_payload() -> Value {
     json!({
         "currency": "USD",
         "unit": "micro_usd",
+        "input_cost": 0,
+        "output_cost": 0,
+        "cache_read_cost": 0,
+        "cache_write_cost": 0,
+        "reasoning_cost": 0,
+        "media_cost": 0,
+        "request_cost": 0,
         "total_cost": 0,
         "confidence": "unpriced",
+        "pricing_sku_id": null,
         "pricing_version": "unpriced",
+        "rounding_mode": "none",
         "diagnostics": ["pricing_resolution_not_connected"]
     })
+}
+
+fn runtime_cost_payload(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    input: &TerminalUsageInput<'_>,
+    usage_payload: &Value,
+) -> Value {
+    let Some(sku) = resolve_runtime_pricing_sku(
+        state,
+        actor,
+        input.upstream_model_id,
+        &input.selected.provider_endpoint_id,
+        input.pricing_sku_id,
+        input.ended_at,
+    ) else {
+        return unpriced_cost_payload();
+    };
+    cost_payload_from_pricing_sku(&sku, usage_payload)
+}
+
+fn resolve_runtime_pricing_sku(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    upstream_model_id: &str,
+    provider_endpoint_id: &str,
+    explicit_pricing_sku_id: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<PricingSkuRecord> {
+    if let Some(pricing_sku_id) = explicit_pricing_sku_id {
+        return state
+            .store
+            .pricing_sku(pricing_sku_id)
+            .filter(|sku| runtime_pricing_sku_is_available(sku, actor, now));
+    }
+    state
+        .store
+        .pricing_skus_for_tenant(&actor.tenant_id)
+        .into_iter()
+        .filter(|sku| {
+            runtime_pricing_sku_is_available(sku, actor, now)
+                && pricing_patterns_match(&sku.model_id_patterns, upstream_model_id)
+                && (sku.provider_endpoint_patterns.is_empty()
+                    || pricing_patterns_match(
+                        &sku.provider_endpoint_patterns,
+                        provider_endpoint_id,
+                    ))
+        })
+        .min_by(|left, right| {
+            pricing_sku_specificity(right)
+                .cmp(&pricing_sku_specificity(left))
+                .then_with(|| left.name.cmp(&right.name))
+                .then_with(|| left.pricing_sku_id.cmp(&right.pricing_sku_id))
+        })
+}
+
+fn runtime_pricing_sku_is_available(
+    sku: &PricingSkuRecord,
+    actor: &AuthenticatedActor,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    sku.tenant_id == actor.tenant_id
+        && sku.status == ResourceStatus::Active
+        && sku
+            .organization_id
+            .as_ref()
+            .is_none_or(|organization_id| Some(organization_id) == actor.organization_id.as_ref())
+        && sku.effective_from <= now
+        && sku.effective_until.is_none_or(|until| until > now)
+}
+
+fn pricing_sku_specificity(sku: &PricingSkuRecord) -> usize {
+    sku.model_id_patterns
+        .iter()
+        .chain(sku.provider_endpoint_patterns.iter())
+        .map(|pattern| pattern.chars().filter(|ch| *ch != '*').count())
+        .sum()
+}
+
+fn pricing_patterns_match(patterns: &[String], value: &str) -> bool {
+    patterns
+        .iter()
+        .any(|pattern| pricing_pattern_matches(pattern.trim(), value))
+}
+
+fn pricing_pattern_matches(pattern: &str, value: &str) -> bool {
+    if pattern == "*" || pattern == value {
+        return true;
+    }
+    let Some(star_index) = pattern.find('*') else {
+        return false;
+    };
+    let (prefix, suffix_with_star) = pattern.split_at(star_index);
+    let suffix = &suffix_with_star[1..];
+    value.starts_with(prefix) && value.ends_with(suffix)
+}
+
+fn cost_payload_from_pricing_sku(sku: &PricingSkuRecord, usage_payload: &Value) -> Value {
+    let document = &sku.pricing_document;
+    let rounding_mode = document
+        .get("rounding")
+        .and_then(Value::as_str)
+        .unwrap_or("ceil_per_event");
+    let token_prices = document.get("tokens").unwrap_or(&Value::Null);
+    let input_cost = token_component_cost(
+        usage_payload,
+        token_prices,
+        "input_tokens",
+        "input_per_million",
+        rounding_mode,
+    );
+    let output_cost = token_component_cost(
+        usage_payload,
+        token_prices,
+        "output_tokens",
+        "output_per_million",
+        rounding_mode,
+    );
+    let cache_read_cost = token_component_cost(
+        usage_payload,
+        token_prices,
+        "cache_read_tokens",
+        "cache_read_per_million",
+        rounding_mode,
+    );
+    let cache_write_cost = token_component_cost(
+        usage_payload,
+        token_prices,
+        "cache_write_tokens",
+        "cache_write_per_million",
+        rounding_mode,
+    )
+    .saturating_add(token_component_cost(
+        usage_payload,
+        token_prices,
+        "cache_write_5m_tokens",
+        "cache_write_5m_per_million",
+        rounding_mode,
+    ))
+    .saturating_add(token_component_cost(
+        usage_payload,
+        token_prices,
+        "cache_write_1h_tokens",
+        "cache_write_1h_per_million",
+        rounding_mode,
+    ));
+    let reasoning_cost = token_component_cost(
+        usage_payload,
+        token_prices,
+        "reasoning_tokens",
+        "reasoning_per_million",
+        rounding_mode,
+    );
+    let media_cost = 0;
+    let request_cost = document
+        .get("flat_request_cost")
+        .and_then(Value::as_i64)
+        .unwrap_or_default()
+        .max(0);
+    let total_cost = input_cost
+        .saturating_add(output_cost)
+        .saturating_add(cache_read_cost)
+        .saturating_add(cache_write_cost)
+        .saturating_add(reasoning_cost)
+        .saturating_add(media_cost)
+        .saturating_add(request_cost);
+    json!({
+        "currency": &sku.currency,
+        "unit": &sku.unit,
+        "input_cost": input_cost,
+        "output_cost": output_cost,
+        "cache_read_cost": cache_read_cost,
+        "cache_write_cost": cache_write_cost,
+        "reasoning_cost": reasoning_cost,
+        "media_cost": media_cost,
+        "request_cost": request_cost,
+        "total_cost": total_cost,
+        "confidence": "estimated",
+        "pricing_sku_id": &sku.pricing_sku_id,
+        "pricing_version": sku.pricing_version.to_string(),
+        "rounding_mode": rounding_mode,
+        "diagnostics": []
+    })
+}
+
+fn token_component_cost(
+    usage_payload: &Value,
+    token_prices: &Value,
+    usage_key: &str,
+    price_key: &str,
+    rounding_mode: &str,
+) -> i64 {
+    let units = usage_payload
+        .get(usage_key)
+        .and_then(Value::as_i64)
+        .unwrap_or_default()
+        .max(0);
+    let price_per_million = token_prices
+        .get(price_key)
+        .and_then(Value::as_i64)
+        .unwrap_or_default()
+        .max(0);
+    fixed_per_million_cost(units, price_per_million, rounding_mode)
+}
+
+fn fixed_per_million_cost(units: i64, price_per_million: i64, rounding_mode: &str) -> i64 {
+    let raw = i128::from(units).saturating_mul(i128::from(price_per_million));
+    let divisor = 1_000_000_i128;
+    let value = match rounding_mode {
+        "floor_per_event" => raw / divisor,
+        _ => {
+            if raw == 0 {
+                0
+            } else {
+                (raw + divisor - 1) / divisor
+            }
+        }
+    };
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 fn finalize_runtime_policy_terminal(
@@ -16419,6 +17445,26 @@ fn model_target_validation_errors(
             )),
         }
     }
+    if let Some(pricing_sku_id) = request.pricing_sku_id.as_deref() {
+        match state.store.pricing_sku(pricing_sku_id) {
+            Some(pricing_sku) if pricing_sku.tenant_id == actor.tenant_id => {
+                if !pricing_sku.status.is_active() {
+                    errors.push(validation_error("pricing_sku_id", "inactive"));
+                }
+                if pricing_sku
+                    .organization_id
+                    .as_ref()
+                    .is_some_and(|organization_id| {
+                        Some(organization_id) != request.organization_id.as_ref()
+                    })
+                {
+                    errors.push(validation_error("pricing_sku_id", "organization_mismatch"));
+                }
+            }
+            Some(_) => errors.push(validation_error("pricing_sku_id", "wrong_tenant")),
+            None => errors.push(validation_error("pricing_sku_id", "unknown_pricing_sku")),
+        }
+    }
     if let Some(organization_id) = request.organization_id.as_deref() {
         if organization_for_actor(state, actor, organization_id).is_err() {
             errors.push(validation_error("organization_id", "unknown_organization"));
@@ -19190,6 +20236,7 @@ fn model_target_resource_body(target: &ModelTargetRecord) -> Value {
         "upstream_credential_id": &target.upstream_credential_id,
         "protocol_family": target.protocol_family.as_str(),
         "upstream_model_id": &target.upstream_model_id,
+        "pricing_sku_id": &target.pricing_sku_id,
         "supports_streaming": target.supports_streaming,
         "version": target.resource_version,
         "status": &target.status,
@@ -20951,6 +21998,792 @@ fn realtime_budget_summary(state: &AppState, tenant_id: &str) -> Value {
     })
 }
 
+fn realtime_quota_summary(state: &AppState, tenant_id: &str) -> Value {
+    let policies = state
+        .store
+        .quota_policies_for_tenant(tenant_id)
+        .into_iter()
+        .filter(|policy| policy.status != ResourceStatus::Deleted)
+        .collect::<Vec<_>>();
+    let active_policy_count = policies
+        .iter()
+        .filter(|policy| policy.status == ResourceStatus::Active)
+        .count();
+    let mut counter_kind_counts = BTreeMap::<String, usize>::new();
+    let mut loss_behavior_counts = BTreeMap::<String, usize>::new();
+    for policy in &policies {
+        *counter_kind_counts
+            .entry(policy.counter_kind.clone())
+            .or_default() += 1;
+        *loss_behavior_counts
+            .entry(policy.loss_behavior.clone())
+            .or_default() += 1;
+    }
+    let hot_state_status = if active_policy_count == 0 {
+        "unavailable"
+    } else if state.store.runtime_policy_hot_state_available() {
+        "available"
+    } else {
+        "unavailable"
+    };
+    let source = if active_policy_count == 0 {
+        "policy_config_only"
+    } else {
+        "policy_config_and_runtime_hot_state"
+    };
+    json!({
+        "configured_policy_count": policies.len(),
+        "active_policy_count": active_policy_count,
+        "hot_state_status": hot_state_status,
+        "source": source,
+        "counter_kind_counts": counter_kind_counts,
+        "loss_behavior_counts": loss_behavior_counts,
+        "policies": policies
+            .iter()
+            .map(|policy| {
+                json!({
+                    "quota_policy_id": &policy.quota_policy_id,
+                    "scope_kind": &policy.scope_kind,
+                    "scope_id": &policy.scope_id,
+                    "counter_kind": &policy.counter_kind,
+                    "limit": policy.limit,
+                    "burst_limit": policy.burst_limit,
+                    "window": &policy.window,
+                    "increment_source": &policy.increment_source,
+                    "loss_behavior": &policy.loss_behavior,
+                    "status": policy.status.as_str()
+                })
+            })
+            .collect::<Vec<_>>()
+    })
+}
+
+fn budget_dashboard_rows(
+    state: &AppState,
+    scope: &DashboardScopeInput,
+    ledger_buckets: &[LedgerBucketRecord],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<Value> {
+    state
+        .store
+        .budget_policies_for_tenant(&scope.tenant_id)
+        .into_iter()
+        .filter(|policy| policy.status != ResourceStatus::Deleted)
+        .filter(|policy| policy_matches_dashboard_scope(policy, scope))
+        .map(|policy| budget_policy_dashboard_body(state, &policy, ledger_buckets, now))
+        .collect()
+}
+
+fn budget_policy_dashboard_body(
+    state: &AppState,
+    policy: &BudgetPolicyRecord,
+    ledger_buckets: &[LedgerBucketRecord],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Value {
+    let current_value = ledger_buckets
+        .iter()
+        .filter(|bucket| runtime_budget_bucket_matches(policy, bucket, now))
+        .map(|bucket| runtime_budget_bucket_value(policy, bucket))
+        .sum::<i64>();
+    json!({
+        "budget_policy_id": &policy.budget_policy_id,
+        "scope_kind": &policy.scope_kind,
+        "scope_id": &policy.scope_id,
+        "organization_id": &policy.organization_id,
+        "project_id": &policy.project_id,
+        "period": &policy.period,
+        "limit_kind": &policy.limit_kind,
+        "currency": &policy.currency,
+        "hard_limit": policy.hard_limit,
+        "soft_limit": policy.soft_limit,
+        "current_value": current_value,
+        "hard_remaining": policy
+            .hard_limit
+            .map(|limit| limit.saturating_sub(current_value)),
+        "soft_remaining": policy
+            .soft_limit
+            .map(|limit| limit.saturating_sub(current_value)),
+        "consistency_mode": &policy.consistency_mode,
+        "overage_mode": &policy.overage_mode,
+        "status": policy.status.as_str(),
+        "source": {
+            "current_value": "durable_ledger_buckets",
+            "hot_state_status": if state.store.runtime_policy_hot_state_available() {
+                "available"
+            } else {
+                "unavailable"
+            },
+            "metrics_backend_queried": false
+        }
+    })
+}
+
+fn budget_policy_timeseries_points(
+    policy: &BudgetPolicyRecord,
+    ledger_buckets: &[LedgerBucketRecord],
+    bucket_kind: &str,
+) -> Vec<Value> {
+    let mut points = BTreeMap::<chrono::DateTime<chrono::Utc>, i64>::new();
+    for bucket in ledger_buckets
+        .iter()
+        .filter(|bucket| bucket.bucket_kind == bucket_kind)
+        .filter(|bucket| budget_policy_bucket_matches_scope(policy, bucket))
+        .filter(|bucket| runtime_budget_bucket_currency_matches(policy, bucket))
+    {
+        *points.entry(bucket.bucket_start).or_default() +=
+            runtime_budget_bucket_value(policy, bucket);
+    }
+    points
+        .into_iter()
+        .map(|(bucket_start, value)| {
+            json!({
+                "bucket_start": bucket_start,
+                "value": value,
+                "hard_remaining": policy.hard_limit.map(|limit| limit.saturating_sub(value)),
+                "soft_remaining": policy.soft_limit.map(|limit| limit.saturating_sub(value))
+            })
+        })
+        .collect()
+}
+
+fn quota_dashboard_rows(
+    state: &AppState,
+    scope: &DashboardScopeInput,
+    ledger_buckets: &[LedgerBucketRecord],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<Value> {
+    state
+        .store
+        .quota_policies_for_tenant(&scope.tenant_id)
+        .into_iter()
+        .filter(|policy| policy.status != ResourceStatus::Deleted)
+        .filter(|policy| policy_matches_dashboard_scope(policy, scope))
+        .map(|policy| quota_policy_dashboard_body(state, &policy, ledger_buckets, now))
+        .collect()
+}
+
+fn quota_policy_dashboard_body(
+    state: &AppState,
+    policy: &QuotaPolicyRecord,
+    ledger_buckets: &[LedgerBucketRecord],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Value {
+    let current_value = if runtime_quota_policy_needs_hot_state(policy) {
+        runtime_quota_current_value(state, policy, now)
+    } else {
+        quota_policy_ledger_value(policy, ledger_buckets)
+    };
+    json!({
+        "quota_policy_id": &policy.quota_policy_id,
+        "scope_kind": &policy.scope_kind,
+        "scope_id": &policy.scope_id,
+        "organization_id": &policy.organization_id,
+        "project_id": &policy.project_id,
+        "counter_kind": &policy.counter_kind,
+        "limit": policy.limit,
+        "burst_limit": policy.burst_limit,
+        "window": &policy.window,
+        "increment_source": &policy.increment_source,
+        "loss_behavior": &policy.loss_behavior,
+        "current_value": current_value,
+        "remaining": policy.limit.saturating_sub(current_value),
+        "status": policy.status.as_str(),
+        "source": {
+            "current_value": if runtime_quota_policy_needs_hot_state(policy) {
+                "redis_compatible_hot_state"
+            } else {
+                "durable_ledger_buckets"
+            },
+            "history": quota_policy_history_source(policy),
+            "metrics_backend_queried": false
+        }
+    })
+}
+
+fn quota_policy_timeseries_points(
+    policy: &QuotaPolicyRecord,
+    ledger_buckets: &[LedgerBucketRecord],
+    bucket_kind: &str,
+) -> Vec<Value> {
+    let mut points = BTreeMap::<chrono::DateTime<chrono::Utc>, i64>::new();
+    for bucket in ledger_buckets
+        .iter()
+        .filter(|bucket| bucket.bucket_kind == bucket_kind)
+        .filter(|bucket| quota_policy_bucket_matches_scope(policy, bucket))
+    {
+        let value = quota_policy_bucket_value(policy, bucket);
+        if value > 0 {
+            *points.entry(bucket.bucket_start).or_default() += value;
+        }
+    }
+    points
+        .into_iter()
+        .map(|(bucket_start, value)| {
+            json!({
+                "bucket_start": bucket_start,
+                "value": value,
+                "remaining": policy.limit.saturating_sub(value)
+            })
+        })
+        .collect()
+}
+
+fn quota_policy_ledger_value(
+    policy: &QuotaPolicyRecord,
+    ledger_buckets: &[LedgerBucketRecord],
+) -> i64 {
+    ledger_buckets
+        .iter()
+        .filter(|bucket| bucket.bucket_kind == "event")
+        .filter(|bucket| quota_policy_bucket_matches_scope(policy, bucket))
+        .map(|bucket| quota_policy_bucket_value(policy, bucket))
+        .sum()
+}
+
+fn quota_policy_bucket_value(policy: &QuotaPolicyRecord, bucket: &LedgerBucketRecord) -> i64 {
+    match policy.counter_kind.as_str() {
+        "request_rate" => bucket.request_count,
+        "token_actual_rate" => bucket
+            .input_tokens
+            .saturating_add(bucket.output_tokens)
+            .saturating_add(bucket.reasoning_tokens),
+        _ => 0,
+    }
+}
+
+fn quota_policy_history_source(policy: &QuotaPolicyRecord) -> &'static str {
+    match policy.counter_kind.as_str() {
+        "request_rate" | "token_actual_rate" => "durable_ledger_buckets",
+        _ => "redis_compatible_hot_state_current_only",
+    }
+}
+
+fn policy_matches_dashboard_scope(
+    policy: &impl ScopedPolicyRecord,
+    scope: &DashboardScopeInput,
+) -> bool {
+    if policy.tenant_id() != scope.tenant_id {
+        return false;
+    }
+    match scope.scope_kind {
+        "tenant" => true,
+        "organization" => {
+            policy.scope_kind() == "organization" && policy.scope_id() == scope.scope_id
+                || policy.organization_id() == scope.organization_id.as_deref()
+        }
+        "project" => {
+            policy.scope_kind() == "project" && policy.scope_id() == scope.scope_id
+                || policy.project_id() == scope.project_id.as_deref()
+        }
+        _ => policy.scope_kind() == scope.scope_kind && policy.scope_id() == scope.scope_id,
+    }
+}
+
+fn budget_policy_bucket_matches_scope(
+    policy: &BudgetPolicyRecord,
+    bucket: &LedgerBucketRecord,
+) -> bool {
+    match policy.scope_kind.as_str() {
+        "tenant" => bucket.tenant_id == policy.scope_id,
+        "organization" => bucket.organization_id.as_deref() == Some(policy.scope_id.as_str()),
+        "project" => bucket.project_id.as_deref() == Some(policy.scope_id.as_str()),
+        "credential" => bucket.upstream_credential_id.as_deref() == Some(policy.scope_id.as_str()),
+        "alias" => bucket.model_alias_id.as_deref() == Some(policy.scope_id.as_str()),
+        "group" => bucket.routing_group_id.as_deref() == Some(policy.scope_id.as_str()),
+        "endpoint" => bucket.provider_endpoint_id.as_deref() == Some(policy.scope_id.as_str()),
+        "target" => bucket.model_target_id.as_deref() == Some(policy.scope_id.as_str()),
+        _ => false,
+    }
+}
+
+fn quota_policy_bucket_matches_scope(
+    policy: &QuotaPolicyRecord,
+    bucket: &LedgerBucketRecord,
+) -> bool {
+    match policy.scope_kind.as_str() {
+        "tenant" => bucket.tenant_id == policy.scope_id,
+        "organization" => bucket.organization_id.as_deref() == Some(policy.scope_id.as_str()),
+        "project" => bucket.project_id.as_deref() == Some(policy.scope_id.as_str()),
+        "credential" => bucket.upstream_credential_id.as_deref() == Some(policy.scope_id.as_str()),
+        "alias" => bucket.model_alias_id.as_deref() == Some(policy.scope_id.as_str()),
+        "endpoint" => bucket.provider_endpoint_id.as_deref() == Some(policy.scope_id.as_str()),
+        "protocol_family" => bucket
+            .protocol_family
+            .as_ref()
+            .is_some_and(|family| family.as_str() == policy.scope_id),
+        _ => false,
+    }
+}
+
+trait ScopedPolicyRecord {
+    fn tenant_id(&self) -> &str;
+    fn scope_kind(&self) -> &str;
+    fn scope_id(&self) -> &str;
+    fn organization_id(&self) -> Option<&str>;
+    fn project_id(&self) -> Option<&str>;
+}
+
+impl ScopedPolicyRecord for BudgetPolicyRecord {
+    fn tenant_id(&self) -> &str {
+        &self.tenant_id
+    }
+
+    fn scope_kind(&self) -> &str {
+        &self.scope_kind
+    }
+
+    fn scope_id(&self) -> &str {
+        &self.scope_id
+    }
+
+    fn organization_id(&self) -> Option<&str> {
+        self.organization_id.as_deref()
+    }
+
+    fn project_id(&self) -> Option<&str> {
+        self.project_id.as_deref()
+    }
+}
+
+impl ScopedPolicyRecord for QuotaPolicyRecord {
+    fn tenant_id(&self) -> &str {
+        &self.tenant_id
+    }
+
+    fn scope_kind(&self) -> &str {
+        &self.scope_kind
+    }
+
+    fn scope_id(&self) -> &str {
+        &self.scope_id
+    }
+
+    fn organization_id(&self) -> Option<&str> {
+        self.organization_id.as_deref()
+    }
+
+    fn project_id(&self) -> Option<&str> {
+        self.project_id.as_deref()
+    }
+}
+
+fn provider_endpoint_observability_scope(
+    actor: &AuthenticatedActor,
+    endpoint: &ProviderEndpointRecord,
+) -> Value {
+    json!({
+        "kind": "provider_endpoint",
+        "id": &endpoint.provider_endpoint_id,
+        "tenant_id": &actor.tenant_id,
+        "organization_id": &endpoint.organization_id,
+        "provider_kind": &endpoint.provider_kind
+    })
+}
+
+fn provider_endpoint_health_observability_body(
+    state: &AppState,
+    endpoint: &ProviderEndpointRecord,
+    route_decisions: &[RouteDecisionRecord],
+    route_attempts: &[RouteAttemptRecord],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Value {
+    let config_version = state
+        .store
+        .latest_published_snapshot_for_tenant(&endpoint.tenant_id)
+        .as_ref()
+        .map(|snapshot| snapshot.version);
+    let health_state = state.store.endpoint_health_state(
+        &endpoint.tenant_id,
+        &endpoint.provider_endpoint_id,
+        config_version,
+        now,
+    );
+    let drained = state.store.endpoint_is_drained(
+        &endpoint.tenant_id,
+        &endpoint.provider_endpoint_id,
+        config_version,
+        now,
+    );
+    let recent_attempts = route_attempts
+        .iter()
+        .filter(|attempt| attempt.provider_endpoint_id == endpoint.provider_endpoint_id)
+        .collect::<Vec<_>>();
+    let recent_failed_attempts = recent_attempts
+        .iter()
+        .filter(|attempt| attempt.status != RouteAttemptStatus::Completed)
+        .count();
+    let latest_attempt_at = recent_attempts
+        .iter()
+        .map(|attempt| attempt.ended_at.unwrap_or(attempt.started_at))
+        .max();
+    let failed_decision_ids = recent_attempts
+        .iter()
+        .filter(|attempt| attempt.status != RouteAttemptStatus::Completed)
+        .map(|attempt| attempt.route_decision_id.as_str())
+        .collect::<HashSet<_>>();
+    let recent_error_reasons = route_decisions
+        .iter()
+        .filter(|decision| failed_decision_ids.contains(decision.route_decision_id.as_str()))
+        .map(|decision| decision.reason.clone())
+        .collect::<BTreeSet<_>>();
+    json!({
+        "provider_endpoint_id": &endpoint.provider_endpoint_id,
+        "provider_kind": &endpoint.provider_kind,
+        "resource_status": endpoint.status.as_str(),
+        "health_state": health_state.as_str(),
+        "drained": drained,
+        "config_version": config_version,
+        "attempt_count": recent_attempts.len(),
+        "failed_attempt_count": recent_failed_attempts,
+        "latest_attempt_at": latest_attempt_at,
+        "recent_error_reasons": recent_error_reasons,
+        "breaker": {
+            "state": if health_state == EndpointHealthState::Blocked {
+                "open"
+            } else if matches!(health_state, EndpointHealthState::Unhealthy | EndpointHealthState::Degraded) {
+                "degraded"
+            } else {
+                "closed"
+            },
+            "source": "redis_compatible_hot_state"
+        },
+        "source": {
+            "health": "redis_compatible_hot_state",
+            "attempts": "durable_route_evidence"
+        }
+    })
+}
+
+fn provider_endpoint_failover_observability_body(
+    provider_endpoint_id: &str,
+    route_decisions: &[RouteDecisionRecord],
+    route_attempts: &[RouteAttemptRecord],
+) -> Value {
+    let decisions_by_id = route_decisions
+        .iter()
+        .map(|decision| (decision.route_decision_id.as_str(), decision))
+        .collect::<HashMap<_, _>>();
+    let mut attempt_count = 0usize;
+    let mut completed_attempt_count = 0usize;
+    let mut failed_attempt_count = 0usize;
+    let mut failover_in_count = 0usize;
+    let mut failover_out_count = 0usize;
+    let mut error_class_counts = BTreeMap::<String, i64>::new();
+    let mut latest_attempt_at: Option<chrono::DateTime<chrono::Utc>> = None;
+    for attempt in route_attempts
+        .iter()
+        .filter(|attempt| attempt.provider_endpoint_id == provider_endpoint_id)
+    {
+        attempt_count += 1;
+        if attempt.status == RouteAttemptStatus::Completed {
+            completed_attempt_count += 1;
+        } else {
+            failed_attempt_count += 1;
+        }
+        latest_attempt_at =
+            latest_attempt_at.max(Some(attempt.ended_at.unwrap_or(attempt.started_at)));
+        if let Some(decision) = decisions_by_id.get(attempt.route_decision_id.as_str()) {
+            if decision.provider_endpoint_id.as_deref() != Some(provider_endpoint_id) {
+                failover_in_count += 1;
+            }
+            if attempt.status != RouteAttemptStatus::Completed {
+                *error_class_counts
+                    .entry(decision.reason.clone())
+                    .or_default() += 1;
+            }
+        }
+    }
+    for decision in route_decisions
+        .iter()
+        .filter(|decision| decision.provider_endpoint_id.as_deref() == Some(provider_endpoint_id))
+    {
+        let moved_elsewhere = route_attempts.iter().any(|attempt| {
+            attempt.route_decision_id == decision.route_decision_id
+                && attempt.provider_endpoint_id != provider_endpoint_id
+        });
+        if moved_elsewhere {
+            failover_out_count += 1;
+        }
+    }
+    json!({
+        "provider_endpoint_id": provider_endpoint_id,
+        "attempt_count": attempt_count,
+        "completed_attempt_count": completed_attempt_count,
+        "failed_attempt_count": failed_attempt_count,
+        "failover_in_count": failover_in_count,
+        "failover_out_count": failover_out_count,
+        "error_class_counts": error_class_counts,
+        "latest_attempt_at": latest_attempt_at,
+        "source": "durable_route_evidence"
+    })
+}
+
+fn provider_endpoint_credentials_observability_body(
+    state: &AppState,
+    endpoint: &ProviderEndpointRecord,
+) -> Value {
+    state
+        .store
+        .upstream_credentials_for_tenant(&endpoint.tenant_id)
+        .into_iter()
+        .filter(|credential| {
+            credential.provider_endpoint_id == endpoint.provider_endpoint_id
+                && credential.status != UpstreamCredentialStatus::Deleted
+        })
+        .map(|credential| {
+            let secret_ref = state.store.secret_ref(&credential.secret_ref_id);
+            json!({
+                "upstream_credential_id": &credential.upstream_credential_id,
+                "credential_kind": &credential.credential_kind,
+                "status": credential.status.as_str(),
+                "secret_ref_id": mask_secret_ref_id(&credential.secret_ref_id),
+                "secret_display_mask": secret_ref.as_ref().map(|secret| secret.display_mask.as_str()),
+                "secret_fingerprint": secret_ref.as_ref().map(|secret| secret.fingerprint.as_str()),
+                "secret_status": secret_ref.as_ref().map(|secret| secret.status.as_str()),
+                "secret_backend_kind": secret_ref.as_ref().map(|secret| secret.backend_kind.as_str()),
+                "created_at": credential.created_at,
+                "updated_at": credential.updated_at,
+                "raw_secret_material_included": false
+            })
+        })
+        .collect()
+}
+
+fn model_alias_route_observability_body(
+    route_decisions: &[RouteDecisionRecord],
+    route_attempts: &[RouteAttemptRecord],
+    model_alias_id: &str,
+) -> Value {
+    let decisions = route_decisions
+        .iter()
+        .filter(|decision| decision.model_alias_id.as_deref() == Some(model_alias_id))
+        .collect::<Vec<_>>();
+    let decision_ids = decisions
+        .iter()
+        .map(|decision| decision.route_decision_id.as_str())
+        .collect::<HashSet<_>>();
+    let attempt_count = route_attempts
+        .iter()
+        .filter(|attempt| decision_ids.contains(attempt.route_decision_id.as_str()))
+        .count();
+    let mut filtered_counts = BTreeMap::<String, i64>::new();
+    for summary in decisions
+        .iter()
+        .flat_map(|decision| &decision.filtered_summary)
+    {
+        *filtered_counts
+            .entry(summary.reason.as_str().to_owned())
+            .or_default() += i64::from(summary.count);
+    }
+    json!({
+        "decision_count": decisions.len(),
+        "attempt_count": attempt_count,
+        "selected_count": decisions
+            .iter()
+            .filter(|decision| decision.status == RouteDecisionStatus::Selected)
+            .count(),
+        "blocked_count": decisions
+            .iter()
+            .filter(|decision| decision.status == RouteDecisionStatus::Blocked)
+            .count(),
+        "no_route_count": decisions
+            .iter()
+            .filter(|decision| decision.status == RouteDecisionStatus::NoRoute)
+            .count(),
+        "sticky_hit_count": decisions.iter().filter(|decision| decision.sticky_hit).count(),
+        "sticky_miss_count": decisions
+            .iter()
+            .filter(|decision| decision.sticky_miss_reason.is_some())
+            .count(),
+        "filtered_target_counts": filtered_counts,
+        "latest_decision_at": decisions.iter().map(|decision| decision.occurred_at).max(),
+        "recent_decisions": decisions
+            .iter()
+            .rev()
+            .take(20)
+            .copied()
+            .map(model_route_decision_observability_body)
+            .collect::<Vec<_>>()
+    })
+}
+
+fn model_route_decision_observability_body(decision: &RouteDecisionRecord) -> Value {
+    json!({
+        "route_decision_id": &decision.route_decision_id,
+        "status": decision.status.as_str(),
+        "reason": &decision.reason,
+        "model_target_id": &decision.model_target_id,
+        "provider_endpoint_id": &decision.provider_endpoint_id,
+        "route_policy_id": &decision.route_policy_id,
+        "routing_group_id": &decision.routing_group_id,
+        "sticky_hit": decision.sticky_hit,
+        "sticky_miss_reason": &decision.sticky_miss_reason,
+        "occurred_at": decision.occurred_at
+    })
+}
+
+fn model_alias_quality_observability_body(
+    usage_events: &[UsageEventRecord],
+    route_decisions: &[RouteDecisionRecord],
+    route_attempts: &[RouteAttemptRecord],
+    scope: &DashboardScopeInput,
+) -> Value {
+    let scoped_events = usage_events
+        .iter()
+        .filter(|event| dashboard_usage_event_matches_scope(event, scope))
+        .collect::<Vec<_>>();
+    let scoped_decision_ids = route_decisions
+        .iter()
+        .filter(|decision| decision.model_alias_id.as_deref() == Some(scope.scope_id.as_str()))
+        .map(|decision| decision.route_decision_id.as_str())
+        .collect::<HashSet<_>>();
+    let failed_attempts = route_attempts
+        .iter()
+        .filter(|attempt| scoped_decision_ids.contains(attempt.route_decision_id.as_str()))
+        .filter(|attempt| attempt.status != RouteAttemptStatus::Completed)
+        .collect::<Vec<_>>();
+    let mut usage_confidence_counts = BTreeMap::<String, i64>::new();
+    for event in &scoped_events {
+        *usage_confidence_counts
+            .entry(event.usage_confidence.clone())
+            .or_default() += 1;
+    }
+    let mut provider_error_counts = BTreeMap::<String, i64>::new();
+    for attempt in &failed_attempts {
+        *provider_error_counts
+            .entry(attempt.provider_endpoint_id.clone())
+            .or_default() += 1;
+    }
+    json!({
+        "request_count": scoped_events.len(),
+        "usage_confidence_counts": usage_confidence_counts,
+        "provider_error_count": failed_attempts.len(),
+        "provider_error_counts": provider_error_counts,
+        "usage_missing_count": scoped_events
+            .iter()
+            .filter(|event| event.usage_confidence == "missing")
+            .count(),
+        "usage_estimated_count": scoped_events
+            .iter()
+            .filter(|event| event.usage_confidence == "estimated")
+            .count()
+    })
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ProviderEndpointModelTargetRollup {
+    request_count: i64,
+    success_count: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    estimated_cost_micros: i64,
+    attempt_count: i64,
+    failed_attempt_count: i64,
+    latest_observed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+fn provider_endpoint_model_target_rows(
+    usage_events: &[UsageEventRecord],
+    route_decisions: &[RouteDecisionRecord],
+    route_attempts: &[RouteAttemptRecord],
+    provider_endpoint_id: &str,
+) -> Vec<Value> {
+    let mut rollups = BTreeMap::<String, ProviderEndpointModelTargetRollup>::new();
+    accumulate_provider_target_usage(&mut rollups, usage_events, provider_endpoint_id);
+    accumulate_provider_target_attempts(
+        &mut rollups,
+        route_decisions,
+        route_attempts,
+        provider_endpoint_id,
+    );
+    rollups
+        .into_iter()
+        .map(|(model_target_id, rollup)| {
+            json!({
+                "model_target_id": model_target_id,
+                "request_count": rollup.request_count,
+                "success_count": rollup.success_count,
+                "attempt_count": rollup.attempt_count,
+                "failed_attempt_count": rollup.failed_attempt_count,
+                "input_tokens": rollup.input_tokens,
+                "output_tokens": rollup.output_tokens,
+                "estimated_cost": rollup.estimated_cost_micros,
+                "latest_observed_at": rollup.latest_observed_at
+            })
+        })
+        .collect()
+}
+
+fn accumulate_provider_target_usage(
+    rollups: &mut BTreeMap<String, ProviderEndpointModelTargetRollup>,
+    usage_events: &[UsageEventRecord],
+    provider_endpoint_id: &str,
+) {
+    for event in usage_events.iter().filter(|event| {
+        event.provider_endpoint_id.as_deref() == Some(provider_endpoint_id)
+            && event.model_target_id.is_some()
+    }) {
+        let Some(model_target_id) = event.model_target_id.as_ref() else {
+            continue;
+        };
+        let rollup = rollups.entry(model_target_id.clone()).or_default();
+        rollup.request_count = rollup.request_count.saturating_add(1);
+        if event.status == "success" {
+            rollup.success_count = rollup.success_count.saturating_add(1);
+        }
+        rollup.input_tokens = rollup.input_tokens.saturating_add(
+            event
+                .usage_payload
+                .get("input_tokens")
+                .and_then(Value::as_i64)
+                .unwrap_or_default(),
+        );
+        rollup.output_tokens = rollup.output_tokens.saturating_add(
+            event
+                .usage_payload
+                .get("output_tokens")
+                .and_then(Value::as_i64)
+                .unwrap_or_default(),
+        );
+        rollup.estimated_cost_micros = rollup.estimated_cost_micros.saturating_add(
+            event
+                .cost_payload
+                .get("total_cost")
+                .and_then(Value::as_i64)
+                .unwrap_or_default(),
+        );
+        rollup.latest_observed_at = rollup.latest_observed_at.max(Some(event.occurred_at));
+    }
+}
+
+fn accumulate_provider_target_attempts(
+    rollups: &mut BTreeMap<String, ProviderEndpointModelTargetRollup>,
+    route_decisions: &[RouteDecisionRecord],
+    route_attempts: &[RouteAttemptRecord],
+    provider_endpoint_id: &str,
+) {
+    let decision_times = route_decisions
+        .iter()
+        .map(|decision| (decision.route_decision_id.as_str(), decision.occurred_at))
+        .collect::<HashMap<_, _>>();
+    for attempt in route_attempts
+        .iter()
+        .filter(|attempt| attempt.provider_endpoint_id == provider_endpoint_id)
+    {
+        let rollup = rollups.entry(attempt.model_target_id.clone()).or_default();
+        rollup.attempt_count = rollup.attempt_count.saturating_add(1);
+        if attempt.status != RouteAttemptStatus::Completed {
+            rollup.failed_attempt_count = rollup.failed_attempt_count.saturating_add(1);
+        }
+        rollup.latest_observed_at = decision_times
+            .get(attempt.route_decision_id.as_str())
+            .copied()
+            .or(attempt.ended_at)
+            .or(Some(attempt.started_at))
+            .max(rollup.latest_observed_at);
+    }
+}
+
 async fn dashboard_overview_response(
     state: &AppState,
     scope: &DashboardScopeInput,
@@ -22104,6 +23937,7 @@ struct RuntimeRouteTarget {
     provider_endpoint: Option<ProviderEndpoint>,
     upstream_credential_id: Option<String>,
     upstream_credential_snapshot: Option<RuntimeCredentialSnapshot>,
+    pricing_sku_id: Option<String>,
     route_decision_id: Option<String>,
     selected_route: Option<SelectedRouteEvidence>,
     decision_request: Option<RouteDecisionRequest>,
@@ -22129,6 +23963,7 @@ async fn runtime_route_target(
             provider_endpoint: None,
             upstream_credential_id: None,
             upstream_credential_snapshot: None,
+            pricing_sku_id: None,
             route_decision_id: None,
             selected_route: None,
             decision_request: None,
@@ -22245,6 +24080,7 @@ async fn selected_runtime_route_target(
         provider_endpoint: Some(selection.provider_endpoint),
         upstream_credential_id: selection.upstream_credential_id,
         upstream_credential_snapshot,
+        pricing_sku_id: selection.pricing_sku_id,
         route_decision_id: Some(route_decision_id),
         selected_route: Some(selected_evidence),
         decision_request: Some(decision_request),
@@ -22437,9 +24273,10 @@ mod tests {
         run_otel_exporter_once_with_transport, run_runtime_policy_reconciler_once,
         runtime_budget_reservation_key, runtime_quota_counter_key,
         runtime_quota_loss_allowance_key, runtime_route_target, validate_gateway_config, AppState,
-        BackgroundWorkerMode, DependencyProbeMode, ExportObjectStorageHttpConfig, GatewayConfig,
-        NotificationDeliveryTransport, OtelExporterTransport, ProviderTransportMode,
-        SingleUserAuthConfig, ADMIN_ROUTE_ATTEMPT_LIST_PATH, ADMIN_ROUTE_DECISION_LIST_PATH,
+        BackgroundWorkerMode, CreatePricingSkuRequest, DependencyProbeMode,
+        ExportObjectStorageHttpConfig, GatewayConfig, NotificationDeliveryTransport,
+        OtelExporterTransport, ProviderTransportMode, SingleUserAuthConfig,
+        ADMIN_ROUTE_ATTEMPT_LIST_PATH, ADMIN_ROUTE_DECISION_LIST_PATH,
         ADMIN_ROUTE_SIMULATION_LIST_PATH, CODEX_API_BASE_URL, CSRF_TOKEN_HEADER,
         GATEWAY_SESSION_ID_HEADER, PROJECT_ID_HEADER, REQUEST_ID_HEADER,
         RUNTIME_BUDGET_LEASE_TTL_SECONDS, SESSION_TOKEN_PREFIX, SINGLE_USER_ID,
@@ -23387,6 +25224,210 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn realtime_section_endpoints_expose_scoped_operations_state() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        let endpoint_id = create_provider_endpoint_over_http(store.clone(), &raw_session).await;
+        publish_catalog_snapshot(&store, catalog_payload());
+        let runtime_response = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
+        assert_eq!(runtime_response.status(), StatusCode::OK);
+        let now = chrono::Utc::now();
+        store.set_endpoint_health(EndpointHealthRecord {
+            tenant_id: TEST_TENANT_ID.to_owned(),
+            provider_endpoint_id: endpoint_id,
+            config_version: 1,
+            state: EndpointHealthState::Degraded,
+            observed_at: now,
+            expires_at: now + Duration::seconds(60),
+        });
+        let invalidation = store
+            .config_invalidation_events_for_tenant(TEST_TENANT_ID)
+            .pop()
+            .unwrap_or_else(|| panic!("config invalidation should be present"));
+        store
+            .reload_config_worker_from_invalidation(
+                TEST_TENANT_ID,
+                "gateway-runtime",
+                &invalidation.invalidation_id,
+                invalidation.published_at,
+            )
+            .unwrap_or_else(|error| panic!("worker reload should record: {error}"));
+        let budget = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/budget-policies",
+            json!({
+                "idempotency_key": "idem_realtime_section_budget",
+                "scope_kind": "project",
+                "scope_id": TEST_PROJECT_ID,
+                "period": "lifetime",
+                "limit_kind": "requests",
+                "hard_limit": 100,
+                "reset_policy": "manual_counter_reset",
+                "overage_mode": "block_new_requests",
+                "consistency_mode": "strong_terminal"
+            }),
+        )
+        .await;
+        assert_eq!(budget.status(), StatusCode::OK);
+        let quota = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/quota-policies",
+            json!({
+                "idempotency_key": "idem_realtime_section_quota",
+                "scope_kind": "project",
+                "scope_id": TEST_PROJECT_ID,
+                "counter_kind": "request_rate",
+                "limit": 60,
+                "window": "fixed",
+                "increment_source": "accepted_preflight_request",
+                "loss_behavior": "fail_closed"
+            }),
+        )
+        .await;
+        assert_eq!(quota.status(), StatusCode::OK);
+
+        let providers = response_json(
+            get_admin(store.clone(), &raw_session, "/admin/v1/realtime/providers").await,
+        )
+        .await;
+        let routes = response_json(
+            get_admin(store.clone(), &raw_session, "/admin/v1/realtime/routes").await,
+        )
+        .await;
+        let budgets = response_json(
+            get_admin(store.clone(), &raw_session, "/admin/v1/realtime/budgets").await,
+        )
+        .await;
+        let quotas = response_json(
+            get_admin(store.clone(), &raw_session, "/admin/v1/realtime/quotas").await,
+        )
+        .await;
+        let workers =
+            response_json(get_admin(store, &raw_session, "/admin/v1/realtime/workers").await).await;
+
+        assert_eq!(providers["schema"], "gateway.admin.realtime_providers.v1");
+        assert_eq!(providers["source"]["metrics_backend_queried"], false);
+        assert_eq!(providers["providers"]["endpoint_count"], 1);
+        assert_eq!(providers["providers"]["health_counts"]["degraded"], 1);
+        assert_eq!(routes["schema"], "gateway.admin.realtime_routes.v1");
+        assert_eq!(routes["routes"]["decision_count"], 1);
+        assert_eq!(routes["routes"]["attempt_count"], 1);
+        assert_eq!(budgets["schema"], "gateway.admin.realtime_budgets.v1");
+        assert_eq!(budgets["budgets"]["configured_policy_count"], 1);
+        assert_eq!(budgets["budgets"]["hard_block_policy_count"], 1);
+        assert_eq!(quotas["schema"], "gateway.admin.realtime_quotas.v1");
+        assert_eq!(quotas["quotas"]["configured_policy_count"], 1);
+        assert_eq!(quotas["quotas"]["active_policy_count"], 1);
+        assert_eq!(quotas["quotas"]["counter_kind_counts"]["request_rate"], 1);
+        assert_eq!(quotas["quotas"]["loss_behavior_counts"]["fail_closed"], 1);
+        assert_eq!(workers["schema"], "gateway.admin.realtime_workers.v1");
+        assert_eq!(workers["workers"]["reload_evidence"], "converged");
+        assert_eq!(
+            workers["workers"]["workers"].as_array().map_or(0, Vec::len),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_and_quota_dashboards_expose_policy_posture_and_timeseries() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        publish_catalog_snapshot(&store, catalog_payload());
+        let budget = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/budget-policies",
+            json!({
+                "idempotency_key": "idem_budget_dashboard_policy",
+                "scope_kind": "project",
+                "scope_id": TEST_PROJECT_ID,
+                "period": "lifetime",
+                "limit_kind": "requests",
+                "hard_limit": 100,
+                "soft_limit": 80,
+                "reset_policy": "manual_counter_reset",
+                "overage_mode": "block_new_requests",
+                "consistency_mode": "strong_terminal"
+            }),
+        )
+        .await;
+        let budget_body = response_json(budget).await;
+        let budget_policy_id = budget_body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("budget policy id should be present"))
+            .to_owned();
+        let quota = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/quota-policies",
+            json!({
+                "idempotency_key": "idem_quota_dashboard_policy",
+                "scope_kind": "project",
+                "scope_id": TEST_PROJECT_ID,
+                "counter_kind": "token_actual_rate",
+                "limit": 100,
+                "window": "ledger_bucket",
+                "increment_source": "terminal_usage_event",
+                "loss_behavior": "fail_closed"
+            }),
+        )
+        .await;
+        let quota_body = response_json(quota).await;
+        let quota_policy_id = quota_body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("quota policy id should be present"))
+            .to_owned();
+        let runtime_response = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
+        assert_eq!(runtime_response.status(), StatusCode::OK);
+
+        let budget_dashboard = response_json(
+            get_admin(
+                store.clone(),
+                &raw_session,
+                "/admin/v1/budgets/dashboard?scope_kind=project&scope_id=prj_test",
+            )
+            .await,
+        )
+        .await;
+        let budget_timeseries = response_json(
+            get_admin(
+                store.clone(),
+                &raw_session,
+                &format!("/admin/v1/budgets/{budget_policy_id}/timeseries?bucket_kind=day"),
+            )
+            .await,
+        )
+        .await;
+        let quota_dashboard = response_json(
+            get_admin(
+                store.clone(),
+                &raw_session,
+                "/admin/v1/quotas/dashboard?scope_kind=project&scope_id=prj_test",
+            )
+            .await,
+        )
+        .await;
+        let rate_timeseries = response_json(
+            get_admin(
+                store,
+                &raw_session,
+                &format!("/admin/v1/rate-limits/{quota_policy_id}/timeseries?bucket_kind=day"),
+            )
+            .await,
+        )
+        .await;
+
+        assert_budget_quota_dashboard_bodies(
+            &budget_dashboard,
+            &budget_timeseries,
+            &quota_dashboard,
+            &rate_timeseries,
+            &budget_policy_id,
+            &quota_policy_id,
+        );
+    }
+
+    #[tokio::test]
     async fn realtime_overview_reports_budget_conservative_mode() {
         let (store, raw_session) = gateway_store_with_admin_session();
         let create_policy = post_admin_json(
@@ -23635,6 +25676,75 @@ mod tests {
             )
             .await;
         }
+        assert_model_observability_diagnostics(store, &raw_session, &graph).await;
+    }
+
+    #[tokio::test]
+    async fn provider_observability_endpoints_expose_health_failover_and_masked_credentials() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        let graph = create_admin_graph_for_dashboards(store.clone(), &raw_session).await;
+        let raw_secret_ref_id = store.upstream_credential(&graph.credential_id).map_or_else(
+            || panic!("upstream credential should exist"),
+            |credential| credential.secret_ref_id,
+        );
+        publish_catalog_snapshot(&store, catalog_payload_for_admin_graph(&graph));
+        let runtime_response =
+            post_responses_request(store.clone(), &raw_key, &graph.alias_name).await;
+        assert_eq!(runtime_response.status(), StatusCode::OK);
+        let now = chrono::Utc::now();
+        store.set_endpoint_health(EndpointHealthRecord {
+            tenant_id: TEST_TENANT_ID.to_owned(),
+            provider_endpoint_id: graph.endpoint_id.clone(),
+            config_version: 1,
+            state: EndpointHealthState::Degraded,
+            observed_at: now,
+            expires_at: now + Duration::seconds(60),
+        });
+
+        let health = response_json(
+            get_admin(
+                store.clone(),
+                &raw_session,
+                &format!(
+                    "/admin/v1/provider-endpoints/{}/observability/health",
+                    graph.endpoint_id
+                ),
+            )
+            .await,
+        )
+        .await;
+        let failover = response_json(
+            get_admin(
+                store.clone(),
+                &raw_session,
+                &format!(
+                    "/admin/v1/provider-endpoints/{}/observability/failover",
+                    graph.endpoint_id
+                ),
+            )
+            .await,
+        )
+        .await;
+        let credentials = response_json(
+            get_admin(
+                store,
+                &raw_session,
+                &format!(
+                    "/admin/v1/provider-endpoints/{}/observability/credentials",
+                    graph.endpoint_id
+                ),
+            )
+            .await,
+        )
+        .await;
+
+        assert_provider_observability_bodies(
+            &health,
+            &failover,
+            &credentials,
+            &graph,
+            &raw_secret_ref_id,
+        );
     }
 
     #[tokio::test]
@@ -24428,6 +26538,149 @@ mod tests {
                 .sum::<i64>(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn model_ingress_records_priced_usage_cost_from_matching_sku() {
+        let (store, raw_key) = gateway_store_with_runtime_access(true);
+        let pricing_sku = store
+            .create_pricing_sku(
+                CreatePricingSkuRequest {
+                    tenant_id: TEST_TENANT_ID.to_owned(),
+                    organization_id: Some(TEST_ORGANIZATION_ID.to_owned()),
+                    name: "OpenAI mini runtime pricing".to_owned(),
+                    currency: "USD".to_owned(),
+                    unit: "micro_usd".to_owned(),
+                    model_id_patterns: vec!["gpt-4.1-*".to_owned()],
+                    provider_endpoint_patterns: vec!["pep_openai".to_owned()],
+                    pricing_document: json!({
+                        "schema": "gateway.pricing.v1",
+                        "currency": "USD",
+                        "unit": "micro_usd",
+                        "rounding": "ceil_per_event",
+                        "tokens": {
+                            "input_per_million": 1_000_000,
+                            "output_per_million": 2_000_000
+                        },
+                        "flat_request_cost": 100
+                    }),
+                    effective_from: chrono::Utc::now() - chrono::Duration::seconds(1),
+                    effective_until: None,
+                    is_preset: false,
+                    created_by: TEST_USER_ID.to_owned(),
+                },
+                chrono::Utc::now(),
+            )
+            .unwrap_or_else(|error| panic!("pricing SKU should create: {error}"));
+        publish_catalog_snapshot(&store, catalog_payload());
+
+        let response = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
+        let status = response.status();
+        let body = response_json(response).await;
+        let usage_events = store.usage_events_for_tenant(TEST_TENANT_ID);
+        let event_buckets = store
+            .ledger_buckets_for_tenant(TEST_TENANT_ID)
+            .into_iter()
+            .filter(|bucket| bucket.bucket_kind == "event")
+            .collect::<Vec<_>>();
+
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        assert_eq!(usage_events.len(), 1);
+        assert_eq!(
+            usage_events[0].cost_payload["pricing_sku_id"],
+            pricing_sku.pricing_sku_id
+        );
+        assert_eq!(usage_events[0].cost_payload["pricing_version"], "1");
+        assert_eq!(usage_events[0].cost_payload["confidence"], "estimated");
+        assert_eq!(usage_events[0].cost_payload["input_cost"], 1);
+        assert_eq!(usage_events[0].cost_payload["output_cost"], 4);
+        assert_eq!(usage_events[0].cost_payload["request_cost"], 100);
+        assert_eq!(usage_events[0].cost_payload["total_cost"], 105);
+        assert_eq!(event_buckets.len(), 1);
+        assert_eq!(event_buckets[0].estimated_cost_micros, 105);
+        assert_eq!(event_buckets[0].pricing_version, "1");
+    }
+
+    #[tokio::test]
+    async fn model_ingress_prefers_model_target_pricing_sku_override() {
+        let (store, raw_key) = gateway_store_with_runtime_access(true);
+        store
+            .create_pricing_sku(
+                CreatePricingSkuRequest {
+                    tenant_id: TEST_TENANT_ID.to_owned(),
+                    organization_id: Some(TEST_ORGANIZATION_ID.to_owned()),
+                    name: "Automatic OpenAI pricing".to_owned(),
+                    currency: "USD".to_owned(),
+                    unit: "micro_usd".to_owned(),
+                    model_id_patterns: vec!["gpt-4.1-*".to_owned()],
+                    provider_endpoint_patterns: vec!["pep_openai".to_owned()],
+                    pricing_document: json!({
+                        "schema": "gateway.pricing.v1",
+                        "currency": "USD",
+                        "unit": "micro_usd",
+                        "rounding": "ceil_per_event",
+                        "tokens": {
+                            "input_per_million": 1_000_000,
+                            "output_per_million": 2_000_000
+                        },
+                        "flat_request_cost": 100
+                    }),
+                    effective_from: chrono::Utc::now() - chrono::Duration::seconds(1),
+                    effective_until: None,
+                    is_preset: false,
+                    created_by: TEST_USER_ID.to_owned(),
+                },
+                chrono::Utc::now(),
+            )
+            .unwrap_or_else(|error| panic!("automatic pricing SKU should create: {error}"));
+        let override_sku = store
+            .create_pricing_sku(
+                CreatePricingSkuRequest {
+                    tenant_id: TEST_TENANT_ID.to_owned(),
+                    organization_id: Some(TEST_ORGANIZATION_ID.to_owned()),
+                    name: "Explicit contract override".to_owned(),
+                    currency: "USD".to_owned(),
+                    unit: "micro_usd".to_owned(),
+                    model_id_patterns: vec!["nonmatching-*".to_owned()],
+                    provider_endpoint_patterns: vec!["pep_other".to_owned()],
+                    pricing_document: json!({
+                        "schema": "gateway.pricing.v1",
+                        "currency": "USD",
+                        "unit": "micro_usd",
+                        "rounding": "ceil_per_event",
+                        "tokens": {
+                            "input_per_million": 3_000_000,
+                            "output_per_million": 5_000_000
+                        },
+                        "flat_request_cost": 7
+                    }),
+                    effective_from: chrono::Utc::now() - chrono::Duration::seconds(1),
+                    effective_until: None,
+                    is_preset: false,
+                    created_by: TEST_USER_ID.to_owned(),
+                },
+                chrono::Utc::now(),
+            )
+            .unwrap_or_else(|error| panic!("override pricing SKU should create: {error}"));
+        let mut payload = catalog_payload();
+        payload["model_targets"][0]["pricing_sku_id"] = json!(override_sku.pricing_sku_id.clone());
+        publish_catalog_snapshot(&store, payload);
+
+        let response = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
+        let status = response.status();
+        let body = response_json(response).await;
+        let usage_events = store.usage_events_for_tenant(TEST_TENANT_ID);
+
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        assert_eq!(usage_events.len(), 1);
+        assert_eq!(
+            usage_events[0].cost_payload["pricing_sku_id"],
+            override_sku.pricing_sku_id
+        );
+        assert_eq!(usage_events[0].cost_payload["input_cost"], 3);
+        assert_eq!(usage_events[0].cost_payload["output_cost"], 10);
+        assert_eq!(usage_events[0].cost_payload["request_cost"], 7);
+        assert_eq!(usage_events[0].cost_payload["total_cost"], 20);
     }
 
     #[tokio::test]
@@ -28294,6 +30547,7 @@ mod tests {
                 "organization_id": "org_test",
                 "provider_endpoint_id": endpoint_id,
                 "upstream_credential_id": "upc_missing",
+                "pricing_sku_id": "sku_missing",
                 "protocol_family": "anthropic_messages",
                 "upstream_model_id": "",
                 "supports_streaming": true
@@ -28305,7 +30559,7 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["valid"], false);
-        assert_eq!(body["errors"].as_array().map_or(0, Vec::len), 3);
+        assert_eq!(body["errors"].as_array().map_or(0, Vec::len), 4);
         assert!(store.model_targets_for_tenant(TEST_TENANT_ID).is_empty());
     }
 
@@ -28315,6 +30569,7 @@ mod tests {
         let endpoint_id = create_provider_endpoint_over_http(store.clone(), &raw_session).await;
         let credential_id =
             create_upstream_credential_over_http(store.clone(), &raw_session, &endpoint_id).await;
+        let pricing_sku_id = create_pricing_sku_over_http(store.clone(), &raw_session).await;
         let request = json!({
             "idempotency_key": "idem_model_target_create",
             "organization_id": "org_test",
@@ -28322,6 +30577,7 @@ mod tests {
             "upstream_credential_id": credential_id,
             "protocol_family": "openai_responses",
             "upstream_model_id": "gpt-4.1-mini",
+            "pricing_sku_id": pricing_sku_id.clone(),
             "supports_streaming": true
         });
 
@@ -28348,12 +30604,17 @@ mod tests {
         assert_eq!(second_status, StatusCode::OK);
         assert_eq!(first_body["resource"]["kind"], "model_target");
         assert_eq!(first_body["resource"]["upstream_model_id"], "gpt-4.1-mini");
+        assert_eq!(first_body["resource"]["pricing_sku_id"], pricing_sku_id);
         assert_eq!(second_body["idempotency_replayed"], true);
         assert_eq!(store.model_targets_for_tenant(TEST_TENANT_ID).len(), 1);
-        assert_eq!(store.audit_events().len(), 3);
+        assert_eq!(store.audit_events().len(), 4);
         assert_eq!(
-            store.audit_events()[2].event_type,
+            store.audit_events()[3].event_type,
             "gateway.model_target.create"
+        );
+        assert_eq!(
+            store.audit_events()[3].redacted_diff["pricing_sku_id"],
+            pricing_sku_id
         );
     }
 
@@ -32481,6 +34742,181 @@ mod tests {
         });
     }
 
+    async fn assert_model_observability_diagnostics(
+        store: InMemoryGatewayStore,
+        raw_session: &str,
+        graph: &AdminGraphFixture,
+    ) {
+        let alias_routes = response_json(
+            get_admin(
+                store.clone(),
+                raw_session,
+                &format!("/admin/v1/models/aliases/{}/routes", graph.alias_id),
+            )
+            .await,
+        )
+        .await;
+        let alias_quality = response_json(
+            get_admin(
+                store.clone(),
+                raw_session,
+                &format!("/admin/v1/models/aliases/{}/quality", graph.alias_id),
+            )
+            .await,
+        )
+        .await;
+        let endpoint_targets = response_json(
+            get_admin(
+                store,
+                raw_session,
+                &format!(
+                    "/admin/v1/provider-endpoints/{}/observability/model-targets",
+                    graph.endpoint_id
+                ),
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(
+            alias_routes["schema"],
+            "gateway.admin.model_alias_routes.v1"
+        );
+        assert_eq!(alias_routes["scope"]["kind"], "model_alias");
+        assert_eq!(alias_routes["scope"]["id"], graph.alias_id);
+        assert_eq!(alias_routes["routes"]["decision_count"], 1);
+        assert_eq!(alias_routes["routes"]["attempt_count"], 1);
+        assert_eq!(
+            alias_quality["schema"],
+            "gateway.admin.model_alias_quality.v1"
+        );
+        assert_eq!(alias_quality["quality"]["request_count"], 1);
+        assert_eq!(
+            alias_quality["quality"]["usage_confidence_counts"]["exact"],
+            1
+        );
+        assert_eq!(alias_quality["quality"]["provider_error_count"], 0);
+        assert_eq!(
+            endpoint_targets["schema"],
+            "gateway.admin.observability.provider_endpoint_model_targets.v1"
+        );
+        assert_eq!(
+            endpoint_targets["model_targets"]
+                .as_array()
+                .map_or(0, Vec::len),
+            1
+        );
+        assert_eq!(
+            endpoint_targets["model_targets"][0]["model_target_id"],
+            graph.target_id
+        );
+        assert_eq!(endpoint_targets["model_targets"][0]["request_count"], 1);
+        assert_eq!(endpoint_targets["model_targets"][0]["attempt_count"], 1);
+    }
+
+    fn assert_provider_observability_bodies(
+        health: &Value,
+        failover: &Value,
+        credentials: &Value,
+        graph: &AdminGraphFixture,
+        raw_secret_ref_id: &str,
+    ) {
+        assert_eq!(
+            health["schema"],
+            "gateway.admin.observability.provider_endpoint_health.v1"
+        );
+        assert_eq!(health["scope"]["kind"], "provider_endpoint");
+        assert_eq!(health["scope"]["id"], graph.endpoint_id);
+        assert_eq!(health["health"]["health_state"], "degraded");
+        assert_eq!(health["health"]["breaker"]["state"], "degraded");
+        assert_eq!(health["health"]["attempt_count"], 1);
+        assert_eq!(health["sources"]["metrics_backend_queried"], false);
+
+        assert_eq!(
+            failover["schema"],
+            "gateway.admin.observability.provider_endpoint_failover.v1"
+        );
+        assert_eq!(failover["scope"]["kind"], "provider_endpoint");
+        assert_eq!(failover["scope"]["id"], graph.endpoint_id);
+        assert_eq!(failover["failover"]["attempt_count"], 1);
+        assert_eq!(failover["failover"]["completed_attempt_count"], 1);
+        assert_eq!(failover["sources"]["metrics_backend_queried"], false);
+
+        assert_eq!(
+            credentials["schema"],
+            "gateway.admin.observability.provider_endpoint_credentials.v1"
+        );
+        assert_eq!(credentials["scope"]["kind"], "provider_endpoint");
+        assert_eq!(credentials["scope"]["id"], graph.endpoint_id);
+        assert_eq!(credentials["credentials"].as_array().map_or(0, Vec::len), 1);
+        assert_eq!(
+            credentials["credentials"][0]["upstream_credential_id"],
+            graph.credential_id
+        );
+        assert_eq!(credentials["credentials"][0]["secret_ref_id"], "sec_***");
+        assert_eq!(
+            credentials["credentials"][0]["raw_secret_material_included"],
+            false
+        );
+        assert_eq!(
+            credentials["sources"]["credential_metadata"],
+            "durable_safe_metadata"
+        );
+        assert_eq!(credentials["sources"]["secret_material_included"], false);
+        assert_eq!(credentials["sources"]["metrics_backend_queried"], false);
+        let credential_text = credentials.to_string();
+        assert!(!credential_text.contains("provider-api-key-value"));
+        assert!(!credential_text.contains(raw_secret_ref_id));
+    }
+
+    fn assert_budget_quota_dashboard_bodies(
+        budget_dashboard: &Value,
+        budget_timeseries: &Value,
+        quota_dashboard: &Value,
+        rate_timeseries: &Value,
+        budget_policy_id: &str,
+        quota_policy_id: &str,
+    ) {
+        assert_eq!(
+            budget_dashboard["schema"],
+            "gateway.admin.budget_dashboard.v1"
+        );
+        assert_eq!(budget_dashboard["scope"]["kind"], "project");
+        assert_eq!(
+            budget_dashboard["budgets"][0]["budget_policy_id"],
+            budget_policy_id
+        );
+        assert_eq!(budget_dashboard["budgets"][0]["current_value"], 1);
+        assert_eq!(budget_dashboard["budgets"][0]["hard_remaining"], 99);
+        assert_eq!(
+            budget_dashboard["sources"]["metrics_backend_queried"],
+            false
+        );
+        assert_eq!(
+            budget_timeseries["schema"],
+            "gateway.admin.budget_timeseries.v1"
+        );
+        assert_eq!(budget_timeseries["points"][0]["value"], 1);
+        assert_eq!(
+            quota_dashboard["schema"],
+            "gateway.admin.quota_dashboard.v1"
+        );
+        assert_eq!(
+            quota_dashboard["quotas"][0]["quota_policy_id"],
+            quota_policy_id
+        );
+        assert_eq!(
+            quota_dashboard["quotas"][0]["source"]["history"],
+            "durable_ledger_buckets"
+        );
+        assert_eq!(
+            rate_timeseries["schema"],
+            "gateway.admin.rate_limit_timeseries.v1"
+        );
+        assert_eq!(rate_timeseries["points"][0]["value"], 3);
+        assert_eq!(rate_timeseries["sources"]["metrics_backend_queried"], false);
+    }
+
     async fn assert_dashboard_scope(
         store: InMemoryGatewayStore,
         raw_session: &str,
@@ -34047,6 +36483,12 @@ mod tests {
         assert!(body_text.contains("gateway.export.metric_count"));
         assert!(body_text.contains("gateway.usage_event.count"));
         assert!(body_text.contains("gateway.route_decision.count"));
+        assert!(body_text.contains("gateway.provider.request.count"));
+        assert!(body_text.contains("gateway.provider.latency_ms.avg"));
+        assert!(body_text.contains("gateway.provider.input_tokens.sum"));
+        assert!(body_text.contains("gateway.provider.estimated_cost_micros.sum"));
+        assert!(body_text.contains("provider_endpoint_id"));
+        assert!(body_text.contains("pep_openai"));
         assert!(body_text.contains("service.name"));
         assert!(!body_text.contains("prompt text"));
         assert!(!body_text.contains("sec_"));

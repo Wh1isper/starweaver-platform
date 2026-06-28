@@ -54,5 +54,6 @@ mod tests {
         assert!(migration_versions().contains(&20_260_625_000_001));
         assert!(migration_versions().contains(&20_260_628_000_001));
         assert!(migration_versions().contains(&20_260_628_000_002));
+        assert!(migration_versions().contains(&20_260_628_000_003));
     }
 }

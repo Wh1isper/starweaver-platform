@@ -4322,6 +4322,110 @@
         "x-starweaver-protocol-family": null
       }
     },
+    "/admin/v1/budgets/dashboard": {
+      "get": {
+        "operationId": "gateway_get_admin_v1_budgets_dashboard_gateway_budget_dashboard_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /admin/v1/budgets/dashboard",
+        "parameters": [],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "gateway.budget_dashboard.read",
+        "x-starweaver-resource-kind": "BudgetDashboard",
+        "x-starweaver-scope-params": [
+          "tenant_id"
+        ],
+        "x-starweaver-allow-api-key": true,
+        "x-starweaver-strong-auth-required": false,
+        "x-starweaver-audit-event-type": "gateway.budget_dashboard.read",
+        "x-starweaver-protocol-family": null
+      }
+    },
+    "/admin/v1/budgets/{budget_policy_id}/timeseries": {
+      "get": {
+        "operationId": "gateway_get_admin_v1_budgets_budget_policy_id_timeseries_gateway_budget_dashboard_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /admin/v1/budgets/{budget_policy_id}/timeseries",
+        "parameters": [
+          {
+            "name": "budget_policy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "gateway.budget_dashboard.read",
+        "x-starweaver-resource-kind": "BudgetDashboard",
+        "x-starweaver-scope-params": [
+          "tenant_id",
+          "budget_policy_id"
+        ],
+        "x-starweaver-allow-api-key": true,
+        "x-starweaver-strong-auth-required": false,
+        "x-starweaver-audit-event-type": "gateway.budget_dashboard.timeseries.read",
+        "x-starweaver-protocol-family": null
+      }
+    },
     "/admin/v1/budget-policies": {
       "get": {
         "operationId": "gateway_get_admin_v1_budget_policies_gateway_budget_policy_read",
@@ -4600,6 +4704,110 @@
         "x-starweaver-allow-api-key": true,
         "x-starweaver-strong-auth-required": false,
         "x-starweaver-audit-event-type": "gateway.budget_policy.update",
+        "x-starweaver-protocol-family": null
+      }
+    },
+    "/admin/v1/quotas/dashboard": {
+      "get": {
+        "operationId": "gateway_get_admin_v1_quotas_dashboard_gateway_quota_dashboard_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /admin/v1/quotas/dashboard",
+        "parameters": [],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "gateway.quota_dashboard.read",
+        "x-starweaver-resource-kind": "QuotaDashboard",
+        "x-starweaver-scope-params": [
+          "tenant_id"
+        ],
+        "x-starweaver-allow-api-key": true,
+        "x-starweaver-strong-auth-required": false,
+        "x-starweaver-audit-event-type": "gateway.quota_dashboard.read",
+        "x-starweaver-protocol-family": null
+      }
+    },
+    "/admin/v1/rate-limits/{quota_policy_id}/timeseries": {
+      "get": {
+        "operationId": "gateway_get_admin_v1_rate_limits_quota_policy_id_timeseries_gateway_quota_dashboard_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /admin/v1/rate-limits/{quota_policy_id}/timeseries",
+        "parameters": [
+          {
+            "name": "quota_policy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "gateway.quota_dashboard.read",
+        "x-starweaver-resource-kind": "QuotaDashboard",
+        "x-starweaver-scope-params": [
+          "tenant_id",
+          "quota_policy_id"
+        ],
+        "x-starweaver-allow-api-key": true,
+        "x-starweaver-strong-auth-required": false,
+        "x-starweaver-audit-event-type": "gateway.quota_dashboard.timeseries.read",
         "x-starweaver-protocol-family": null
       }
     },
@@ -8896,6 +9104,241 @@
         "x-starweaver-protocol-family": null
       }
     },
+    "/admin/v1/realtime/providers": {
+      "get": {
+        "operationId": "gateway_get_admin_v1_realtime_providers_gateway_realtime_dashboard_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /admin/v1/realtime/providers",
+        "parameters": [],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "gateway.realtime_dashboard.read",
+        "x-starweaver-resource-kind": "RealtimeDashboard",
+        "x-starweaver-scope-params": [
+          "tenant_id"
+        ],
+        "x-starweaver-allow-api-key": true,
+        "x-starweaver-strong-auth-required": false,
+        "x-starweaver-audit-event-type": "gateway.realtime_dashboard.read",
+        "x-starweaver-protocol-family": null
+      }
+    },
+    "/admin/v1/realtime/routes": {
+      "get": {
+        "operationId": "gateway_get_admin_v1_realtime_routes_gateway_realtime_dashboard_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /admin/v1/realtime/routes",
+        "parameters": [],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "gateway.realtime_dashboard.read",
+        "x-starweaver-resource-kind": "RealtimeDashboard",
+        "x-starweaver-scope-params": [
+          "tenant_id"
+        ],
+        "x-starweaver-allow-api-key": true,
+        "x-starweaver-strong-auth-required": false,
+        "x-starweaver-audit-event-type": "gateway.realtime_dashboard.read",
+        "x-starweaver-protocol-family": null
+      }
+    },
+    "/admin/v1/realtime/budgets": {
+      "get": {
+        "operationId": "gateway_get_admin_v1_realtime_budgets_gateway_realtime_dashboard_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /admin/v1/realtime/budgets",
+        "parameters": [],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "gateway.realtime_dashboard.read",
+        "x-starweaver-resource-kind": "RealtimeDashboard",
+        "x-starweaver-scope-params": [
+          "tenant_id"
+        ],
+        "x-starweaver-allow-api-key": true,
+        "x-starweaver-strong-auth-required": false,
+        "x-starweaver-audit-event-type": "gateway.realtime_dashboard.read",
+        "x-starweaver-protocol-family": null
+      }
+    },
+    "/admin/v1/realtime/quotas": {
+      "get": {
+        "operationId": "gateway_get_admin_v1_realtime_quotas_gateway_realtime_dashboard_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /admin/v1/realtime/quotas",
+        "parameters": [],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "gateway.realtime_dashboard.read",
+        "x-starweaver-resource-kind": "RealtimeDashboard",
+        "x-starweaver-scope-params": [
+          "tenant_id"
+        ],
+        "x-starweaver-allow-api-key": true,
+        "x-starweaver-strong-auth-required": false,
+        "x-starweaver-audit-event-type": "gateway.realtime_dashboard.read",
+        "x-starweaver-protocol-family": null
+      }
+    },
+    "/admin/v1/realtime/workers": {
+      "get": {
+        "operationId": "gateway_get_admin_v1_realtime_workers_gateway_realtime_dashboard_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /admin/v1/realtime/workers",
+        "parameters": [],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "gateway.realtime_dashboard.read",
+        "x-starweaver-resource-kind": "RealtimeDashboard",
+        "x-starweaver-scope-params": [
+          "tenant_id"
+        ],
+        "x-starweaver-allow-api-key": true,
+        "x-starweaver-strong-auth-required": false,
+        "x-starweaver-audit-event-type": "gateway.realtime_dashboard.read",
+        "x-starweaver-protocol-family": null
+      }
+    },
     "/admin/v1/dashboards/tenant/overview": {
       "get": {
         "operationId": "gateway_get_admin_v1_dashboards_tenant_overview_gateway_dashboard_tenant_read",
@@ -9285,6 +9728,120 @@
         "x-starweaver-protocol-family": null
       }
     },
+    "/admin/v1/models/aliases/{model_alias_id}/routes": {
+      "get": {
+        "operationId": "gateway_get_admin_v1_models_aliases_model_alias_id_routes_gateway_model_observability_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /admin/v1/models/aliases/{model_alias_id}/routes",
+        "parameters": [
+          {
+            "name": "model_alias_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "gateway.model_observability.read",
+        "x-starweaver-resource-kind": "ModelObservability",
+        "x-starweaver-scope-params": [
+          "tenant_id",
+          "model_alias_id"
+        ],
+        "x-starweaver-allow-api-key": true,
+        "x-starweaver-strong-auth-required": false,
+        "x-starweaver-audit-event-type": "gateway.model_observability.alias.routes.read",
+        "x-starweaver-protocol-family": null
+      }
+    },
+    "/admin/v1/models/aliases/{model_alias_id}/quality": {
+      "get": {
+        "operationId": "gateway_get_admin_v1_models_aliases_model_alias_id_quality_gateway_model_observability_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /admin/v1/models/aliases/{model_alias_id}/quality",
+        "parameters": [
+          {
+            "name": "model_alias_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "gateway.model_observability.read",
+        "x-starweaver-resource-kind": "ModelObservability",
+        "x-starweaver-scope-params": [
+          "tenant_id",
+          "model_alias_id"
+        ],
+        "x-starweaver-allow-api-key": true,
+        "x-starweaver-strong-auth-required": false,
+        "x-starweaver-audit-event-type": "gateway.model_observability.alias.quality.read",
+        "x-starweaver-protocol-family": null
+      }
+    },
     "/admin/v1/models/targets/{model_target_id}/dashboard": {
       "get": {
         "operationId": "gateway_get_admin_v1_models_targets_model_target_id_dashboard_gateway_model_observability_read",
@@ -9396,6 +9953,234 @@
         "x-starweaver-allow-api-key": true,
         "x-starweaver-strong-auth-required": false,
         "x-starweaver-audit-event-type": "gateway.provider_observability.usage.read",
+        "x-starweaver-protocol-family": null
+      }
+    },
+    "/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/health": {
+      "get": {
+        "operationId": "gateway_get_admin_v1_provider_endpoints_provider_endpoint_id_observability_health_gateway_provider_observability_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /admin/v1/provider-endpoints/{provider_endpoint_id}/observability/health",
+        "parameters": [
+          {
+            "name": "provider_endpoint_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "gateway.provider_observability.read",
+        "x-starweaver-resource-kind": "ProviderEndpoint",
+        "x-starweaver-scope-params": [
+          "tenant_id",
+          "provider_endpoint_id"
+        ],
+        "x-starweaver-allow-api-key": true,
+        "x-starweaver-strong-auth-required": false,
+        "x-starweaver-audit-event-type": "gateway.provider_observability.health.read",
+        "x-starweaver-protocol-family": null
+      }
+    },
+    "/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/failover": {
+      "get": {
+        "operationId": "gateway_get_admin_v1_provider_endpoints_provider_endpoint_id_observability_failover_gateway_provider_observability_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /admin/v1/provider-endpoints/{provider_endpoint_id}/observability/failover",
+        "parameters": [
+          {
+            "name": "provider_endpoint_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "gateway.provider_observability.read",
+        "x-starweaver-resource-kind": "ProviderEndpoint",
+        "x-starweaver-scope-params": [
+          "tenant_id",
+          "provider_endpoint_id"
+        ],
+        "x-starweaver-allow-api-key": true,
+        "x-starweaver-strong-auth-required": false,
+        "x-starweaver-audit-event-type": "gateway.provider_observability.failover.read",
+        "x-starweaver-protocol-family": null
+      }
+    },
+    "/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/credentials": {
+      "get": {
+        "operationId": "gateway_get_admin_v1_provider_endpoints_provider_endpoint_id_observability_credentials_gateway_provider_observability_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /admin/v1/provider-endpoints/{provider_endpoint_id}/observability/credentials",
+        "parameters": [
+          {
+            "name": "provider_endpoint_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "gateway.provider_observability.read",
+        "x-starweaver-resource-kind": "ProviderEndpoint",
+        "x-starweaver-scope-params": [
+          "tenant_id",
+          "provider_endpoint_id"
+        ],
+        "x-starweaver-allow-api-key": true,
+        "x-starweaver-strong-auth-required": false,
+        "x-starweaver-audit-event-type": "gateway.provider_observability.credentials.read",
+        "x-starweaver-protocol-family": null
+      }
+    },
+    "/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/model-targets": {
+      "get": {
+        "operationId": "gateway_get_admin_v1_provider_endpoints_provider_endpoint_id_observability_model_targets_gateway_provider_observability_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /admin/v1/provider-endpoints/{provider_endpoint_id}/observability/model-targets",
+        "parameters": [
+          {
+            "name": "provider_endpoint_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "gateway.provider_observability.read",
+        "x-starweaver-resource-kind": "ProviderEndpoint",
+        "x-starweaver-scope-params": [
+          "tenant_id",
+          "provider_endpoint_id"
+        ],
+        "x-starweaver-allow-api-key": true,
+        "x-starweaver-strong-auth-required": false,
+        "x-starweaver-audit-event-type": "gateway.provider_observability.model_targets.read",
         "x-starweaver-protocol-family": null
       }
     },

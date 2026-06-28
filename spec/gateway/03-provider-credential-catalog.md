@@ -443,7 +443,8 @@ Fields:
 
 Pricing match order:
 
-1. Explicit `ModelTarget.pricing_sku_id`.
+1. Explicit `ModelTarget.pricing_sku_id` override, when the selected runtime
+   target names an active SKU visible to the same tenant and organization.
 2. Tenant non-preset SKU matching provider endpoint and target model id.
 3. System preset SKU matching provider endpoint and target model id.
 4. Unknown pricing fallback: record usage with `cost_estimate_unavailable`.

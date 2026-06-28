@@ -657,6 +657,9 @@ pub struct ModelTargetConfig {
     pub protocol_family: ProtocolFamily,
     /// Provider model id sent upstream.
     pub upstream_model_id: String,
+    /// Optional explicit pricing SKU override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing_sku_id: Option<String>,
     /// Target lifecycle status.
     pub status: ResourceStatus,
     /// Whether this target can serve streaming requests.
@@ -851,6 +854,8 @@ pub struct RouteSelection {
     pub model_target_id: String,
     /// Provider model id sent upstream.
     pub upstream_model_id: String,
+    /// Optional explicit pricing SKU override.
+    pub pricing_sku_id: Option<String>,
     /// Selected provider endpoint safe metadata.
     pub provider_endpoint: ProviderEndpoint,
     /// Selected credential id. Secret material is not included.
@@ -949,6 +954,7 @@ fn route_selection(input: RouteSelectionInput<'_>) -> RouteSelection {
         routing_group_id: context.group.routing_group_id.clone(),
         model_target_id: input.target.model_target_id.clone(),
         upstream_model_id: input.target.upstream_model_id.clone(),
+        pricing_sku_id: input.target.pricing_sku_id.clone(),
         provider_endpoint: input.endpoint.clone(),
         upstream_credential_id: input.target.upstream_credential_id.clone(),
         filtered_summary: input.filtered_summary,

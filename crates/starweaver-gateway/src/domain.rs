@@ -1248,6 +1248,8 @@ pub struct ModelTargetRecord {
     pub protocol_family: ProtocolFamily,
     /// Provider model id sent upstream.
     pub upstream_model_id: String,
+    /// Optional explicit pricing SKU override.
+    pub pricing_sku_id: Option<String>,
     /// Whether this target can serve streaming requests.
     pub supports_streaming: bool,
     /// Lifecycle status.

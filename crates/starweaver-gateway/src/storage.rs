@@ -1256,6 +1256,8 @@ pub struct CreateModelTargetRequest {
     pub protocol_family: crate::ProtocolFamily,
     /// Provider model id sent upstream.
     pub upstream_model_id: String,
+    /// Optional explicit pricing SKU override.
+    pub pricing_sku_id: Option<String>,
     /// Whether this target can serve streaming requests.
     pub supports_streaming: bool,
     /// Creating actor.
@@ -4730,6 +4732,7 @@ impl CatalogAdminRepository for InMemoryGatewayStore {
             upstream_credential_id: request.upstream_credential_id,
             protocol_family: request.protocol_family,
             upstream_model_id: request.upstream_model_id,
+            pricing_sku_id: request.pricing_sku_id,
             supports_streaming: request.supports_streaming,
             status: ResourceStatus::Active,
             resource_version: 1,
@@ -6208,6 +6211,34 @@ fn validate_model_target_refs(
         if credential.provider_endpoint_id != request.provider_endpoint_id {
             return Err(GatewayError::BadRequest {
                 message: "upstream_credential_endpoint_mismatch".to_owned(),
+            });
+        }
+    }
+    if let Some(pricing_sku_id) = request.pricing_sku_id.as_deref() {
+        let Some(pricing_sku) = read_lock(&store.pricing_skus).get(pricing_sku_id).cloned() else {
+            return Err(GatewayError::NotFound {
+                resource: format!("pricing SKU {pricing_sku_id}"),
+            });
+        };
+        if pricing_sku.tenant_id != request.tenant_id {
+            return Err(GatewayError::Authorization {
+                reason: "pricing_sku_tenant_mismatch",
+            });
+        }
+        if !pricing_sku.status.is_active() {
+            return Err(GatewayError::BadRequest {
+                message: "pricing_sku_not_active".to_owned(),
+            });
+        }
+        if pricing_sku
+            .organization_id
+            .as_ref()
+            .is_some_and(|organization_id| {
+                Some(organization_id) != request.organization_id.as_ref()
+            })
+        {
+            return Err(GatewayError::Authorization {
+                reason: "pricing_sku_organization_mismatch",
             });
         }
     }
@@ -10334,6 +10365,8 @@ mod tests {
         include_str!("../migrations/20260628000001_route_evidence_fields.sql");
     const USAGE_EVENT_TRACE_ID_MIGRATION: &str =
         include_str!("../migrations/20260628000002_usage_event_trace_id.sql");
+    const MODEL_TARGET_PRICING_SKU_MIGRATION: &str =
+        include_str!("../migrations/20260628000003_model_target_pricing_sku.sql");
 
     #[test]
     fn in_memory_bootstrap_default_project_is_idempotent() {
@@ -10609,6 +10642,20 @@ mod tests {
             assert!(
                 USAGE_EVENT_TRACE_ID_MIGRATION.contains(token),
                 "missing usage trace migration token {token}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_target_pricing_sku_migration_adds_explicit_override() {
+        for token in [
+            "ADD COLUMN IF NOT EXISTS pricing_sku_id TEXT REFERENCES gateway_pricing_skus",
+            "gateway_model_targets_pricing_sku_idx",
+            "pricing_sku_id IS NOT NULL",
+        ] {
+            assert!(
+                MODEL_TARGET_PRICING_SKU_MIGRATION.contains(token),
+                "missing model target pricing SKU migration token {token}"
             );
         }
     }

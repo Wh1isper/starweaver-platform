@@ -142,14 +142,30 @@ Completed foundation slices:
   rollups through the durable-first read adapters when PostgreSQL is attached,
   preserving the in-memory replay path for local tests and single-node
   development.
+- Built-in realtime operations endpoints now expose overview, providers,
+  routes, budgets, quotas, and workers under `/admin/v1/realtime/*`, all using
+  the same realtime dashboard authorization action and Redis-compatible
+  hot-state or safe operational evidence sources without querying OpenTelemetry.
+- Model observability endpoints now expose alias dashboard, target dashboard,
+  alias route diagnostics, alias quality, provider endpoint usage, and provider
+  endpoint model-target breakdowns from durable route and usage evidence.
+- Budget and quota dashboard endpoints now expose scope-filtered budget
+  posture, budget timeseries, quota posture, and rate-limit timeseries from
+  durable ledger buckets plus Redis-compatible hot-state availability markers,
+  without querying OpenTelemetry metrics backends.
+- Provider endpoint observability endpoints now expose health, failover, and
+  masked credential posture from Redis-compatible hot-state, durable route
+  evidence, and safe credential metadata without returning raw secret refs or
+  provider credentials.
 - Usage export jobs now build manifest pages from the durable-first usage event
   read adapter when PostgreSQL is attached, aligning exports with usage
   analytics and dashboard read paths.
-- OpenTelemetry exporter runs now build metric counts and OTLP payloads from
-  the durable-first route evidence, usage event, and ledger-bucket adapters
-  when PostgreSQL is attached. The store-only test API remains compatible for
-  deterministic local replay, while background worker execution uses the full
-  `AppState` path so exported dashboard metrics match durable admin reads.
+- OpenTelemetry exporter runs now build metric counts, low-cardinality provider
+  performance metrics, and OTLP payloads from the durable-first route evidence,
+  usage event, and ledger-bucket adapters when PostgreSQL is attached. The
+  store-only test API remains compatible for deterministic local replay, while
+  background worker execution uses the full `AppState` path so exported
+  dashboard metrics match durable admin reads.
 - Sticky routing now uses Redis-compatible hot-state mappings keyed by tenant,
   project, model alias, and a hashed affinity header. Runtime routing reuses a
   fresh sticky target when it is still eligible, records sticky hit or miss
@@ -308,6 +324,12 @@ Completed foundation slices:
   these durable ledger buckets for token, cost, usage-confidence, and latency
   measures across tenant, organization, project, project member, API key, model,
   target, and provider scopes without reading the OpenTelemetry backend.
+- Runtime cost estimation now prefers explicit model target `pricing_sku_id`
+  overrides, falls back to active tenant pricing SKU matching by upstream model
+  id and provider endpoint id, writes `pricing_sku_id`, pricing version,
+  fixed-point component costs, and total cost into usage events, and folds the
+  estimated cost into durable ledger buckets. Unmatched requests stay explicitly
+  `unpriced` with safe diagnostics.
 - Usage analytics admin APIs now expose summary, timeseries, paginated event
   rows, and project, project-member, model, and provider-endpoint breakdowns
   from durable usage events and ledger buckets. Scope resolution uses the same
@@ -1050,7 +1072,9 @@ Work items:
   tenant, organization, project, project member, principal, API key, service
   account, model alias, model target, route policy, routing group, provider
   endpoint, protocol family, usage confidence, pricing SKU, and request status.
-- Implement fixed-point cost estimates with pricing version.
+- Implement fixed-point cost estimates with pricing version, including explicit
+  model target SKU overrides before active SKU matching by upstream model id and
+  provider endpoint id.
 - Implement ledger bucket folding for minute, hour, day, month, and event
   buckets.
 - Implement budget policy preflight, reservation, finalizer, conservative stale
