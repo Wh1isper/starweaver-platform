@@ -24,7 +24,7 @@ manage configuration and inspect operational evidence.
 ## Non-Goals
 
 - Do not expose an end-user billing product API.
-- Do not couple the API to a specific future web UI.
+- Do not couple the API to a specific admin console implementation.
 - Do not let runtime workers mutate long-lived configuration except through
   narrow health and usage write paths.
 - Do not become a generic identity provider. The gateway may act as a

@@ -23,7 +23,7 @@ framework-heavy service without validated behavior.
 
 ## Non-Goals
 
-- Do not require the future web UI before gateway runtime validation.
+- Do not require the admin console before gateway runtime validation.
 - Do not build every provider family in the first phase.
 - Do not require paid billing workflows.
 - Do not migrate unrelated client SDK, application runtime, or developer CLI code
@@ -504,7 +504,8 @@ Reviewers should confirm:
 - route groups are first-class
 - organizations can be granted provider availability
 - administrators manage upstream credentials
-- future web UI is not implied by current docs
+- admin console work is specified separately and does not change backend
+  resource semantics
 - open-source users can run without a commercial platform
 
 ## Review Checklist: Security

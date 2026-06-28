@@ -19,7 +19,7 @@ tenant/project hierarchy.
 - Support API keys and caller credentials that are narrow, revocable, auditable,
   and scoped to projects, model aliases, and REST API actions.
 - Allow policy inheritance while keeping override order deterministic.
-- Keep authorization independent from the future web UI.
+- Keep authorization independent from the admin console implementation.
 
 ## Non-Goals
 

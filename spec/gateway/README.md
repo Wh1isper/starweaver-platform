@@ -59,6 +59,7 @@ flowchart TD
 | `10-authorization-api-keys.md`            | API keys, REST API permissions, authorization engine, actions, and policy gates              |
 | `11-login-user-management.md`             | single-user bootstrap, generic OIDC login, sessions, user lifecycle, and memberships         |
 | `12-dashboards-observability-api.md`      | realtime operations dashboard, usage analytics, model observability, and aggregations        |
+| `ui/`                                     | admin console UI spec, implementation plan, and module-level UI/UX reviews                   |
 | `memos/`                                  | implementation planning notes, including framework selection                                 |
 
 ## Requirements Covered
@@ -78,7 +79,8 @@ flowchart TD
 - User-owned and service-owned API keys that can call model APIs and authorized
   REST APIs.
 - Unified authorization for model ingress and admin/evidence REST APIs.
-- Future web UI work is a separate product design.
+- Admin console UI work is specified separately under `ui/` and must not change
+  backend resource semantics.
 - No dependency on a specific application runtime, developer CLI, or client SDK
   implementation.
 
