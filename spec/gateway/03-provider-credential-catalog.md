@@ -553,8 +553,11 @@ Candidate admin resources:
 /admin/v1/pricing-skus
 /admin/v1/catalog-imports
 /admin/v1/codex/oauth/connections
-/admin/v1/codex/oauth/sessions
-/admin/v1/codex/oauth/refresh-status
+/admin/v1/codex/oauth/connections/{codex_oauth_connection_id}
+/admin/v1/codex/oauth/connections/{codex_oauth_connection_id}/sessions
+/admin/v1/codex/oauth/sessions/{codex_oauth_session_id}
+/admin/v1/codex/oauth/sessions/{codex_oauth_session_id}/revoke
+/admin/v1/codex/oauth/refresh-status/{codex_oauth_connection_id}
 ```
 
 Read APIs default to safe metadata. Strong-auth security-admin-only endpoints

@@ -81,8 +81,16 @@ export STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD='change-me'
 
 When both values are configured, `/auth/v1/single-user/login` creates an opaque
 session and bootstraps the default tenant, organization, project, and owner
-grants. GitHub OAuth App or OIDC login can be configured later through the
-admin identity-provider APIs.
+grants. The login response includes CSRF metadata; browser clients must send the
+returned `x-gateway-csrf-token` value on session mutation APIs. GitHub OAuth App
+or OIDC login can be configured later through the admin identity-provider APIs.
+
+For local file-backed usage or audit exports, configure an absolute export
+object directory and request `storage_backend: file_object_storage`:
+
+```bash
+export STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_DIR=/var/lib/starweaver/gateway-exports
+```
 
 For a local gateway stack with PostgreSQL, Redis, migration, and `/readyz`
 smoke:

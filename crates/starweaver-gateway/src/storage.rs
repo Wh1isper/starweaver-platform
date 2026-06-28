@@ -15,11 +15,13 @@ use crate::action::{ActionGrant, AuthorizationDecisionRecord, AuthorizationEvide
 use crate::config::PublishedConfigSnapshot;
 use crate::domain::{
     new_prefixed_id, ApiKeyRecord, ApiKeyStatus, AuditEventRecord, AuthSessionRecord,
-    AuthSessionStatus, BudgetPolicyRecord, ConfigInvalidationEventRecord,
-    ConfigPublicationPointerRecord, ConfigReloadSource, ConfigSnapshot, ConfigSnapshotStatus,
-    ConfigWorkerReloadRecord, ConfigWorkerReloadStatus, DirectoryStatus, EmergencyOperationRecord,
-    ExportJobRecord, ExportManifestRecord, ExternalIdentityRecord, InvitationStatus,
-    LedgerBucketRecord, LoginProviderRecord, MembershipStatus, ModelAliasRecord, ModelTargetRecord,
+    AuthSessionStatus, BudgetPolicyRecord, CodexOAuthConnectionRecord, CodexOAuthConnectionStatus,
+    CodexOAuthRefreshStatusRecord, CodexOAuthSessionRecord, CodexOAuthSessionStatus,
+    ConfigInvalidationEventRecord, ConfigPublicationPointerRecord, ConfigReloadSource,
+    ConfigSnapshot, ConfigSnapshotStatus, ConfigWorkerReloadRecord, ConfigWorkerReloadStatus,
+    DirectoryStatus, EmergencyOperationRecord, ExportJobRecord, ExportManifestRecord,
+    ExternalIdentityRecord, InvitationStatus, LedgerBucketRecord, LoginAttemptRecord,
+    LoginProviderRecord, MembershipStatus, ModelAliasRecord, ModelTargetRecord,
     NotificationDeliveryAttemptRecord, NotificationOutboxEventRecord, NotificationSinkRecord,
     NotificationSubscriptionRecord, OrganizationInvitationRecord, OrganizationMembershipRecord,
     OrganizationRecord, OtelExportConfigRecord, OtelExporterHealthRecord, OtelHeaderRef,
@@ -1113,6 +1115,98 @@ pub struct CreateUpstreamCredentialRequest {
     pub created_by: String,
 }
 
+/// Request to create a Codex upstream OAuth connection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateCodexOAuthConnectionRequest {
+    /// Tenant boundary.
+    pub tenant_id: String,
+    /// Optional organization boundary.
+    pub organization_id: Option<String>,
+    /// Compatible Codex provider endpoint.
+    pub provider_endpoint_id: String,
+    /// Admin-visible display name.
+    pub display_name: String,
+    /// Creating actor.
+    pub created_by: String,
+}
+
+/// Request to start a Codex upstream OAuth session from stored token material.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StartCodexOAuthSessionRequest {
+    /// Tenant boundary.
+    pub tenant_id: String,
+    /// Parent Codex OAuth connection.
+    pub codex_oauth_connection_id: String,
+    /// Secret ref that stores the token bundle.
+    pub token_secret_ref_id: String,
+    /// Token expiry when known.
+    pub token_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Creating actor.
+    pub created_by: String,
+}
+
+/// Codex upstream OAuth repository boundary.
+pub trait CodexOAuthRepository: Send + Sync {
+    /// Creates a Codex OAuth connection.
+    fn create_codex_oauth_connection(
+        &self,
+        request: CreateCodexOAuthConnectionRequest,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<CodexOAuthConnectionRecord>;
+
+    /// Lists Codex OAuth connections in a tenant.
+    fn codex_oauth_connections_for_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Vec<CodexOAuthConnectionRecord>;
+
+    /// Loads Codex OAuth connection metadata.
+    fn codex_oauth_connection(
+        &self,
+        codex_oauth_connection_id: &str,
+    ) -> Option<CodexOAuthConnectionRecord>;
+
+    /// Updates Codex OAuth connection status.
+    fn update_codex_oauth_connection_status(
+        &self,
+        codex_oauth_connection_id: &str,
+        expected_resource_version: i64,
+        status: CodexOAuthConnectionStatus,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<CodexOAuthConnectionRecord>;
+
+    /// Starts a Codex OAuth session and creates the matching upstream credential.
+    fn start_codex_oauth_session(
+        &self,
+        request: StartCodexOAuthSessionRequest,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<CodexOAuthSessionRecord>;
+
+    /// Lists Codex OAuth sessions for a connection.
+    fn codex_oauth_sessions_for_connection(
+        &self,
+        tenant_id: &str,
+        codex_oauth_connection_id: &str,
+    ) -> Vec<CodexOAuthSessionRecord>;
+
+    /// Loads Codex OAuth session metadata.
+    fn codex_oauth_session(&self, codex_oauth_session_id: &str) -> Option<CodexOAuthSessionRecord>;
+
+    /// Revokes a Codex OAuth session.
+    fn revoke_codex_oauth_session(
+        &self,
+        codex_oauth_session_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<CodexOAuthSessionRecord>;
+
+    /// Reads safe Codex OAuth refresh status metadata.
+    fn codex_oauth_refresh_status(
+        &self,
+        tenant_id: &str,
+        codex_oauth_connection_id: &str,
+    ) -> Option<CodexOAuthRefreshStatusRecord>;
+}
+
 /// Request to create a model target admin resource.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreateModelTargetRequest {
@@ -1599,6 +1693,59 @@ pub struct CreateLoginProviderRequest {
     pub created_by: String,
 }
 
+/// Request to persist a one-time external login attempt.
+#[derive(Clone, Debug)]
+pub struct CreateLoginAttemptRequest {
+    /// Tenant boundary.
+    pub tenant_id: String,
+    /// Login provider id.
+    pub login_provider_id: String,
+    /// Provider adapter kind.
+    pub provider_kind: String,
+    /// Hash of the raw OAuth/OIDC state value.
+    pub state_hash: String,
+    /// Hash of the raw OIDC nonce when present.
+    pub nonce_hash: Option<String>,
+    /// Hash of the raw PKCE code verifier.
+    pub code_verifier_hash: String,
+    /// Short-lived raw PKCE code verifier for the token exchange.
+    pub code_verifier: SecretString,
+    /// Public PKCE S256 challenge sent to the provider.
+    pub code_challenge: String,
+    /// Redirect URI used for this attempt.
+    pub redirect_uri: String,
+    /// Attempt expiry.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Consumed one-time external login attempt and its short-lived verifier.
+#[derive(Clone, Debug)]
+pub struct ConsumedLoginAttempt {
+    /// Durable attempt metadata.
+    pub record: LoginAttemptRecord,
+    /// Raw PKCE verifier used once for the provider token exchange.
+    pub code_verifier: SecretString,
+}
+
+/// Request to create or update a local user from validated external login claims.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpsertExternalLoginIdentityRequest {
+    /// Tenant boundary.
+    pub tenant_id: String,
+    /// Login provider id.
+    pub login_provider_id: String,
+    /// Provider adapter kind.
+    pub provider_kind: String,
+    /// Stable provider subject.
+    pub provider_subject: String,
+    /// Last observed normalized email.
+    pub email: Option<String>,
+    /// Whether the provider asserted email verification.
+    pub email_verified: bool,
+    /// Display name for a newly created user.
+    pub display_name: String,
+}
+
 /// Stored idempotent admin mutation response.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IdempotencyRecord {
@@ -1631,6 +1778,8 @@ pub struct InMemoryGatewayStore {
     api_key_failed_auth: Arc<RwLock<HashMap<String, Vec<chrono::DateTime<chrono::Utc>>>>>,
     api_key_last_used_updates: Arc<RwLock<Vec<ApiKeyLastUsedUpdate>>>,
     auth_sessions: Arc<RwLock<HashMap<String, AuthSessionRecord>>>,
+    login_attempts: Arc<RwLock<HashMap<String, LoginAttemptRecord>>>,
+    login_attempt_code_verifiers: Arc<RwLock<HashMap<String, SecretString>>>,
     project_memberships: Arc<RwLock<HashMap<(String, String), ProjectMembershipRecord>>>,
     latest_snapshot: Arc<RwLock<Option<ConfigSnapshot>>>,
     config_snapshots: Arc<RwLock<Vec<PublishedConfigSnapshot>>>,
@@ -1656,6 +1805,8 @@ pub struct InMemoryGatewayStore {
     secret_refs: Arc<RwLock<HashMap<String, SecretRefRecord>>>,
     secret_values: Arc<RwLock<HashMap<String, SecretString>>>,
     upstream_credentials: Arc<RwLock<HashMap<String, UpstreamCredentialRecord>>>,
+    codex_oauth_connections: Arc<RwLock<HashMap<String, CodexOAuthConnectionRecord>>>,
+    codex_oauth_sessions: Arc<RwLock<HashMap<String, CodexOAuthSessionRecord>>>,
     model_targets: Arc<RwLock<HashMap<String, ModelTargetRecord>>>,
     routing_groups: Arc<RwLock<HashMap<String, RoutingGroupRecord>>>,
     routing_group_targets: Arc<RwLock<HashMap<String, RoutingGroupTargetRecord>>>,
@@ -1746,6 +1897,81 @@ impl InMemoryGatewayStore {
     /// Inserts or replaces an external identity by id.
     pub fn insert_external_identity(&self, record: ExternalIdentityRecord) {
         write_lock(&self.external_identities).insert(record.external_identity_id.clone(), record);
+    }
+
+    /// Persists one one-time external login attempt by state hash.
+    pub fn create_login_attempt(
+        &self,
+        request: CreateLoginAttemptRequest,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<LoginAttemptRecord> {
+        let record = LoginAttemptRecord {
+            login_attempt_id: new_prefixed_id("lat"),
+            tenant_id: request.tenant_id,
+            login_provider_id: request.login_provider_id,
+            provider_kind: request.provider_kind,
+            state_hash: request.state_hash,
+            nonce_hash: request.nonce_hash,
+            code_verifier_hash: request.code_verifier_hash,
+            code_challenge: request.code_challenge,
+            redirect_uri: request.redirect_uri,
+            status: "pending".to_owned(),
+            expires_at: request.expires_at,
+            consumed_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let mut attempts = write_lock(&self.login_attempts);
+        if attempts.contains_key(&record.state_hash) {
+            return Err(GatewayError::BadRequest {
+                message: "login_attempt_state_conflict".to_owned(),
+            });
+        }
+        let state_hash = record.state_hash.clone();
+        attempts.insert(record.state_hash.clone(), record.clone());
+        drop(attempts);
+        write_lock(&self.login_attempt_code_verifiers).insert(state_hash, request.code_verifier);
+        Ok(record)
+    }
+
+    /// Consumes one pending external login attempt by state hash.
+    pub fn consume_login_attempt(
+        &self,
+        state_hash: &str,
+        login_provider_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ConsumedLoginAttempt> {
+        let mut attempts = write_lock(&self.login_attempts);
+        let Some(attempt) = attempts.get_mut(state_hash) else {
+            return Err(GatewayError::Authentication);
+        };
+        if attempt.login_provider_id != login_provider_id
+            || attempt.status != "pending"
+            || attempt.expires_at <= now
+        {
+            return Err(GatewayError::Authentication);
+        }
+        "consumed".clone_into(&mut attempt.status);
+        attempt.consumed_at = Some(now);
+        attempt.updated_at = now;
+        let consumed = attempt.clone();
+        drop(attempts);
+        let code_verifier = write_lock(&self.login_attempt_code_verifiers)
+            .remove(state_hash)
+            .ok_or(GatewayError::Authentication)?;
+        Ok(ConsumedLoginAttempt {
+            record: consumed,
+            code_verifier,
+        })
+    }
+
+    /// Creates or updates the local user and external identity for validated claims.
+    pub fn upsert_external_login_identity(
+        &self,
+        request: UpsertExternalLoginIdentityRequest,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(UserRecord, ExternalIdentityRecord, bool)> {
+        upsert_external_login_identity(self, request, now)
     }
 
     /// Lists organization memberships for one principal.
@@ -1858,6 +2084,14 @@ impl InMemoryGatewayStore {
             Err(poisoned) => poisoned.into_inner(),
         };
         route_attempts.clone()
+    }
+
+    /// Returns known tenant ids.
+    #[must_use]
+    pub fn tenant_ids(&self) -> Vec<String> {
+        let mut tenant_ids = read_lock(&self.tenants).keys().cloned().collect::<Vec<_>>();
+        tenant_ids.sort();
+        tenant_ids
     }
 
     /// Returns all OpenTelemetry export configs.
@@ -4079,6 +4313,255 @@ impl ProviderAdminRepository for InMemoryGatewayStore {
     }
 }
 
+impl CodexOAuthRepository for InMemoryGatewayStore {
+    fn create_codex_oauth_connection(
+        &self,
+        request: CreateCodexOAuthConnectionRequest,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<CodexOAuthConnectionRecord> {
+        validate_codex_oauth_connection_request(self, &request)?;
+        let record = CodexOAuthConnectionRecord {
+            codex_oauth_connection_id: new_prefixed_id("coc"),
+            tenant_id: request.tenant_id,
+            organization_id: request.organization_id,
+            provider_endpoint_id: request.provider_endpoint_id,
+            upstream_credential_id: None,
+            display_name: request.display_name.trim().to_owned(),
+            status: CodexOAuthConnectionStatus::Unauthenticated,
+            resource_version: 1,
+            schema_version: 1,
+            created_by: request.created_by,
+            created_at: now,
+            updated_at: now,
+        };
+        write_lock(&self.codex_oauth_connections)
+            .insert(record.codex_oauth_connection_id.clone(), record.clone());
+        Ok(record)
+    }
+
+    fn codex_oauth_connections_for_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Vec<CodexOAuthConnectionRecord> {
+        let mut connections = read_lock(&self.codex_oauth_connections)
+            .values()
+            .filter(|connection| connection.tenant_id == tenant_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        connections.sort_by(|left, right| {
+            left.organization_id
+                .cmp(&right.organization_id)
+                .then_with(|| left.display_name.cmp(&right.display_name))
+                .then_with(|| {
+                    left.codex_oauth_connection_id
+                        .cmp(&right.codex_oauth_connection_id)
+                })
+        });
+        connections
+    }
+
+    fn codex_oauth_connection(
+        &self,
+        codex_oauth_connection_id: &str,
+    ) -> Option<CodexOAuthConnectionRecord> {
+        read_lock(&self.codex_oauth_connections)
+            .get(codex_oauth_connection_id)
+            .cloned()
+    }
+
+    fn update_codex_oauth_connection_status(
+        &self,
+        codex_oauth_connection_id: &str,
+        expected_resource_version: i64,
+        status: CodexOAuthConnectionStatus,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<CodexOAuthConnectionRecord> {
+        let mut connections = write_lock(&self.codex_oauth_connections);
+        let Some(connection) = connections.get_mut(codex_oauth_connection_id) else {
+            return Err(GatewayError::NotFound {
+                resource: format!("codex oauth connection {codex_oauth_connection_id}"),
+            });
+        };
+        if connection.resource_version != expected_resource_version {
+            return Err(GatewayError::BadRequest {
+                message: "stale_resource_version".to_owned(),
+            });
+        }
+        if status == CodexOAuthConnectionStatus::Disabled {
+            if let Some(upstream_credential_id) = connection.upstream_credential_id.as_deref() {
+                disable_upstream_credential_if_current(self, upstream_credential_id, now);
+            }
+        }
+        if status == CodexOAuthConnectionStatus::Unauthenticated {
+            connection.upstream_credential_id = None;
+        }
+        connection.status = status;
+        connection.resource_version += 1;
+        connection.updated_at = now;
+        let updated = connection.clone();
+        drop(connections);
+        Ok(updated)
+    }
+
+    fn start_codex_oauth_session(
+        &self,
+        request: StartCodexOAuthSessionRequest,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<CodexOAuthSessionRecord> {
+        if request
+            .token_expires_at
+            .is_some_and(|expires_at| expires_at <= now)
+        {
+            return Err(GatewayError::BadRequest {
+                message: "codex_oauth_token_expired".to_owned(),
+            });
+        }
+        let connection = validate_codex_oauth_session_request(self, &request)?;
+        let credential = self.create_upstream_credential(
+            CreateUpstreamCredentialRequest {
+                tenant_id: request.tenant_id.clone(),
+                organization_id: connection.organization_id,
+                provider_endpoint_id: connection.provider_endpoint_id,
+                credential_kind: "codex_oauth".to_owned(),
+                secret_ref_id: request.token_secret_ref_id.clone(),
+                created_by: request.created_by.clone(),
+            },
+            now,
+        )?;
+        let record = CodexOAuthSessionRecord {
+            codex_oauth_session_id: new_prefixed_id("cos"),
+            tenant_id: request.tenant_id,
+            codex_oauth_connection_id: request.codex_oauth_connection_id,
+            upstream_credential_id: credential.upstream_credential_id.clone(),
+            token_secret_ref_id: request.token_secret_ref_id,
+            token_expires_at: request.token_expires_at,
+            status: CodexOAuthSessionStatus::Active,
+            resource_version: 1,
+            schema_version: 1,
+            created_by: request.created_by,
+            revoked_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        write_lock(&self.codex_oauth_sessions)
+            .insert(record.codex_oauth_session_id.clone(), record.clone());
+        {
+            let mut connections = write_lock(&self.codex_oauth_connections);
+            let Some(connection) = connections.get_mut(&record.codex_oauth_connection_id) else {
+                return Err(GatewayError::NotFound {
+                    resource: format!(
+                        "codex oauth connection {}",
+                        record.codex_oauth_connection_id
+                    ),
+                });
+            };
+            connection.upstream_credential_id = Some(credential.upstream_credential_id);
+            connection.status = CodexOAuthConnectionStatus::Active;
+            connection.resource_version += 1;
+            connection.updated_at = now;
+            drop(connections);
+        }
+        Ok(record)
+    }
+
+    fn codex_oauth_sessions_for_connection(
+        &self,
+        tenant_id: &str,
+        codex_oauth_connection_id: &str,
+    ) -> Vec<CodexOAuthSessionRecord> {
+        let mut sessions = read_lock(&self.codex_oauth_sessions)
+            .values()
+            .filter(|session| {
+                session.tenant_id == tenant_id
+                    && session.codex_oauth_connection_id == codex_oauth_connection_id
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        sessions.sort_by(|left, right| {
+            right.created_at.cmp(&left.created_at).then_with(|| {
+                left.codex_oauth_session_id
+                    .cmp(&right.codex_oauth_session_id)
+            })
+        });
+        sessions
+    }
+
+    fn codex_oauth_session(&self, codex_oauth_session_id: &str) -> Option<CodexOAuthSessionRecord> {
+        read_lock(&self.codex_oauth_sessions)
+            .get(codex_oauth_session_id)
+            .cloned()
+    }
+
+    fn revoke_codex_oauth_session(
+        &self,
+        codex_oauth_session_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<CodexOAuthSessionRecord> {
+        let mut sessions = write_lock(&self.codex_oauth_sessions);
+        let Some(session) = sessions.get_mut(codex_oauth_session_id) else {
+            return Err(GatewayError::NotFound {
+                resource: format!("codex oauth session {codex_oauth_session_id}"),
+            });
+        };
+        session.status = CodexOAuthSessionStatus::Revoked;
+        session.resource_version += 1;
+        session.revoked_at = Some(now);
+        session.updated_at = now;
+        let updated = session.clone();
+        drop(sessions);
+
+        disable_upstream_credential_if_current(self, &updated.upstream_credential_id, now);
+        {
+            let mut connections = write_lock(&self.codex_oauth_connections);
+            if let Some(connection) = connections.get_mut(&updated.codex_oauth_connection_id) {
+                if connection.upstream_credential_id.as_deref()
+                    == Some(&updated.upstream_credential_id)
+                {
+                    connection.upstream_credential_id = None;
+                    connection.status = CodexOAuthConnectionStatus::Unauthenticated;
+                    connection.resource_version += 1;
+                    connection.updated_at = now;
+                }
+            }
+            drop(connections);
+        }
+        Ok(updated)
+    }
+
+    fn codex_oauth_refresh_status(
+        &self,
+        tenant_id: &str,
+        codex_oauth_connection_id: &str,
+    ) -> Option<CodexOAuthRefreshStatusRecord> {
+        let connection = self.codex_oauth_connection(codex_oauth_connection_id)?;
+        if connection.tenant_id != tenant_id {
+            return None;
+        }
+        let latest_session = self
+            .codex_oauth_sessions_for_connection(tenant_id, codex_oauth_connection_id)
+            .into_iter()
+            .find(|session| {
+                connection.upstream_credential_id.as_deref()
+                    == Some(session.upstream_credential_id.as_str())
+            });
+        Some(CodexOAuthRefreshStatusRecord {
+            codex_oauth_refresh_status_id: format!("cofr_{codex_oauth_connection_id}"),
+            tenant_id: tenant_id.to_owned(),
+            codex_oauth_connection_id: codex_oauth_connection_id.to_owned(),
+            upstream_credential_id: connection.upstream_credential_id,
+            status: connection.status,
+            last_refresh_at: None,
+            next_refresh_at: latest_session
+                .as_ref()
+                .and_then(|session| session.token_expires_at)
+                .map(|expires_at| expires_at - chrono::Duration::minutes(5)),
+            token_expires_at: latest_session.and_then(|session| session.token_expires_at),
+            last_error: None,
+            updated_at: connection.updated_at,
+        })
+    }
+}
+
 impl CatalogAdminRepository for InMemoryGatewayStore {
     fn create_model_target(
         &self,
@@ -5370,6 +5853,119 @@ fn validate_upstream_credential_endpoint(
         "upstream_credential_secret_ref",
     )?;
     Ok(())
+}
+
+fn validate_codex_oauth_connection_request(
+    store: &InMemoryGatewayStore,
+    request: &CreateCodexOAuthConnectionRequest,
+) -> Result<()> {
+    validate_optional_organization_scope(
+        store,
+        &request.tenant_id,
+        request.organization_id.as_deref(),
+    )?;
+    if request.display_name.trim().is_empty() || request.display_name.len() > 120 {
+        return Err(GatewayError::BadRequest {
+            message: "codex_oauth_connection_display_name_invalid".to_owned(),
+        });
+    }
+    let Some(endpoint) = read_lock(&store.provider_endpoints)
+        .get(&request.provider_endpoint_id)
+        .cloned()
+    else {
+        return Err(GatewayError::NotFound {
+            resource: format!("provider endpoint {}", request.provider_endpoint_id),
+        });
+    };
+    if endpoint.tenant_id != request.tenant_id {
+        return Err(GatewayError::Authorization {
+            reason: "provider_endpoint_tenant_mismatch",
+        });
+    }
+    if endpoint.provider_kind != "codex" {
+        return Err(GatewayError::BadRequest {
+            message: "codex_oauth_requires_codex_provider_endpoint".to_owned(),
+        });
+    }
+    if !endpoint
+        .protocol_families
+        .contains(&ProtocolFamily::OpenAiResponses)
+    {
+        return Err(GatewayError::BadRequest {
+            message: "codex_oauth_requires_openai_responses_protocol".to_owned(),
+        });
+    }
+    if request.organization_id.is_some()
+        && endpoint.organization_id.is_some()
+        && endpoint.organization_id != request.organization_id
+    {
+        return Err(GatewayError::Authorization {
+            reason: "provider_endpoint_organization_mismatch",
+        });
+    }
+    let duplicate = read_lock(&store.codex_oauth_connections)
+        .values()
+        .any(|connection| {
+            connection.tenant_id == request.tenant_id
+                && connection.organization_id == request.organization_id
+                && connection.display_name == request.display_name.trim()
+                && connection.status != CodexOAuthConnectionStatus::Disabled
+        });
+    if duplicate {
+        return Err(GatewayError::BadRequest {
+            message: "codex_oauth_connection_conflict".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_codex_oauth_session_request(
+    store: &InMemoryGatewayStore,
+    request: &StartCodexOAuthSessionRequest,
+) -> Result<CodexOAuthConnectionRecord> {
+    let Some(connection) = read_lock(&store.codex_oauth_connections)
+        .get(&request.codex_oauth_connection_id)
+        .cloned()
+    else {
+        return Err(GatewayError::NotFound {
+            resource: format!(
+                "codex oauth connection {}",
+                request.codex_oauth_connection_id
+            ),
+        });
+    };
+    if connection.tenant_id != request.tenant_id {
+        return Err(GatewayError::Authorization {
+            reason: "codex_oauth_connection_tenant_mismatch",
+        });
+    }
+    if connection.status == CodexOAuthConnectionStatus::Disabled {
+        return Err(GatewayError::BadRequest {
+            message: "codex_oauth_connection_disabled".to_owned(),
+        });
+    }
+    ensure_secret_ref_usable(
+        store,
+        &request.tenant_id,
+        connection.organization_id.as_deref(),
+        None,
+        &request.token_secret_ref_id,
+        "codex_oauth_token_secret_ref",
+    )?;
+    Ok(connection)
+}
+
+fn disable_upstream_credential_if_current(
+    store: &InMemoryGatewayStore,
+    upstream_credential_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    let mut credentials = write_lock(&store.upstream_credentials);
+    if let Some(credential) = credentials.get_mut(upstream_credential_id) {
+        credential.status = UpstreamCredentialStatus::Disabled;
+        credential.resource_version += 1;
+        credential.updated_at = now;
+    }
 }
 
 fn validate_model_target_refs(
@@ -6860,9 +7456,10 @@ fn validate_otel_resource_attributes(attributes: &[OtelResourceAttribute]) -> Re
 
 fn otel_endpoint_host(value: &str) -> Option<String> {
     let uri = value.parse::<http::Uri>().ok()?;
-    if uri.scheme_str() != Some("https") || uri.query().is_some() {
+    if uri.query().is_some() {
         return None;
     }
+    let scheme = uri.scheme_str()?;
     let authority = uri.authority()?;
     if authority.as_str().contains('@') {
         return None;
@@ -6871,7 +7468,36 @@ fn otel_endpoint_host(value: &str) -> Option<String> {
     if host.is_empty() || host.len() > 253 {
         return None;
     }
-    Some(host.to_owned())
+    match scheme {
+        "https" => Some(host.to_owned()),
+        "http" if matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1") => {
+            Some(host.to_owned())
+        }
+        _ => None,
+    }
+}
+
+fn webhook_endpoint_host(value: &str) -> Option<String> {
+    let uri = value.parse::<http::Uri>().ok()?;
+    if uri.query().is_some() {
+        return None;
+    }
+    let scheme = uri.scheme_str()?;
+    let authority = uri.authority()?;
+    if authority.as_str().contains('@') {
+        return None;
+    }
+    let host = authority.host();
+    if host.is_empty() || host.len() > 253 {
+        return None;
+    }
+    match scheme {
+        "https" => Some(host.to_owned()),
+        "http" if matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1") => {
+            Some(host.to_owned())
+        }
+        _ => None,
+    }
 }
 
 fn valid_otel_header_name(value: &str) -> bool {
@@ -7086,7 +7712,7 @@ fn validate_webhook_notification_sink(request: &CreateNotificationSinkRequest) -
             message: "notification_sink_webhook_url_required".to_owned(),
         });
     };
-    if otel_endpoint_host(url).is_none() {
+    if webhook_endpoint_host(url).is_none() {
         return Err(GatewayError::BadRequest {
             message: "notification_sink_webhook_url_invalid".to_owned(),
         });
@@ -7224,7 +7850,15 @@ fn validate_login_provider_shape(request: &CreateLoginProviderRequest) -> Result
             message: "login_provider_client_secret_ref_invalid".to_owned(),
         });
     }
-    for field in ["redirect_uri", "authorization_url", "token_url"] {
+    for field in [
+        "redirect_uri",
+        "authorization_url",
+        "token_url",
+        "jwks_url",
+        "discovery_url",
+        "user_api_url",
+        "emails_api_url",
+    ] {
         if let Some(url) = request.config_document.get(field).and_then(Value::as_str) {
             validate_https_url_field(url, field)?;
         }
@@ -7246,16 +7880,6 @@ fn validate_login_provider_shape(request: &CreateLoginProviderRequest) -> Result
             .and_then(Value::as_str)
             .unwrap_or_default();
         validate_https_url_field(issuer, "issuer")?;
-        if request
-            .config_document
-            .get("authorization_url")
-            .and_then(Value::as_str)
-            .is_none()
-        {
-            return Err(GatewayError::BadRequest {
-                message: "login_provider_authorization_url_required".to_owned(),
-            });
-        }
     }
     if let Some(scopes) = request.config_document.get("scopes") {
         let Some(scopes) = scopes.as_array() else {
@@ -7298,12 +7922,33 @@ fn login_provider_config_contains_sensitive_material(value: &Value) -> bool {
 }
 
 fn validate_https_url_field(url: &str, field: &str) -> Result<()> {
-    if url.starts_with("https://") && !url.contains(' ') && !url.contains('?') {
+    if login_provider_url_is_safe(url) {
         Ok(())
     } else {
         Err(GatewayError::BadRequest {
             message: format!("login_provider_{field}_invalid"),
         })
+    }
+}
+
+fn login_provider_url_is_safe(url: &str) -> bool {
+    let Ok(parsed) = url.parse::<http::Uri>() else {
+        return false;
+    };
+    if parsed.query().is_some() || url.contains(char::is_whitespace) {
+        return false;
+    }
+    let Some(authority) = parsed.authority() else {
+        return false;
+    };
+    if authority.as_str().contains('@') {
+        return false;
+    }
+    let host = authority.host();
+    match parsed.scheme_str() {
+        Some("https") => true,
+        Some("http") => matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1"),
+        _ => false,
     }
 }
 
@@ -7461,6 +8106,88 @@ fn project_membership_key(seed: &TenancySeed) -> (String, String) {
         seed.project_membership.principal_id.clone(),
         seed.project_membership.project_id.clone(),
     )
+}
+
+fn upsert_external_login_identity(
+    store: &InMemoryGatewayStore,
+    request: UpsertExternalLoginIdentityRequest,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(UserRecord, ExternalIdentityRecord, bool)> {
+    if request.provider_subject.trim().is_empty() || request.display_name.trim().is_empty() {
+        return Err(GatewayError::BadRequest {
+            message: "external_login_claims_invalid".to_owned(),
+        });
+    }
+    if let Some((user, identity)) = update_existing_external_identity(store, &request, now)? {
+        return Ok((user, identity, false));
+    }
+
+    let user_id = new_prefixed_id("usr");
+    let user = UserRecord {
+        user_id: user_id.clone(),
+        tenant_id: request.tenant_id.clone(),
+        default_organization_id: None,
+        default_project_id: None,
+        primary_email: request.email.clone(),
+        display_name: request.display_name.trim().to_owned(),
+        status: DirectoryStatus::Active,
+        resource_version: 1,
+        schema_version: 1,
+        created_at: now,
+        updated_at: now,
+    };
+    let identity = ExternalIdentityRecord {
+        external_identity_id: new_prefixed_id("xid"),
+        tenant_id: request.tenant_id,
+        principal_id: user_id,
+        login_provider_id: Some(request.login_provider_id),
+        provider_kind: request.provider_kind,
+        provider_subject: request.provider_subject,
+        email: request.email,
+        email_verified: request.email_verified,
+        status: ResourceStatus::Active,
+        created_at: now,
+        updated_at: now,
+    };
+    write_lock(&store.users).insert(user.user_id.clone(), user.clone());
+    write_lock(&store.external_identities)
+        .insert(identity.external_identity_id.clone(), identity.clone());
+    Ok((user, identity, true))
+}
+
+fn update_existing_external_identity(
+    store: &InMemoryGatewayStore,
+    request: &UpsertExternalLoginIdentityRequest,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<(UserRecord, ExternalIdentityRecord)>> {
+    let mut identities = write_lock(&store.external_identities);
+    let identity = identities.values_mut().find(|identity| {
+        identity.tenant_id == request.tenant_id
+            && identity.login_provider_id.as_deref() == Some(request.login_provider_id.as_str())
+            && identity.provider_kind == request.provider_kind
+            && identity.provider_subject == request.provider_subject
+    });
+    let Some(identity) = identity else {
+        return Ok(None);
+    };
+    if identity.status != ResourceStatus::Active {
+        return Err(GatewayError::Authentication);
+    }
+    let user = read_lock(&store.users)
+        .get(&identity.principal_id)
+        .cloned()
+        .ok_or_else(|| GatewayError::Internal {
+            message: "external identity principal is missing".to_owned(),
+        })?;
+    if user.status != DirectoryStatus::Active {
+        return Err(GatewayError::Authentication);
+    }
+    identity.email.clone_from(&request.email);
+    identity.email_verified = request.email_verified;
+    identity.updated_at = now;
+    let updated = identity.clone();
+    drop(identities);
+    Ok(Some((user, updated)))
 }
 
 fn retain_fresh_failed_auth(
@@ -8460,6 +9187,9 @@ mod tests {
             "gateway_secret_refs",
             "gateway_provider_endpoints",
             "gateway_upstream_credentials",
+            "gateway_codex_oauth_connections",
+            "gateway_codex_oauth_sessions",
+            "gateway_codex_oauth_refresh_status",
             "gateway_provider_grants",
             "gateway_pricing_skus",
             "gateway_model_targets",
@@ -8484,6 +9214,7 @@ mod tests {
             "gateway_authz_decision_events",
             "gateway_auth_sessions",
             "gateway_login_providers",
+            "gateway_login_attempts",
             "gateway_dashboard_configs",
             "gateway_otel_export_configs",
             "gateway_redaction_policies",

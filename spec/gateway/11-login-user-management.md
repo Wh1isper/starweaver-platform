@@ -112,7 +112,7 @@ sequenceDiagram
     Gateway->>DB: bootstrap tenant, organization, project, user, memberships
     Gateway->>Authz: seed tenant-owner grants when missing
     Gateway->>DB: create server-side auth session
-    Gateway-->>Browser: return opaque bearer session
+    Gateway-->>Browser: return opaque bearer session and CSRF metadata
 ```
 
 Required environment variables:
@@ -188,6 +188,20 @@ sequenceDiagram
     Gateway-->>Browser: set secure session cookie and redirect to app
 ```
 
+## Deterministic Callback Test Adapter
+
+Local deterministic tests may use `callback_mode: "local_verified_claims"` on
+a login provider. This mode accepts a safe `verified_claims` document only in
+local or test profiles, after a persisted login attempt has been started. It
+still consumes one-time `state`, validates OIDC nonce, issuer, audience, and
+expiry fields, links the external identity to a gateway-local user, and issues
+an opaque server-side session.
+
+This adapter is not a production identity trust path. Production GitHub OAuth
+App login must exchange the authorization code with GitHub and fetch verified
+identity metadata from the GitHub API. Production OIDC login must validate the
+ID token signature through issuer-scoped discovery and JWKS.
+
 ## Identity Provider Resource
 
 Fields:
@@ -206,6 +220,7 @@ Fields:
 | `discovery_url`                | optional OIDC discovery document URL                     |
 | `authorization_url`            | optional explicit OAuth authorization URL                |
 | `token_url`                    | optional explicit OAuth token URL                        |
+| `jwks_url`                     | optional explicit OIDC JWKS URL                          |
 | `user_api_url`                 | GitHub user API URL or GitHub Enterprise Server API URL  |
 | `emails_api_url`               | GitHub emails API URL when required                      |
 | `allowed_email_domains`        | optional verified email domain allowlist                 |
@@ -217,15 +232,20 @@ Fields:
 | `created_at`                   | creation timestamp                                       |
 | `updated_at`                   | last metadata update                                     |
 
-Provider discovery data and JWKS should be cached with issuer and cache expiry.
-Workers must re-fetch keys when a token `kid` is unknown and the provider is
-healthy. A failed JWKS refresh should fail login, not bypass signature checks.
+OIDC providers may be configured with issuer-only discovery or with explicit
+`authorization_url`, `token_url`, and `jwks_url` endpoints for controlled
+deployments. Provider discovery data and JWKS should be cached with issuer and
+cache expiry. Workers must re-fetch keys when a token `kid` is unknown and the
+provider is healthy. A failed JWKS refresh should fail login, not bypass
+signature checks.
 
 GitHub OAuth App providers do not have OIDC discovery or JWKS. They validate
-the callback state, exchange the authorization code, call the configured GitHub
-API endpoints, and use the stable GitHub numeric user id or node id as the
-external identity subject. Email is used only for invitation, allowlist, and
-profile metadata after the gateway verifies it through the provider API.
+the callback state, exchange the authorization code with the short-lived PKCE
+verifier when present, call the configured GitHub API endpoints, and use the
+stable GitHub numeric user id or node id as the external identity subject. Email
+is used only for invitation, allowlist, and profile metadata after the gateway
+verifies it through the GitHub emails API; the public profile email field is not
+treated as verified identity evidence.
 
 Recommended GitHub OAuth App scopes:
 
@@ -433,6 +453,10 @@ Session rules:
 
 - cookie value is opaque, random, and stored only as a hash
 - cookie uses `HttpOnly`, `Secure`, and `SameSite=Lax` by default
+- login and session-read responses return CSRF metadata with the header name
+  and session-bound token for browser mutations
+- `POST /auth/v1/logout`, session context updates, and invitation accept
+  require `x-gateway-csrf-token` to match the current session
 - session is rotated after login and account-link operations
 - logout revokes the current session
 - admin users can revoke their own sessions
@@ -551,10 +575,11 @@ introduce additional role names or route aliases beyond that matrix.
 
 ## Framework Direction
 
-Use `oauth2` for GitHub OAuth App authorization URL construction, callback code
-exchange, state handling, and optional PKCE helpers. Use `openidconnect` for
-OIDC discovery, authorization code flow helpers, ID token validation, nonce
-handling, and JWKS validation.
+Use `oauth2` or equivalent protocol helpers for GitHub OAuth App authorization
+URL construction, callback code exchange, state handling, and optional PKCE
+helpers. Use `openidconnect` or equivalent OIDC/JWT/JWKS crates for OIDC
+discovery, authorization code flow helpers, ID token validation, nonce handling,
+and JWKS validation.
 
 Session management must remain opaque and server-side. The implementation can
 use a tower/axum session middleware only if it supports the gateway's
@@ -577,8 +602,9 @@ Required tests:
 - GitHub login access token is not persisted after identity lookup
 - OIDC discovery and JWKS cache behavior
 - login start creates state, nonce, and PKCE verifier
-- callback rejects wrong state, reused state, wrong nonce, wrong issuer, wrong
-  audience, expired token, and unknown signing key
+- callback exchanges the authorization code with the PKCE verifier and rejects
+  wrong state, reused state, wrong nonce, wrong issuer, wrong audience, expired
+  token, symmetric signing algorithms, and unknown signing key
 - verified invite acceptance creates principal, organization member, default
   organization, and optional project memberships
 - unverified email cannot accept an email-targeted invitation

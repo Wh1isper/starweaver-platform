@@ -146,7 +146,7 @@ CREATE TABLE IF NOT EXISTS gateway_external_identities (
     status TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
-    UNIQUE (tenant_id, provider_kind, provider_subject),
+    UNIQUE (tenant_id, login_provider_id, provider_kind, provider_subject),
     CHECK (external_identity_id LIKE 'xid_%'),
     CHECK (provider_kind IN ('github_oauth_app', 'oidc')),
     CHECK (status IN ('active', 'disabled', 'deleted'))
@@ -286,6 +286,70 @@ CREATE TABLE IF NOT EXISTS gateway_upstream_credentials (
     updated_at TIMESTAMPTZ NOT NULL,
     CHECK (upstream_credential_id LIKE 'upc_%'),
     CHECK (status IN ('active', 'disabled', 'rotating', 'deleted'))
+);
+
+CREATE TABLE IF NOT EXISTS gateway_codex_oauth_connections (
+    codex_oauth_connection_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES gateway_tenants (tenant_id),
+    organization_id TEXT REFERENCES gateway_organizations (organization_id),
+    provider_endpoint_id TEXT NOT NULL REFERENCES gateway_provider_endpoints (provider_endpoint_id),
+    upstream_credential_id TEXT REFERENCES gateway_upstream_credentials (upstream_credential_id),
+    display_name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    resource_version BIGINT NOT NULL DEFAULT 1,
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    created_by TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    CHECK (codex_oauth_connection_id LIKE 'coc_%'),
+    CHECK (status IN (
+        'unauthenticated',
+        'login_pending',
+        'active',
+        'expired',
+        'error',
+        'disabled'
+    ))
+);
+
+CREATE TABLE IF NOT EXISTS gateway_codex_oauth_sessions (
+    codex_oauth_session_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES gateway_tenants (tenant_id),
+    codex_oauth_connection_id TEXT NOT NULL REFERENCES gateway_codex_oauth_connections (codex_oauth_connection_id),
+    upstream_credential_id TEXT NOT NULL REFERENCES gateway_upstream_credentials (upstream_credential_id),
+    token_secret_ref_id TEXT NOT NULL REFERENCES gateway_secret_refs (secret_ref_id),
+    token_expires_at TIMESTAMPTZ,
+    status TEXT NOT NULL,
+    resource_version BIGINT NOT NULL DEFAULT 1,
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    created_by TEXT NOT NULL,
+    revoked_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    CHECK (codex_oauth_session_id LIKE 'cos_%'),
+    CHECK (status IN ('login_pending', 'active', 'revoked', 'expired', 'error'))
+);
+
+CREATE TABLE IF NOT EXISTS gateway_codex_oauth_refresh_status (
+    codex_oauth_refresh_status_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES gateway_tenants (tenant_id),
+    codex_oauth_connection_id TEXT NOT NULL REFERENCES gateway_codex_oauth_connections (codex_oauth_connection_id),
+    upstream_credential_id TEXT REFERENCES gateway_upstream_credentials (upstream_credential_id),
+    status TEXT NOT NULL,
+    last_refresh_at TIMESTAMPTZ,
+    next_refresh_at TIMESTAMPTZ,
+    token_expires_at TIMESTAMPTZ,
+    last_error TEXT,
+    updated_at TIMESTAMPTZ NOT NULL,
+    CHECK (codex_oauth_refresh_status_id LIKE 'cofr_%'),
+    CHECK (status IN (
+        'unauthenticated',
+        'login_pending',
+        'active',
+        'expired',
+        'error',
+        'disabled'
+    ))
 );
 
 CREATE TABLE IF NOT EXISTS gateway_provider_grants (
@@ -846,6 +910,32 @@ CREATE TABLE IF NOT EXISTS gateway_login_providers (
     CHECK (provider_kind IN ('github_oauth_app', 'oidc')),
     CHECK (status IN ('active', 'disabled', 'deleted'))
 );
+
+CREATE TABLE IF NOT EXISTS gateway_login_attempts (
+    login_attempt_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES gateway_tenants (tenant_id),
+    login_provider_id TEXT NOT NULL REFERENCES gateway_login_providers (login_provider_id),
+    provider_kind TEXT NOT NULL,
+    state_hash TEXT NOT NULL UNIQUE,
+    nonce_hash TEXT,
+    code_verifier_hash TEXT NOT NULL,
+    code_challenge TEXT NOT NULL,
+    redirect_uri TEXT NOT NULL,
+    status TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    consumed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    CHECK (login_attempt_id LIKE 'lat_%'),
+    CHECK (provider_kind IN ('github_oauth_app', 'oidc')),
+    CHECK (state_hash LIKE 'sha256:%'),
+    CHECK (nonce_hash IS NULL OR nonce_hash LIKE 'sha256:%'),
+    CHECK (code_verifier_hash LIKE 'sha256:%'),
+    CHECK (status IN ('pending', 'consumed', 'expired'))
+);
+
+CREATE INDEX IF NOT EXISTS gateway_login_attempts_provider_status_idx
+    ON gateway_login_attempts (tenant_id, login_provider_id, status, expires_at);
 
 CREATE TABLE IF NOT EXISTS gateway_dashboard_configs (
     dashboard_config_id TEXT PRIMARY KEY,

@@ -44,7 +44,7 @@ Excluded from v1:
 
 ## Implementation Progress
 
-Last updated: 2026-06-25.
+Last updated: 2026-06-26.
 
 Completed foundation slices:
 
@@ -92,6 +92,12 @@ Completed foundation slices:
   endpoint validation rejects unsafe base URLs, and upstream credential read
   APIs return only safe credential metadata and `secret_ref_id`, never raw
   secret material.
+- Codex-only upstream OAuth foundations now expose strong-auth admin APIs for
+  connection create/list/get/status update, connection-scoped session
+  start/list, session get/revoke, and refresh status. Token bundles are stored
+  through `SecretRef`, session and audit responses mask secret refs, API-key
+  access is denied for lifecycle routes, and generic upstream OAuth remains out
+  of v1.
 - Model target admin API exposes dry-run validation, idempotent create, list,
   get, and status update routes. Validation checks provider endpoint protocol
   compatibility and upstream credential endpoint consistency before targets can
@@ -144,8 +150,19 @@ Completed foundation slices:
   observability export actions. Validation checks HTTPS collector endpoints,
   metrics-only v1 signal support, secret-backed header refs, bounded static
   resource attributes, tenant/project scope consistency, duplicate config
-  shape, strong-auth write access, and safe audit diffs. Export worker
-  execution and health reporting remain in the observability worker slice.
+  shape, strong-auth write access, and safe audit diffs.
+- OpenTelemetry exporter worker execution now performs real OTLP/HTTP metrics
+  export with secret-backed collector headers, bounded JSON payloads, request
+  timeouts, collector response handling, dropped-metric accounting, exporter
+  health evidence, and readiness/realtime-dashboard health reporting. Synthetic
+  exporter transport remains available only for deterministic outage tests and
+  dry-run harnesses. `otlp_grpc` configs are not treated as delivered until a
+  real gRPC transport is implemented.
+- Production background worker scheduling now runs inside the gateway process
+  when enabled. Each tick scans known tenants, delivers due notification outbox
+  events with a bounded per-tenant batch limit, exports only due OpenTelemetry
+  configs according to their configured intervals, and runs runtime policy
+  reconciliation without stopping the scheduler on a failed tenant subtask.
 - Notification sink and subscription admin APIs expose dry-run validation,
   idempotent create, list, get, and status update routes behind notification
   actions. Validation checks tenant/project scope consistency, HTTPS webhook
@@ -227,20 +244,33 @@ Completed foundation slices:
 - Notification outbox foundations now persist redacted outbox events and
   delivery attempt evidence. Runtime budget and quota policy blocks enqueue
   subscribed budget or quota events without including request bodies, provider
-  bodies, or secret material. The local delivery worker skeleton marks stdout
-  sinks delivered and records retryable failures for delivery backends that are
-  not connected, without blocking model requests. Retryable delivery failures
-  now use a bounded retry budget and move to `dead_lettered` after the final
-  attempt so due-event polling no longer reselects exhausted events. Delivery
-  polling now has explicit coverage for bounded batch limits and created-order
-  delivery so one worker pass cannot drain more events than its configured
-  batch size.
+  bodies, or secret material. The delivery worker marks stdout sinks delivered
+  and now performs real HTTP webhook `POST` delivery with bounded timeouts,
+  HMAC signatures, safe delivery metadata, response-status classification,
+  retryable failure scheduling, permanent failure recording, and dead-letter
+  transition after the configured retry budget. Synthetic delivery remains
+  available only for deterministic tests and dry-run harnesses. Webhook URLs
+  require HTTPS except for loopback HTTP in local/test profiles. Delivery
+  polling has explicit coverage for bounded batch limits, created-order
+  delivery, real local HTTP delivery, signing secret rotation, retryable
+  failures, permanent failures, dead-letter replay, and payload redaction.
 - Usage and audit export job foundations now expose strong-auth admin APIs for
   creating export jobs, listing jobs with cursor pagination, reading job
   metadata, and reading manifests. The in-memory object writer boundary emits
   deterministic object refs, retention expiry, byte counts, checksums, and
   redacted inline manifests while keeping raw request bodies, provider bodies,
   and secret material out of export payloads.
+- Object-backed exports now support both local file-backed and external HTTP
+  object storage writers. `storage_backend: file_object_storage` writes
+  redacted JSON payloads under the absolute directory configured by
+  `STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_DIR` and returns logical object refs
+  without leaking the local root. `storage_backend: object_storage` writes the
+  same redacted payload with `PUT {base}/{tenant_id}/{export_job_id}.json` to
+  the HTTPS base URL configured by
+  `STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_URL`, optionally using
+  `STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_AUTHORIZATION`. Both object-backed
+  paths preserve fail-closed manifests for unconfigured writers, unsafe URLs, or
+  write failures.
 - Emergency operation foundations now expose strong-auth admin APIs for
   disabling upstream credentials, disabling provider endpoints, draining
   routing groups, freezing config mutations, rolling back config snapshots,
@@ -257,7 +287,10 @@ Completed foundation slices:
   publication using GitHub OIDC Workload Identity Federation.
 - Production profile gates now reject unsafe startup configuration when
   `STARWEAVER_GATEWAY_ENV` is `prod` or `production`: missing PostgreSQL URL,
-  missing Redis-compatible URL, in-memory secret backend, disabled telemetry,
+  missing Redis-compatible URL, in-memory HTTP runtime store, unsupported
+  runtime store profiles before PostgreSQL repository wiring is complete,
+  in-memory secret backend, disabled telemetry, missing HTTPS public base URL,
+  missing or unsafe CORS origins, insecure browser session cookie policy,
   missing published-snapshot requirement, or an invalid body limit. `/readyz`
   now reports profile validity and dependency readiness details.
 - Fake-provider load and soak harnesses now run through `xtask` and Makefile
@@ -274,8 +307,8 @@ Completed foundation slices:
 
 Next implementation focus:
 
-- Continue hardening real backend integrations for notifications, exports,
-  object storage, and OpenTelemetry collectors.
+- Continue hardening any required OTLP/gRPC transport once the metrics backend
+  contract needs it.
 - Keep auth and authorization layering explicit until the agent platform has a
   second concrete service owner, then split shared modules only where both
   services use the same contract.
@@ -706,6 +739,22 @@ Work items:
   - external login start builds OAuth/OIDC authorization URLs with state, OIDC
     nonce, and PKCE S256 code challenge without returning client secrets or
     code verifiers;
+  - external login start now persists one-time login attempts with hashed
+    state, nonce, and PKCE verifier evidence plus a short-lived verifier secret,
+    and the local deterministic callback adapter consumes attempts exactly once;
+  - GitHub OAuth App callbacks now exchange authorization codes with the
+    short-lived PKCE verifier, use secret-backed client credentials, read the
+    configured GitHub user and email APIs, select a stable GitHub subject, keep
+    only verified email metadata, and avoid returning or auditing raw tokens;
+  - generic OIDC callbacks now exchange authorization codes with PKCE verifiers,
+    resolve issuer discovery when endpoints are not configured explicitly, fetch
+    JWKS, validate asymmetric signed ID tokens, enforce issuer, audience, nonce,
+    and expiry checks, and avoid returning or auditing raw tokens;
+  - local deterministic GitHub/OIDC callback tests create or link gateway-local
+    users and external identities, issue opaque sessions without granting
+    organization or project access by email alone, reject reused state, validate
+    OIDC issuer, audience, expiry, and nonce, and forbid the adapter in
+    production profiles;
   - admin user list, get, and status update APIs are tenant scoped, audited, and
     revoke active sessions when a user is disabled or deleted;
   - admin user session list and revoke APIs are tenant scoped, item-authorized,
@@ -717,15 +766,11 @@ Work items:
     access;
   - admin project member create/upsert API requires an active parent organization
     membership, is tenant scoped, idempotent, audited, and rejects cross-boundary
-    project assignment.
-- Implement identity provider configuration for GitHub OAuth App and generic
-  OIDC.
-- Implement login start, callback, state, nonce, PKCE, issuer, audience, JWKS,
-  and verified-email handling.
-- Implement first bootstrap login that creates tenant owner, default
-  organization, and default project when policy allows.
-- Finish OAuth/OIDC callback-backed user provisioning, CSRF protection, and
-  remaining membership mutation flows.
+    project assignment;
+  - browser session login and read responses return session-bound CSRF metadata;
+    logout, active/default context updates, and invitation accept reject missing
+    or wrong `x-gateway-csrf-token`.
+- Finish remaining membership mutation flows.
 - Implement organization invitations, invitation preview, invitation accept,
   organization membership, project membership, role changes, suspension, and
   removal.

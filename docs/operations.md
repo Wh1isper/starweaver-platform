@@ -37,6 +37,28 @@ password bootstrap login is needed. Compose also passes through
 `STARWEAVER_GATEWAY_SINGLE_USER_EMAIL`,
 `STARWEAVER_GATEWAY_SINGLE_USER_DISPLAY_NAME`, and
 `STARWEAVER_GATEWAY_SINGLE_USER_SESSION_TTL_SECONDS` when they are set.
+External login providers are created through the admin identity-provider API.
+Generic OIDC can use issuer discovery or explicit authorization, token, and JWKS
+endpoints; GitHub OAuth App remains a separate provider kind.
+Compose also mounts `gateway-export-objects` at `/data/gateway-exports` and
+sets `STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_DIR` to that path by default for
+`storage_backend: file_object_storage` export jobs.
+
+Production profiles fail closed unless the deployment declares the browser
+security boundary explicitly. Set `STARWEAVER_GATEWAY_PUBLIC_BASE_URL` to the
+HTTPS gateway URL, set `STARWEAVER_GATEWAY_CORS_ALLOWED_ORIGINS` to a
+comma-separated list of HTTPS origins, and require secure session cookies with:
+
+```bash
+STARWEAVER_GATEWAY_SESSION_COOKIE_SECURE=true
+STARWEAVER_GATEWAY_SESSION_COOKIE_HTTP_ONLY=true
+STARWEAVER_GATEWAY_SESSION_COOKIE_SAME_SITE=lax
+```
+
+The HTTP service currently uses the foundation in-memory runtime store. In
+`prod` or `production`, startup rejects that profile instead of silently serving
+non-durable state. Wire the PostgreSQL-backed runtime repository before
+enabling production traffic.
 
 ## Gateway Fake-Provider Load And Soak Harnesses
 
@@ -133,6 +155,44 @@ network connections. `live` connects to PostgreSQL, verifies all embedded
 migrations are applied, and checks that the Redis-compatible hot-state endpoint
 accepts TCP connections. Secret backend and telemetry readiness remain
 profile-level checks until backend-specific clients are wired in.
+
+## Gateway Export Objects
+
+Export jobs support three v1 storage choices:
+
+- `inline_manifest` keeps the redacted export rows inside the manifest and is
+  the default for small local exports.
+- `file_object_storage` writes the redacted export payload to the absolute
+  directory configured by `STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_DIR`.
+- `object_storage` writes the redacted export payload to the HTTPS base URL
+  configured by `STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_URL` with an HTTP
+  `PUT` request. `STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_AUTHORIZATION` can
+  set an optional `Authorization` header, and
+  `STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_TIMEOUT_SECONDS` controls the
+  bounded request timeout.
+
+The file backend writes objects under:
+
+```text
+${STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_DIR}/{tenant_id}/{export_job_id}.json
+```
+
+The external object storage backend sends:
+
+```text
+PUT ${STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_URL}/{tenant_id}/{export_job_id}.json
+```
+
+The configured URL must use HTTPS in production; loopback HTTP is accepted only
+for local and test profiles. API responses return logical
+`file-object://gateway-exports/...` or `object-storage://gateway-exports/...`
+references, checksum, byte count, and manifest metadata. They do not expose the
+local root path, external base URL, authorization header, or inline exported
+rows for object-backed exports. Export payloads follow the webhook/export
+redaction policy and must not contain raw request bodies, provider bodies,
+upstream credentials, API key values, or secret material. If an object writer is
+missing, unsafe, or fails, the job fails closed with a redacted failure manifest
+instead of reporting a false success.
 
 ## Gateway Incident Runbooks
 

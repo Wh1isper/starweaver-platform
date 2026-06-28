@@ -1,6 +1,7 @@
 //! Gateway HTTP service skeleton.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
@@ -12,8 +13,11 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use chrono::Datelike;
 use hmac::{Hmac, Mac};
+use jsonwebtoken::jwk::{Jwk, JwkSet, PublicKeyUse};
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use rand_core::{OsRng, RngCore};
 use secrecy::{ExposeSecret, SecretString};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -37,18 +41,19 @@ use crate::config::{
 };
 use crate::domain::{
     new_prefixed_id, ActorKind, ActorScope, ApiKeyRecord, AuditEventRecord, AuthSessionRecord,
-    AuthenticatedActor, BudgetPolicyRecord, ConfigPublicationPointerRecord,
+    AuthenticatedActor, BudgetPolicyRecord, CodexOAuthConnectionRecord, CodexOAuthConnectionStatus,
+    CodexOAuthRefreshStatusRecord, CodexOAuthSessionRecord, ConfigPublicationPointerRecord,
     ConfigWorkerReloadRecord, DirectoryStatus, EmergencyOperationRecord, ExportJobRecord,
-    ExportManifestRecord, ExternalIdentityRecord, LedgerBucketRecord, LoginProviderRecord,
-    MembershipStatus, ModelAliasRecord, ModelTargetRecord, NotificationDeliveryAttemptRecord,
-    NotificationOutboxEventRecord, NotificationSinkRecord, NotificationSubscriptionRecord,
-    OrganizationInvitationRecord, OrganizationMembershipRecord, OrganizationRecord,
-    OtelExportConfigRecord, OtelExporterHealthRecord, OtelHeaderRef, OtelResourceAttribute,
-    PricingSkuRecord, ProjectMembershipRecord, ProjectRecord, ProviderEndpointRecord,
-    ProviderGrantRecord, QuotaPolicyRecord, ResourceStatus, RoutePolicyRecord, RoutingGroupRecord,
-    RoutingGroupTargetRecord, RuntimeBudgetLeaseRecord, SecretRefRecord, SecretRefStatus,
-    ServiceAccountRecord, UpstreamCredentialRecord, UpstreamCredentialStatus, UsageEventRecord,
-    ValidationDiagnosticRecord,
+    ExportManifestRecord, ExternalIdentityRecord, LedgerBucketRecord, LoginAttemptRecord,
+    LoginProviderRecord, MembershipStatus, ModelAliasRecord, ModelTargetRecord,
+    NotificationDeliveryAttemptRecord, NotificationOutboxEventRecord, NotificationSinkRecord,
+    NotificationSubscriptionRecord, OrganizationInvitationRecord, OrganizationMembershipRecord,
+    OrganizationRecord, OtelExportConfigRecord, OtelExporterHealthRecord, OtelHeaderRef,
+    OtelResourceAttribute, PricingSkuRecord, ProjectMembershipRecord, ProjectRecord,
+    ProviderEndpointRecord, ProviderGrantRecord, QuotaPolicyRecord, ResourceStatus,
+    RoutePolicyRecord, RoutingGroupRecord, RoutingGroupTargetRecord, RuntimeBudgetLeaseRecord,
+    SecretRefRecord, SecretRefStatus, ServiceAccountRecord, UpstreamCredentialRecord,
+    UpstreamCredentialStatus, UsageEventRecord, ValidationDiagnosticRecord,
 };
 use crate::error::{GatewayError, Result};
 use crate::hot_state::{EndpointDrainRecord, EndpointHealthState, RouteHotState};
@@ -66,9 +71,10 @@ use crate::runtime::{
 };
 use crate::storage::{
     AuthSessionRepository, BootstrapDefaultProjectRequest, CatalogAdminRepository,
-    CompleteExportJobRequest, ConfigPublicationRepository, ConfigSnapshotRepository,
-    ConfigSnapshotStore, CreateBudgetPolicyRequest, CreateEmergencyOperationRequest,
-    CreateExportJobRequest, CreateLoginProviderRequest, CreateModelAliasRequest,
+    CodexOAuthRepository, CompleteExportJobRequest, ConfigPublicationRepository,
+    ConfigSnapshotRepository, ConfigSnapshotStore, ConsumedLoginAttempt, CreateBudgetPolicyRequest,
+    CreateCodexOAuthConnectionRequest, CreateEmergencyOperationRequest, CreateExportJobRequest,
+    CreateLoginAttemptRequest, CreateLoginProviderRequest, CreateModelAliasRequest,
     CreateModelTargetRequest, CreateNotificationDeliveryAttemptRequest,
     CreateNotificationOutboxEventRequest, CreateNotificationSinkRequest,
     CreateNotificationSubscriptionRequest, CreateOrganizationInvitationRequest,
@@ -80,9 +86,9 @@ use crate::storage::{
     InMemoryGatewayStore, NotificationOutboxRepository, NullablePatch,
     OrganizationInvitationRepository, ProviderAdminRepository, RecordOtelExporterHealthRequest,
     RuntimePolicyRepository, SecretRefAdminRepository, ServiceAccountAdminRepository,
-    TenancyBootstrapRepository, TenancyRepository, UpdateModelAliasRequest,
-    UpdateNotificationSinkRequest, UpdateOtelExportConfigRequest, UsageAccountingRepository,
-    ValidationDiagnosticRepository,
+    StartCodexOAuthSessionRequest, TenancyBootstrapRepository, TenancyRepository,
+    UpdateModelAliasRequest, UpdateNotificationSinkRequest, UpdateOtelExportConfigRequest,
+    UpsertExternalLoginIdentityRequest, UsageAccountingRepository, ValidationDiagnosticRepository,
 };
 use crate::{ProtocolFamily, SERVICE_NAME};
 
@@ -176,6 +182,28 @@ const ADMIN_UPSTREAM_CREDENTIAL_GET_PATH: &str = concat!(
     "/admin/v1/upstream-credentials/",
     "{upstream_credential_id}"
 );
+const ADMIN_CODEX_OAUTH_CONNECTION_GET_PATH: &str = concat!(
+    "/admin/v1/codex/oauth/connections/",
+    "{codex_oauth_connection_id}"
+);
+const ADMIN_CODEX_OAUTH_SESSION_LIST_PATH: &str = concat!(
+    "/admin/v1/codex/oauth/connections/",
+    "{codex_oauth_connection_id}",
+    "/sessions"
+);
+const ADMIN_CODEX_OAUTH_SESSION_GET_PATH: &str = concat!(
+    "/admin/v1/codex/oauth/sessions/",
+    "{codex_oauth_session_id}"
+);
+const ADMIN_CODEX_OAUTH_SESSION_REVOKE_PATH: &str = concat!(
+    "/admin/v1/codex/oauth/sessions/",
+    "{codex_oauth_session_id}",
+    "/revoke"
+);
+const ADMIN_CODEX_OAUTH_REFRESH_STATUS_GET_PATH: &str = concat!(
+    "/admin/v1/codex/oauth/refresh-status/",
+    "{codex_oauth_connection_id}"
+);
 const ADMIN_SECRET_REF_GET_PATH: &str = concat!("/admin/v1/secret-refs/", "{secret_ref_id}");
 const ADMIN_SECRET_REF_LOCATOR_PATH: &str =
     concat!("/admin/v1/secret-refs/", "{secret_ref_id}", "/locator");
@@ -249,6 +277,12 @@ const AUTH_INVITATION_ACCEPT_PATH: &str = concat!("/auth/v1/invitations/", "{tok
 const AUTH_LOGIN_PROVIDER_GET_PATH: &str = concat!("/auth/v1/providers/", "{login_provider_id}");
 const AUTH_LOGIN_PROVIDER_START_PATH: &str =
     concat!("/auth/v1/providers/", "{login_provider_id}", "/login");
+const AUTH_LOGIN_PROVIDER_CALLBACK_PATH: &str =
+    concat!("/auth/v1/providers/", "{login_provider_id}", "/callback");
+const GITHUB_OAUTH_AUTHORIZATION_URL: &str = "https://github.com/login/oauth/authorize";
+const GITHUB_OAUTH_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
+const GITHUB_USER_API_URL: &str = "https://api.github.com/user";
+const GITHUB_USER_EMAILS_API_URL: &str = "https://api.github.com/user/emails";
 const ADMIN_DASHBOARD_ORGANIZATION_PATH: &str =
     concat!("/admin/v1/dashboards/organizations/", "{organization_id}");
 const ADMIN_DASHBOARD_PROJECT_PATH: &str =
@@ -287,6 +321,17 @@ const ADMIN_USAGE_BREAKDOWN_BY_PROJECT_MEMBER_PATH: &str =
 const ADMIN_USAGE_BREAKDOWN_BY_MODEL_PATH: &str = "/admin/v1/usage/breakdown/by-model";
 const ADMIN_USAGE_BREAKDOWN_BY_PROVIDER_ENDPOINT_PATH: &str =
     "/admin/v1/usage/breakdown/by-provider-endpoint";
+const CODEX_OAUTH_ISSUER: &str = "https://auth.openai.com";
+const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const CODEX_OAUTH_DEVICE_CODE_ENDPOINT: &str =
+    "https://auth.openai.com/api/accounts/deviceauth/usercode";
+const CODEX_OAUTH_DEVICE_TOKEN_ENDPOINT: &str =
+    "https://auth.openai.com/api/accounts/deviceauth/token";
+const CODEX_OAUTH_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
+const CODEX_OAUTH_REVOKE_ENDPOINT: &str = "https://auth.openai.com/oauth/revoke";
+const CODEX_OAUTH_VERIFICATION_URL: &str = "https://auth.openai.com/codex/device";
+const CODEX_OAUTH_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
+const CODEX_API_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const ADMIN_ROUTE_POLICY_GET_PATH: &str = concat!("/admin/v1/route-policies/", "{route_policy_id}");
 const ADMIN_PROVIDER_GRANT_GET_PATH: &str =
     concat!("/admin/v1/provider-grants/", "{provider_grant_id}");
@@ -309,6 +354,7 @@ const ADMIN_ROUTING_GROUP_TARGET_GET_PATH: &str = concat!(
     "{routing_group_target_id}"
 );
 const SESSION_TOKEN_PREFIX: &str = "sws_";
+const CSRF_TOKEN_HEADER: &str = "x-gateway-csrf-token";
 const IDEMPOTENCY_TTL_HOURS: i64 = 24;
 const SINGLE_USER_PROVIDER_ID: &str = "local_single_user";
 const SINGLE_USER_TENANT_ID: &str = "ten_single_user";
@@ -318,9 +364,17 @@ const SINGLE_USER_ID: &str = "usr_single_user";
 const SINGLE_USER_ORGANIZATION_MEMBER_ID: &str = "om_single_user";
 const SINGLE_USER_PROJECT_MEMBER_ID: &str = "pm_single_user";
 const SINGLE_USER_SESSION_TTL_SECONDS: i64 = 12 * 60 * 60;
+const DEFAULT_AUTH_SESSION_TTL_SECONDS: i64 = 12 * 60 * 60;
 const NOTIFICATION_DELIVERY_MAX_ATTEMPTS: i32 = 3;
 const NOTIFICATION_DELIVERY_RETRY_DELAY_SECONDS: i64 = 60;
+const NOTIFICATION_WEBHOOK_DEFAULT_TIMEOUT_SECONDS: u64 = 10;
+const NOTIFICATION_WEBHOOK_MAX_TIMEOUT_SECONDS: u64 = 60;
+const NOTIFICATION_WEBHOOK_MAX_RETRY_ATTEMPTS: i32 = 10;
 const RUNTIME_BUDGET_LEASE_TTL_SECONDS: i64 = 300;
+const DEFAULT_BACKGROUND_WORKER_TICK_SECONDS: u64 = 30;
+const DEFAULT_NOTIFICATION_WORKER_BATCH_LIMIT: usize = 100;
+const DEFAULT_EXPORT_OBJECT_STORAGE_TIMEOUT_SECONDS: u64 = 10;
+const MAX_EXPORT_OBJECT_STORAGE_TIMEOUT_SECONDS: u64 = 60;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Gateway service configuration.
@@ -334,10 +388,22 @@ pub struct GatewayConfig {
     pub database_url: Option<String>,
     /// Optional Redis-compatible hot-state connection string.
     pub redis_url: Option<String>,
+    /// Runtime store profile used by the HTTP service.
+    pub runtime_store_profile: String,
+    /// Public browser-facing base URL.
+    pub public_base_url: Option<String>,
+    /// Explicit browser CORS origins.
+    pub cors_allowed_origins: Vec<String>,
     /// Secret backend profile name.
     pub secret_backend_profile: String,
     /// Telemetry profile name.
     pub telemetry_profile: String,
+    /// Whether browser session cookies must be marked Secure.
+    pub session_cookie_secure: bool,
+    /// Whether browser session cookies must be marked `HttpOnly`.
+    pub session_cookie_http_only: bool,
+    /// Browser session cookie `SameSite` policy.
+    pub session_cookie_same_site: String,
     /// Maximum accepted request body bytes.
     pub max_body_bytes: usize,
     /// Dependency probe mode used by `/readyz`.
@@ -346,6 +412,18 @@ pub struct GatewayConfig {
     pub readiness_probe_timeout_ms: u64,
     /// Whether readiness requires a published config snapshot.
     pub require_published_snapshot: bool,
+    /// Optional filesystem root used by file-backed export object storage.
+    pub export_object_storage_dir: Option<String>,
+    /// Optional external object storage HTTP writer.
+    pub export_object_storage: Option<ExportObjectStorageHttpConfig>,
+    /// Background worker scheduler mode for this process.
+    pub background_worker_mode: BackgroundWorkerMode,
+    /// Stable worker id used in worker health and audit evidence.
+    pub worker_id: Option<String>,
+    /// Shared background worker scheduler tick interval.
+    pub worker_tick_interval_seconds: u64,
+    /// Maximum notification outbox events delivered per tenant per tick.
+    pub notification_worker_batch_limit: usize,
     /// Optional local single-user password login configuration.
     pub single_user_auth: Option<SingleUserAuthConfig>,
 }
@@ -365,6 +443,57 @@ impl DependencyProbeMode {
             Self::Configured => "configured",
             Self::Live => "live",
         }
+    }
+}
+
+/// Background worker scheduler mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackgroundWorkerMode {
+    /// Run background workers in this process.
+    Enabled,
+    /// Do not run background workers in this process.
+    Disabled,
+}
+
+/// External object storage writer configuration.
+#[derive(Clone)]
+pub struct ExportObjectStorageHttpConfig {
+    /// HTTPS base URL that receives exported objects through PUT.
+    pub base_url: String,
+    /// Optional Authorization header value.
+    pub authorization_header: Option<SecretString>,
+    /// PUT request timeout in seconds.
+    pub timeout_seconds: u64,
+}
+
+impl PartialEq for ExportObjectStorageHttpConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.base_url == other.base_url
+            && self.timeout_seconds == other.timeout_seconds
+            && self
+                .authorization_header
+                .as_ref()
+                .map(secrecy::ExposeSecret::expose_secret)
+                == other
+                    .authorization_header
+                    .as_ref()
+                    .map(secrecy::ExposeSecret::expose_secret)
+    }
+}
+
+impl Eq for ExportObjectStorageHttpConfig {}
+
+impl std::fmt::Debug for ExportObjectStorageHttpConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExportObjectStorageHttpConfig")
+            .field("base_url", &self.base_url)
+            .field(
+                "authorization_header",
+                &self.authorization_header.as_ref().map(|_| "***"),
+            )
+            .field("timeout_seconds", &self.timeout_seconds)
+            .finish()
     }
 }
 
@@ -446,12 +575,24 @@ impl Default for GatewayConfig {
             environment: "local".to_owned(),
             database_url: None,
             redis_url: None,
+            runtime_store_profile: "memory".to_owned(),
+            public_base_url: None,
+            cors_allowed_origins: Vec::new(),
             secret_backend_profile: "memory".to_owned(),
             telemetry_profile: "disabled".to_owned(),
+            session_cookie_secure: false,
+            session_cookie_http_only: true,
+            session_cookie_same_site: "lax".to_owned(),
             max_body_bytes: 1024 * 1024,
             dependency_probe_mode: DependencyProbeMode::Configured,
             readiness_probe_timeout_ms: 750,
             require_published_snapshot: false,
+            export_object_storage_dir: None,
+            export_object_storage: None,
+            background_worker_mode: BackgroundWorkerMode::Enabled,
+            worker_id: None,
+            worker_tick_interval_seconds: DEFAULT_BACKGROUND_WORKER_TICK_SECONDS,
+            notification_worker_batch_limit: DEFAULT_NOTIFICATION_WORKER_BATCH_LIMIT,
             single_user_auth: None,
         }
     }
@@ -474,6 +615,17 @@ impl GatewayConfig {
         if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_REDIS_URL") {
             config.redis_url = non_empty_env(&value);
         }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_RUNTIME_STORE") {
+            if let Some(value) = non_empty_env(&value) {
+                config.runtime_store_profile = value.to_ascii_lowercase();
+            }
+        }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_PUBLIC_BASE_URL") {
+            config.public_base_url = non_empty_env(&value);
+        }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_CORS_ALLOWED_ORIGINS") {
+            config.cors_allowed_origins = parse_csv_env(&value);
+        }
         if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_SECRET_BACKEND") {
             if let Some(value) = non_empty_env(&value) {
                 config.secret_backend_profile = value;
@@ -484,6 +636,21 @@ impl GatewayConfig {
                 config.telemetry_profile = value;
             }
         }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_SESSION_COOKIE_SECURE") {
+            if let Some(value) = parse_bool_env(&value) {
+                config.session_cookie_secure = value;
+            }
+        }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_SESSION_COOKIE_HTTP_ONLY") {
+            if let Some(value) = parse_bool_env(&value) {
+                config.session_cookie_http_only = value;
+            }
+        }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_SESSION_COOKIE_SAME_SITE") {
+            if let Some(value) = non_empty_env(&value) {
+                config.session_cookie_same_site = value.to_ascii_lowercase();
+            }
+        }
         if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_MAX_BODY_BYTES") {
             if let Ok(parsed) = value.parse::<usize>() {
                 config.max_body_bytes = parsed;
@@ -492,6 +659,11 @@ impl GatewayConfig {
         if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_REQUIRE_SNAPSHOT") {
             config.require_published_snapshot = matches!(value.as_str(), "1" | "true" | "yes");
         }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_DIR") {
+            config.export_object_storage_dir = non_empty_env(&value);
+        }
+        config.export_object_storage = export_object_storage_from_env();
+        apply_background_worker_env(&mut config);
         config.dependency_probe_mode = default_dependency_probe_mode(&config);
         if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_DEPENDENCY_PROBE_MODE") {
             if let Some(mode) = parse_dependency_probe_mode(&value) {
@@ -507,6 +679,56 @@ impl GatewayConfig {
         }
         config.single_user_auth = single_user_auth_from_env();
         config
+    }
+}
+
+fn export_object_storage_from_env() -> Option<ExportObjectStorageHttpConfig> {
+    let base_url = std::env::var("STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_URL")
+        .ok()
+        .and_then(|value| non_empty_env(&value))?;
+    let authorization_header =
+        std::env::var("STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_AUTHORIZATION")
+            .ok()
+            .and_then(|value| non_empty_env(&value))
+            .map(SecretString::from);
+    let timeout_seconds = std::env::var("STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| (1..=MAX_EXPORT_OBJECT_STORAGE_TIMEOUT_SECONDS).contains(value))
+        .unwrap_or(DEFAULT_EXPORT_OBJECT_STORAGE_TIMEOUT_SECONDS);
+    Some(ExportObjectStorageHttpConfig {
+        base_url,
+        authorization_header,
+        timeout_seconds,
+    })
+}
+
+fn apply_background_worker_env(config: &mut GatewayConfig) {
+    if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_BACKGROUND_WORKERS") {
+        if let Some(value) = parse_bool_env(&value) {
+            config.background_worker_mode = if value {
+                BackgroundWorkerMode::Enabled
+            } else {
+                BackgroundWorkerMode::Disabled
+            };
+        }
+    }
+    if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_WORKER_ID") {
+        config.worker_id = parse_worker_id_env(&value);
+    }
+    if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_WORKER_TICK_INTERVAL_SECONDS") {
+        if let Ok(parsed) = value.parse::<u64>() {
+            if (1..=3_600).contains(&parsed) {
+                config.worker_tick_interval_seconds = parsed;
+            }
+        }
+    }
+    if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_NOTIFICATION_WORKER_BATCH_LIMIT") {
+        if let Ok(parsed) = value.parse::<usize>() {
+            if (1..=1_000).contains(&parsed) {
+                config.notification_worker_batch_limit = parsed;
+            }
+        }
     }
 }
 
@@ -535,10 +757,33 @@ struct StartupDiagnostic {
 }
 
 fn production_profile_diagnostics(config: &GatewayConfig) -> Vec<StartupDiagnostic> {
-    if !is_production_environment(&config.environment) {
-        return Vec::new();
-    }
     let mut diagnostics = Vec::new();
+    push_runtime_store_diagnostics(config, &mut diagnostics);
+    if !is_production_environment(&config.environment) {
+        return diagnostics;
+    }
+    push_production_dependency_diagnostics(config, &mut diagnostics);
+    push_production_browser_diagnostics(config, &mut diagnostics);
+    diagnostics
+}
+
+fn push_runtime_store_diagnostics(
+    config: &GatewayConfig,
+    diagnostics: &mut Vec<StartupDiagnostic>,
+) {
+    if config.runtime_store_profile != "memory" {
+        diagnostics.push(StartupDiagnostic {
+            code: "runtime_store_profile_unsupported",
+            message:
+                "HTTP runtime store profile is not wired yet; only memory is currently supported",
+        });
+    }
+}
+
+fn push_production_dependency_diagnostics(
+    config: &GatewayConfig,
+    diagnostics: &mut Vec<StartupDiagnostic>,
+) {
     if config.database_url.is_none() {
         diagnostics.push(StartupDiagnostic {
             code: "database_url_required",
@@ -549,6 +794,12 @@ fn production_profile_diagnostics(config: &GatewayConfig) -> Vec<StartupDiagnost
         diagnostics.push(StartupDiagnostic {
             code: "redis_url_required",
             message: "production requires STARWEAVER_GATEWAY_REDIS_URL",
+        });
+    }
+    if config.runtime_store_profile == "memory" {
+        diagnostics.push(StartupDiagnostic {
+            code: "durable_runtime_store_required",
+            message: "production must not use the in-memory HTTP runtime store",
         });
     }
     if config.secret_backend_profile == "memory" {
@@ -581,11 +832,76 @@ fn production_profile_diagnostics(config: &GatewayConfig) -> Vec<StartupDiagnost
             message: "production requires a positive request body limit no larger than 16 MiB",
         });
     }
-    diagnostics
+    if config
+        .export_object_storage
+        .as_ref()
+        .is_some_and(|object_storage| {
+            safe_export_object_storage_base_url_for_config(config, &object_storage.base_url)
+                .is_none()
+        })
+    {
+        diagnostics.push(StartupDiagnostic {
+            code: "export_object_storage_url_invalid",
+            message: "production external object storage URL must be HTTPS and must not include credentials, query, or fragment",
+        });
+    }
+}
+
+fn push_production_browser_diagnostics(
+    config: &GatewayConfig,
+    diagnostics: &mut Vec<StartupDiagnostic>,
+) {
+    if !config
+        .public_base_url
+        .as_deref()
+        .is_some_and(is_https_public_base_url)
+    {
+        diagnostics.push(StartupDiagnostic {
+            code: "public_base_url_https_required",
+            message: "production requires an HTTPS STARWEAVER_GATEWAY_PUBLIC_BASE_URL",
+        });
+    }
+    if config.cors_allowed_origins.is_empty() {
+        diagnostics.push(StartupDiagnostic {
+            code: "cors_allowed_origins_required",
+            message: "production requires explicit CORS allowed origins",
+        });
+    } else if !config
+        .cors_allowed_origins
+        .iter()
+        .all(|origin| is_https_origin(origin))
+    {
+        diagnostics.push(StartupDiagnostic {
+            code: "cors_allowed_origins_invalid",
+            message: "production CORS origins must be HTTPS origins and must not be wildcard",
+        });
+    }
+    if !config.session_cookie_secure {
+        diagnostics.push(StartupDiagnostic {
+            code: "secure_session_cookie_required",
+            message: "production requires Secure browser session cookies",
+        });
+    }
+    if !config.session_cookie_http_only {
+        diagnostics.push(StartupDiagnostic {
+            code: "http_only_session_cookie_required",
+            message: "production requires HttpOnly browser session cookies",
+        });
+    }
+    if !valid_same_site_policy(&config.session_cookie_same_site) {
+        diagnostics.push(StartupDiagnostic {
+            code: "session_cookie_same_site_invalid",
+            message: "session cookie SameSite policy must be lax, strict, or none",
+        });
+    }
 }
 
 fn is_production_environment(environment: &str) -> bool {
     matches!(environment, "prod" | "production")
+}
+
+fn allows_local_callback_adapter(environment: &str) -> bool {
+    matches!(environment, "local" | "test")
 }
 
 fn default_dependency_probe_mode(config: &GatewayConfig) -> DependencyProbeMode {
@@ -614,6 +930,58 @@ fn non_empty_env(value: &str) -> Option<String> {
     } else {
         Some(trimmed.to_owned())
     }
+}
+
+fn parse_csv_env(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .filter_map(non_empty_env)
+        .collect::<Vec<_>>()
+}
+
+fn parse_bool_env(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_worker_id_env(value: &str) -> Option<String> {
+    non_empty_env(value).filter(|value| valid_worker_id(value))
+}
+
+fn valid_worker_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
+}
+
+fn is_https_public_base_url(value: &str) -> bool {
+    let Ok(parsed) = Url::parse(value) else {
+        return false;
+    };
+    parsed.scheme() == "https" && parsed.host_str().is_some()
+}
+
+fn is_https_origin(value: &str) -> bool {
+    if value.trim() == "*" {
+        return false;
+    }
+    let Ok(parsed) = Url::parse(value) else {
+        return false;
+    };
+    parsed.scheme() == "https"
+        && parsed.host_str().is_some()
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+        && matches!(parsed.path(), "" | "/")
+}
+
+fn valid_same_site_policy(value: &str) -> bool {
+    matches!(value, "lax" | "strict" | "none")
 }
 
 fn single_user_auth_from_env() -> Option<SingleUserAuthConfig> {
@@ -775,6 +1143,7 @@ fn admin_routes(state: &AppState) -> Router<AppState> {
         )
         .merge(model_alias_admin_routes())
         .merge(secret_ref_admin_routes())
+        .merge(codex_oauth_admin_routes())
         .merge(service_account_admin_routes())
         .merge(pricing_sku_admin_routes())
         .merge(budget_policy_admin_routes())
@@ -832,6 +1201,34 @@ fn secret_ref_admin_routes() -> Router<AppState> {
         )
         .route(ADMIN_SECRET_REF_GET_PATH, get(get_secret_ref))
         .route(ADMIN_SECRET_REF_LOCATOR_PATH, get(get_secret_ref_locator))
+}
+
+fn codex_oauth_admin_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/admin/v1/codex/oauth/connections",
+            get(list_codex_oauth_connections).post(create_codex_oauth_connection),
+        )
+        .route(
+            ADMIN_CODEX_OAUTH_CONNECTION_GET_PATH,
+            get(get_codex_oauth_connection).patch(update_codex_oauth_connection),
+        )
+        .route(
+            ADMIN_CODEX_OAUTH_SESSION_LIST_PATH,
+            get(list_codex_oauth_sessions).post(start_codex_oauth_session),
+        )
+        .route(
+            ADMIN_CODEX_OAUTH_SESSION_GET_PATH,
+            get(get_codex_oauth_session),
+        )
+        .route(
+            ADMIN_CODEX_OAUTH_SESSION_REVOKE_PATH,
+            post(revoke_codex_oauth_session),
+        )
+        .route(
+            ADMIN_CODEX_OAUTH_REFRESH_STATUS_GET_PATH,
+            get(get_codex_oauth_refresh_status),
+        )
 }
 
 fn export_admin_routes() -> Router<AppState> {
@@ -904,6 +1301,10 @@ fn auth_routes() -> Router<AppState> {
         .route(
             AUTH_LOGIN_PROVIDER_START_PATH,
             get(start_auth_login_provider),
+        )
+        .route(
+            AUTH_LOGIN_PROVIDER_CALLBACK_PATH,
+            post(complete_auth_login_provider_callback),
         )
 }
 
@@ -1223,12 +1624,17 @@ pub async fn run(config: GatewayConfig) -> crate::error::Result<()> {
     let store = InMemoryGatewayStore::default();
     bootstrap_single_user_if_configured(&store, &config, chrono::Utc::now())?;
     let state = AppState::new(config, store);
-    axum::serve(listener, router(state))
+    let worker_handle = spawn_background_worker_scheduler(state.clone());
+    let server_result = axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|error| crate::error::GatewayError::Internal {
             message: format!("gateway server failed: {error}"),
-        })
+        });
+    if let Some(handle) = worker_handle {
+        handle.abort();
+    }
+    server_result
 }
 
 async fn shutdown_signal() {
@@ -1240,6 +1646,104 @@ async fn shutdown_signal() {
         () = ctrl_c => {}
         () = wait_forever => {}
     }
+}
+
+fn spawn_background_worker_scheduler(state: AppState) -> Option<tokio::task::JoinHandle<()>> {
+    if state.config.background_worker_mode == BackgroundWorkerMode::Disabled {
+        return None;
+    }
+    let worker_id = background_worker_id(&state.config);
+    Some(tokio::spawn(async move {
+        background_worker_scheduler_loop(state, worker_id).await;
+    }))
+}
+
+async fn background_worker_scheduler_loop(state: AppState, worker_id: String) {
+    let tick_interval = Duration::from_secs(state.config.worker_tick_interval_seconds);
+    loop {
+        let summary = run_background_worker_tick_once(&state, &worker_id, chrono::Utc::now()).await;
+        if summary.error_count > 0 {
+            eprintln!(
+                "gateway background worker tick completed with {} errors: worker_id={} tenants={}",
+                summary.error_count, summary.worker_id, summary.tenant_count
+            );
+        }
+        tokio::time::sleep(tick_interval).await;
+    }
+}
+
+fn background_worker_id(config: &GatewayConfig) -> String {
+    config
+        .worker_id
+        .clone()
+        .unwrap_or_else(|| format!("gateway-worker-{}", new_prefixed_id("wrk")))
+}
+
+/// Runs one background worker scheduler tick across all known tenants.
+pub async fn run_background_worker_tick_once(
+    state: &AppState,
+    worker_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> BackgroundWorkerTickSummary {
+    let mut summary = BackgroundWorkerTickSummary {
+        worker_id: worker_id.to_owned(),
+        tenant_count: 0,
+        notification_attempt_count: 0,
+        otel_attempted_config_count: 0,
+        otel_exported_metric_count: 0,
+        otel_dropped_metric_count: 0,
+        expired_budget_lease_count: 0,
+        runtime_policy_audit_event_count: 0,
+        error_count: 0,
+    };
+    for tenant_id in state.store.tenant_ids() {
+        summary.tenant_count += 1;
+        let notification_attempts = deliver_due_notifications(
+            state,
+            &tenant_id,
+            now,
+            state.config.notification_worker_batch_limit,
+        )
+        .await;
+        summary.notification_attempt_count = summary
+            .notification_attempt_count
+            .saturating_add(notification_attempts.len());
+
+        match run_due_otel_exporter_once_with_transport(
+            &state.store,
+            &tenant_id,
+            worker_id,
+            now,
+            OtelExporterTransport::Http,
+        )
+        .await
+        {
+            Ok(otel_summary) => {
+                summary.otel_attempted_config_count = summary
+                    .otel_attempted_config_count
+                    .saturating_add(otel_summary.attempted_config_count);
+                summary.otel_exported_metric_count = summary
+                    .otel_exported_metric_count
+                    .saturating_add(otel_summary.exported_metric_count);
+                summary.otel_dropped_metric_count = summary
+                    .otel_dropped_metric_count
+                    .saturating_add(otel_summary.dropped_metric_count);
+            }
+            Err(_) => {
+                summary.error_count = summary.error_count.saturating_add(1);
+            }
+        }
+
+        let runtime_summary =
+            run_runtime_policy_reconciler_once(&state.store, &tenant_id, worker_id, now);
+        summary.expired_budget_lease_count = summary
+            .expired_budget_lease_count
+            .saturating_add(runtime_summary.expired_budget_lease_count);
+        summary.runtime_policy_audit_event_count = summary
+            .runtime_policy_audit_event_count
+            .saturating_add(runtime_summary.audit_event_count);
+    }
+    summary
 }
 
 fn bootstrap_single_user_if_configured(
@@ -1354,6 +1858,7 @@ struct ReadinessProfile {
     production_profile: bool,
     production_profile_valid: bool,
     dependency_probe_mode: &'static str,
+    runtime_store_profile: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1470,6 +1975,33 @@ struct AdminCreateSecretRefRequest {
 struct AdminUpdateUpstreamCredentialRequest {
     expected_version: i64,
     status: UpstreamCredentialStatus,
+    reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AdminCreateCodexOAuthConnectionRequest {
+    idempotency_key: String,
+    organization_id: Option<String>,
+    provider_endpoint_id: String,
+    display_name: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AdminUpdateCodexOAuthConnectionRequest {
+    expected_version: i64,
+    status: CodexOAuthConnectionStatus,
+    reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AdminStartCodexOAuthSessionRequest {
+    idempotency_key: String,
+    token_secret_ref_id: String,
+    token_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AdminRevokeCodexOAuthSessionRequest {
     reason: Option<String>,
 }
 
@@ -1662,7 +2194,7 @@ struct AdminDisableOtelExportConfigRequest {
     reason: String,
 }
 
-/// Summary returned by one deterministic OpenTelemetry exporter worker tick.
+/// Summary returned by one OpenTelemetry exporter worker tick.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OtelExporterRunSummary {
     /// Tenant processed by this tick.
@@ -1677,10 +2209,42 @@ pub struct OtelExporterRunSummary {
     pub failed_count: usize,
     /// Number of disabled configs observed.
     pub disabled_count: usize,
-    /// Metrics accepted by the simulated exporter.
+    /// Metrics accepted by the exporter.
     pub exported_metric_count: i64,
     /// Metrics dropped because the collector was unavailable.
     pub dropped_metric_count: i64,
+}
+
+/// Summary returned by one background worker scheduler tick.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BackgroundWorkerTickSummary {
+    /// Worker role or instance id.
+    pub worker_id: String,
+    /// Number of tenants processed.
+    pub tenant_count: usize,
+    /// Notification delivery attempts created.
+    pub notification_attempt_count: usize,
+    /// OpenTelemetry configs attempted because their interval was due.
+    pub otel_attempted_config_count: usize,
+    /// OpenTelemetry metrics accepted by exporters.
+    pub otel_exported_metric_count: i64,
+    /// OpenTelemetry metrics dropped by failed export attempts.
+    pub otel_dropped_metric_count: i64,
+    /// Runtime budget leases expired by reconciliation.
+    pub expired_budget_lease_count: usize,
+    /// Runtime policy audit events written by reconciliation.
+    pub runtime_policy_audit_event_count: usize,
+    /// Worker subtasks that failed without stopping the scheduler.
+    pub error_count: usize,
+}
+
+/// OpenTelemetry exporter transport used by the worker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OtelExporterTransport {
+    /// Export OTLP/HTTP metrics through real HTTP requests.
+    Http,
+    /// Use deterministic endpoint-name outcomes for tests and dry-run harnesses.
+    Synthetic,
 }
 
 /// Summary returned by one deterministic runtime-policy reconciliation tick.
@@ -1820,6 +2384,109 @@ struct AuthProviderListQuery {
 struct SingleUserLoginRequest {
     username: String,
     password: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ExternalLoginCallbackRequest {
+    state: String,
+    code: String,
+    verified_claims: Option<ExternalLoginVerifiedClaims>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ExternalLoginVerifiedClaims {
+    subject: String,
+    email: Option<String>,
+    #[serde(default)]
+    email_verified: bool,
+    display_name: Option<String>,
+    nonce: Option<String>,
+    issuer: Option<String>,
+    audience: Option<String>,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Clone, Debug)]
+struct OidcProviderMetadata {
+    issuer: String,
+    authorization_endpoint: String,
+    token_endpoint: String,
+    jwks_uri: String,
+    supported_algs: Vec<Algorithm>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct OidcDiscoveryDocument {
+    issuer: String,
+    authorization_endpoint: String,
+    token_endpoint: String,
+    jwks_uri: String,
+    #[serde(default)]
+    id_token_signing_alg_values_supported: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct OidcTokenResponse {
+    id_token: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GitHubTokenResponse {
+    access_token: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GitHubUserResponse {
+    id: Value,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
+    login: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GitHubEmailResponse {
+    email: String,
+    #[serde(default)]
+    primary: bool,
+    #[serde(default)]
+    verified: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct OidcIdTokenClaims {
+    iss: String,
+    sub: String,
+    aud: OidcAudience,
+    exp: i64,
+    #[serde(default)]
+    nonce: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    email_verified: bool,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    preferred_username: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+enum OidcAudience {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl OidcAudience {
+    fn contains(&self, value: &str) -> bool {
+        match self {
+            Self::Single(audience) => audience == value,
+            Self::Multiple(audiences) => audiences.iter().any(|audience| audience == value),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -2066,6 +2733,7 @@ async fn readyz(State(state): State<AppState>) -> (StatusCode, Json<ReadinessRes
                 production_profile: is_production_environment(&state.config.environment),
                 production_profile_valid: diagnostics.is_empty(),
                 dependency_probe_mode: state.config.dependency_probe_mode.as_str(),
+                runtime_store_profile: state.config.runtime_store_profile.clone(),
             },
             dependencies: ReadinessDependencies {
                 database: dependency_readiness.database,
@@ -2499,7 +3167,8 @@ async fn create_export_job(
         &export_page,
         limit,
         storage_backend,
-    )?;
+    )
+    .await?;
     let (job, manifest) = state.store.complete_export_job(
         &job.export_job_id,
         CompleteExportJobRequest {
@@ -5494,6 +6163,382 @@ async fn get_secret_ref_locator(
     })))
 }
 
+async fn list_codex_oauth_connections(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        "/admin/v1/codex/oauth/connections",
+        "*",
+        now,
+    )?;
+    let route = route_metadata(&Method::GET, ADMIN_CODEX_OAUTH_CONNECTION_GET_PATH)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let authorized = authorize_item_list(
+        engine.as_ref(),
+        &actor,
+        route.action,
+        state
+            .store
+            .codex_oauth_connections_for_tenant(&actor.tenant_id)
+            .into_iter()
+            .map(|connection| AuthorizableItem {
+                resource: route.resource(connection.codex_oauth_connection_id.clone()),
+                item: connection,
+            }),
+    );
+    let resources = authorized
+        .items
+        .iter()
+        .map(codex_oauth_connection_resource_envelope)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "schema": "gateway.admin.codex_oauth_connection_list.v1",
+        "resources": resources,
+        "filtered_count": authorized.filtered_count,
+        "next_cursor": null
+    })))
+}
+
+async fn create_codex_oauth_connection(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Json(request): Json<AdminCreateCodexOAuthConnectionRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    validate_idempotency_key(&request.idempotency_key)?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::POST,
+        "/admin/v1/codex/oauth/connections",
+        "*",
+        now,
+    )?;
+    let request_hash = stable_request_hash(&request)?;
+    let scope_key =
+        idempotency_scope_key("codex_oauth_connections:create", &request.idempotency_key);
+    if let Some(response) =
+        state
+            .store
+            .idempotency_response(&actor.tenant_id, &scope_key, &request_hash, now)?
+    {
+        return Ok(Json(response_with_replay_flag(response, true)));
+    }
+    let connection = state.store.create_codex_oauth_connection(
+        CreateCodexOAuthConnectionRequest {
+            tenant_id: actor.tenant_id.clone(),
+            organization_id: request.organization_id,
+            provider_endpoint_id: request.provider_endpoint_id,
+            display_name: request.display_name,
+            created_by: actor_principal_or_actor_id(&actor),
+        },
+        now,
+    )?;
+    let audit_event_id = record_admin_resource_audit(
+        &state,
+        &actor,
+        AdminResourceAuditInput {
+            event_type: "gateway.codex_oauth_connection.create",
+            scope_kind: "tenant",
+            scope_id: actor.tenant_id.clone(),
+            resource_kind: "CodexOAuthConnection",
+            resource_id: connection.codex_oauth_connection_id.clone(),
+            before_version: None,
+            after_version: Some(connection.resource_version),
+            redacted_diff: codex_oauth_connection_diff(&connection),
+            occurred_at: now,
+        },
+    );
+    let response = json!({
+        "schema": "gateway.admin.codex_oauth_connection_mutation.v1",
+        "resource": codex_oauth_connection_resource_body(&connection),
+        "audit_event_id": audit_event_id,
+        "idempotency_replayed": false
+    });
+    state.store.record_idempotency_response(IdempotencyRecord {
+        tenant_id: actor.tenant_id,
+        scope_key,
+        request_hash,
+        response_record: response.clone(),
+        expires_at: now + chrono::Duration::hours(IDEMPOTENCY_TTL_HOURS),
+        created_at: now,
+    });
+    Ok(Json(response))
+}
+
+async fn get_codex_oauth_connection(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(codex_oauth_connection_id): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_CODEX_OAUTH_CONNECTION_GET_PATH,
+        &codex_oauth_connection_id,
+        now,
+    )?;
+    let connection = codex_oauth_connection_for_actor(&state, &actor, &codex_oauth_connection_id)?;
+    Ok(Json(json!({
+        "schema": "gateway.admin.codex_oauth_connection.v1",
+        "resource": codex_oauth_connection_resource_body(&connection)
+    })))
+}
+
+async fn update_codex_oauth_connection(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(codex_oauth_connection_id): Path<String>,
+    Json(request): Json<AdminUpdateCodexOAuthConnectionRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    validate_codex_oauth_connection_status_update(&request.status)?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::PATCH,
+        ADMIN_CODEX_OAUTH_CONNECTION_GET_PATH,
+        &codex_oauth_connection_id,
+        now,
+    )?;
+    let before = codex_oauth_connection_for_actor(&state, &actor, &codex_oauth_connection_id)?;
+    let updated = state.store.update_codex_oauth_connection_status(
+        &codex_oauth_connection_id,
+        request.expected_version,
+        request.status,
+        now,
+    )?;
+    let audit_event_id = record_admin_resource_audit(
+        &state,
+        &actor,
+        AdminResourceAuditInput {
+            event_type: "gateway.codex_oauth_connection.update",
+            scope_kind: "tenant",
+            scope_id: actor.tenant_id.clone(),
+            resource_kind: "CodexOAuthConnection",
+            resource_id: updated.codex_oauth_connection_id.clone(),
+            before_version: Some(before.resource_version),
+            after_version: Some(updated.resource_version),
+            redacted_diff: json!({
+                "status": {
+                    "before": before.status.as_str(),
+                    "after": updated.status.as_str()
+                },
+                "reason": request.reason,
+                "token_material_included": false
+            }),
+            occurred_at: now,
+        },
+    );
+    Ok(Json(json!({
+        "schema": "gateway.admin.codex_oauth_connection_mutation.v1",
+        "resource": codex_oauth_connection_resource_body(&updated),
+        "audit_event_id": audit_event_id
+    })))
+}
+
+async fn list_codex_oauth_sessions(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(codex_oauth_connection_id): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_CODEX_OAUTH_SESSION_LIST_PATH,
+        &codex_oauth_connection_id,
+        now,
+    )?;
+    codex_oauth_connection_for_actor(&state, &actor, &codex_oauth_connection_id)?;
+    let resources = state
+        .store
+        .codex_oauth_sessions_for_connection(&actor.tenant_id, &codex_oauth_connection_id)
+        .iter()
+        .map(|session| codex_oauth_session_resource_envelope(&state, session))
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "schema": "gateway.admin.codex_oauth_session_list.v1",
+        "resources": resources,
+        "next_cursor": null
+    })))
+}
+
+async fn start_codex_oauth_session(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(codex_oauth_connection_id): Path<String>,
+    Json(request): Json<AdminStartCodexOAuthSessionRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    validate_idempotency_key(&request.idempotency_key)?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::POST,
+        ADMIN_CODEX_OAUTH_SESSION_LIST_PATH,
+        &codex_oauth_connection_id,
+        now,
+    )?;
+    codex_oauth_connection_for_actor(&state, &actor, &codex_oauth_connection_id)?;
+    let request_hash = stable_request_hash(&request)?;
+    let scope_key = idempotency_scope_key(
+        &format!("codex_oauth_sessions:start:{codex_oauth_connection_id}"),
+        &request.idempotency_key,
+    );
+    if let Some(response) =
+        state
+            .store
+            .idempotency_response(&actor.tenant_id, &scope_key, &request_hash, now)?
+    {
+        return Ok(Json(response_with_replay_flag(response, true)));
+    }
+    let session = state.store.start_codex_oauth_session(
+        StartCodexOAuthSessionRequest {
+            tenant_id: actor.tenant_id.clone(),
+            codex_oauth_connection_id,
+            token_secret_ref_id: request.token_secret_ref_id,
+            token_expires_at: request.token_expires_at,
+            created_by: actor_principal_or_actor_id(&actor),
+        },
+        now,
+    )?;
+    let audit_event_id = record_admin_resource_audit(
+        &state,
+        &actor,
+        AdminResourceAuditInput {
+            event_type: "gateway.codex_oauth_session.start",
+            scope_kind: "tenant",
+            scope_id: actor.tenant_id.clone(),
+            resource_kind: "CodexOAuthSession",
+            resource_id: session.codex_oauth_session_id.clone(),
+            before_version: None,
+            after_version: Some(session.resource_version),
+            redacted_diff: codex_oauth_session_diff(&state, &session),
+            occurred_at: now,
+        },
+    );
+    let response = json!({
+        "schema": "gateway.admin.codex_oauth_session_mutation.v1",
+        "resource": codex_oauth_session_resource_body(&state, &session),
+        "audit_event_id": audit_event_id,
+        "idempotency_replayed": false
+    });
+    state.store.record_idempotency_response(IdempotencyRecord {
+        tenant_id: actor.tenant_id,
+        scope_key,
+        request_hash,
+        response_record: response.clone(),
+        expires_at: now + chrono::Duration::hours(IDEMPOTENCY_TTL_HOURS),
+        created_at: now,
+    });
+    Ok(Json(response))
+}
+
+async fn get_codex_oauth_session(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(codex_oauth_session_id): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_CODEX_OAUTH_SESSION_GET_PATH,
+        &codex_oauth_session_id,
+        now,
+    )?;
+    let session = codex_oauth_session_for_actor(&state, &actor, &codex_oauth_session_id)?;
+    Ok(Json(json!({
+        "schema": "gateway.admin.codex_oauth_session.v1",
+        "resource": codex_oauth_session_resource_body(&state, &session)
+    })))
+}
+
+async fn revoke_codex_oauth_session(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(codex_oauth_session_id): Path<String>,
+    Json(request): Json<AdminRevokeCodexOAuthSessionRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::POST,
+        ADMIN_CODEX_OAUTH_SESSION_REVOKE_PATH,
+        &codex_oauth_session_id,
+        now,
+    )?;
+    let before = codex_oauth_session_for_actor(&state, &actor, &codex_oauth_session_id)?;
+    let revoked = state
+        .store
+        .revoke_codex_oauth_session(&codex_oauth_session_id, now)?;
+    let audit_event_id = record_admin_resource_audit(
+        &state,
+        &actor,
+        AdminResourceAuditInput {
+            event_type: "gateway.codex_oauth_session.revoke",
+            scope_kind: "tenant",
+            scope_id: actor.tenant_id.clone(),
+            resource_kind: "CodexOAuthSession",
+            resource_id: revoked.codex_oauth_session_id.clone(),
+            before_version: Some(before.resource_version),
+            after_version: Some(revoked.resource_version),
+            redacted_diff: json!({
+                "status": {
+                    "before": before.status.as_str(),
+                    "after": revoked.status.as_str()
+                },
+                "reason": request.reason,
+                "token_material_included": false
+            }),
+            occurred_at: now,
+        },
+    );
+    Ok(Json(json!({
+        "schema": "gateway.admin.codex_oauth_session_mutation.v1",
+        "resource": codex_oauth_session_resource_body(&state, &revoked),
+        "audit_event_id": audit_event_id
+    })))
+}
+
+async fn get_codex_oauth_refresh_status(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(codex_oauth_connection_id): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_CODEX_OAUTH_REFRESH_STATUS_GET_PATH,
+        &codex_oauth_connection_id,
+        now,
+    )?;
+    codex_oauth_connection_for_actor(&state, &actor, &codex_oauth_connection_id)?;
+    let refresh = state
+        .store
+        .codex_oauth_refresh_status(&actor.tenant_id, &codex_oauth_connection_id)
+        .ok_or_else(|| GatewayError::NotFound {
+            resource: format!("codex oauth refresh status {codex_oauth_connection_id}"),
+        })?;
+    Ok(Json(json!({
+        "schema": "gateway.admin.codex_oauth_refresh_status.v1",
+        "resource": codex_oauth_refresh_status_body(&refresh)
+    })))
+}
+
 async fn list_model_targets(
     State(state): State<AppState>,
     Extension(actor): Extension<AuthenticatedActor>,
@@ -6915,18 +7960,83 @@ async fn disable_otel_export_config(
     })))
 }
 
-/// Runs one deterministic OpenTelemetry metrics export tick for a tenant.
+/// Runs one OpenTelemetry metrics export tick for a tenant.
 ///
-/// This worker records exporter health evidence without requiring a live
-/// collector during local validation. A collector outage updates health and
-/// dropped metric counts, but it never blocks model ingress.
-pub fn run_otel_exporter_once(
+/// A collector outage updates health and dropped metric counts, but it never
+/// blocks model ingress.
+pub async fn run_otel_exporter_once(
     store: &InMemoryGatewayStore,
     tenant_id: &str,
     worker_id: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<OtelExporterRunSummary> {
+    run_otel_exporter_once_with_transport(
+        store,
+        tenant_id,
+        worker_id,
+        now,
+        OtelExporterTransport::Http,
+    )
+    .await
+}
+
+/// Runs one OpenTelemetry metrics export tick with an explicit transport.
+pub async fn run_otel_exporter_once_with_transport(
+    store: &InMemoryGatewayStore,
+    tenant_id: &str,
+    worker_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    transport: OtelExporterTransport,
+) -> Result<OtelExporterRunSummary> {
+    run_otel_exporter_once_filtered(
+        store,
+        tenant_id,
+        worker_id,
+        now,
+        transport,
+        OtelExporterTickMode::All,
+    )
+    .await
+}
+
+/// Runs one OpenTelemetry metrics export tick for due configs only.
+pub async fn run_due_otel_exporter_once_with_transport(
+    store: &InMemoryGatewayStore,
+    tenant_id: &str,
+    worker_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    transport: OtelExporterTransport,
+) -> Result<OtelExporterRunSummary> {
+    run_otel_exporter_once_filtered(
+        store,
+        tenant_id,
+        worker_id,
+        now,
+        transport,
+        OtelExporterTickMode::DueOnly,
+    )
+    .await
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OtelExporterTickMode {
+    All,
+    DueOnly,
+}
+
+async fn run_otel_exporter_once_filtered(
+    store: &InMemoryGatewayStore,
+    tenant_id: &str,
+    worker_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    transport: OtelExporterTransport,
+    tick_mode: OtelExporterTickMode,
+) -> Result<OtelExporterRunSummary> {
     let configs = store.otel_export_configs_for_tenant(tenant_id);
+    let http_client = match transport {
+        OtelExporterTransport::Http => Some(reqwest::Client::new()),
+        OtelExporterTransport::Synthetic => None,
+    };
     let mut summary = OtelExporterRunSummary {
         tenant_id: tenant_id.to_owned(),
         worker_id: worker_id.to_owned(),
@@ -6939,27 +8049,53 @@ pub fn run_otel_exporter_once(
     };
 
     for config in configs {
+        if tick_mode == OtelExporterTickMode::DueOnly
+            && !otel_export_config_due_for_attempt(store, &config, now)
+        {
+            continue;
+        }
         summary.attempted_config_count += 1;
         let metric_count = otel_export_metric_count(store, &config);
+        let export_result = if config.status == ResourceStatus::Active {
+            execute_otel_export(
+                store,
+                &config,
+                metric_count,
+                now,
+                transport,
+                http_client.as_ref(),
+            )
+            .await
+        } else {
+            summary.disabled_count += 1;
+            OtelExportAttemptResult::disabled()
+        };
+
         let (status, exported_metric_count, dropped_metric_count, last_error) =
-            if config.status != ResourceStatus::Active {
-                summary.disabled_count += 1;
-                ("disabled", 0, 0, None)
-            } else if otel_export_endpoint_unavailable(&config) {
-                summary.failed_count += 1;
-                summary.dropped_metric_count =
-                    summary.dropped_metric_count.saturating_add(metric_count);
-                (
-                    "retryable_failed",
-                    0,
-                    metric_count,
-                    Some("collector_unavailable".to_owned()),
-                )
-            } else {
+            if export_result.status == "succeeded" {
                 summary.succeeded_count += 1;
-                summary.exported_metric_count =
-                    summary.exported_metric_count.saturating_add(metric_count);
-                ("succeeded", metric_count, 0, None)
+                summary.exported_metric_count = summary
+                    .exported_metric_count
+                    .saturating_add(export_result.exported_metric_count);
+                (
+                    export_result.status,
+                    export_result.exported_metric_count,
+                    0,
+                    None,
+                )
+            } else if export_result.status == "disabled" {
+                ("disabled".to_owned(), 0, 0, None)
+            } else {
+                summary.failed_count += 1;
+                summary.dropped_metric_count = summary
+                    .dropped_metric_count
+                    .saturating_add(export_result.dropped_metric_count);
+                (
+                    export_result.status,
+                    0,
+                    export_result.dropped_metric_count,
+                    export_result.last_error,
+                )
             };
 
         store.record_otel_exporter_health(
@@ -6967,7 +8103,7 @@ pub fn run_otel_exporter_once(
                 tenant_id: tenant_id.to_owned(),
                 otel_export_config_id: config.otel_export_config_id,
                 worker_id: worker_id.to_owned(),
-                status: status.to_owned(),
+                status,
                 exported_metric_count,
                 dropped_metric_count,
                 last_error,
@@ -6979,8 +8115,179 @@ pub fn run_otel_exporter_once(
     Ok(summary)
 }
 
-fn otel_export_metric_count(store: &InMemoryGatewayStore, config: &OtelExportConfigRecord) -> i64 {
-    let ledger_count = store
+fn otel_export_config_due_for_attempt(
+    store: &InMemoryGatewayStore,
+    config: &OtelExportConfigRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let Some(health) = store.otel_exporter_health(&config.otel_export_config_id) else {
+        return true;
+    };
+    now.signed_duration_since(health.last_attempted_at)
+        .num_seconds()
+        >= config.export_interval_seconds
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OtelExportAttemptResult {
+    status: String,
+    exported_metric_count: i64,
+    dropped_metric_count: i64,
+    last_error: Option<String>,
+}
+
+impl OtelExportAttemptResult {
+    fn disabled() -> Self {
+        Self {
+            status: "disabled".to_owned(),
+            exported_metric_count: 0,
+            dropped_metric_count: 0,
+            last_error: None,
+        }
+    }
+
+    fn succeeded(exported_metric_count: i64) -> Self {
+        Self {
+            status: "succeeded".to_owned(),
+            exported_metric_count,
+            dropped_metric_count: 0,
+            last_error: None,
+        }
+    }
+
+    fn failed(dropped_metric_count: i64, last_error: impl Into<String>) -> Self {
+        Self {
+            status: "retryable_failed".to_owned(),
+            exported_metric_count: 0,
+            dropped_metric_count,
+            last_error: Some(last_error.into()),
+        }
+    }
+}
+
+async fn execute_otel_export(
+    store: &InMemoryGatewayStore,
+    config: &OtelExportConfigRecord,
+    metric_count: i64,
+    now: chrono::DateTime<chrono::Utc>,
+    transport: OtelExporterTransport,
+    http_client: Option<&reqwest::Client>,
+) -> OtelExportAttemptResult {
+    match transport {
+        OtelExporterTransport::Synthetic => synthetic_otel_export_result(config, metric_count),
+        OtelExporterTransport::Http if config.protocol != "otlp_http" => {
+            OtelExportAttemptResult::failed(metric_count, "otel_protocol_unsupported")
+        }
+        OtelExporterTransport::Http => {
+            let Some(client) = http_client else {
+                return OtelExportAttemptResult::failed(metric_count, "otel_http_client_missing");
+            };
+            let Some((body, headers)) = otel_export_http_request_parts(store, config, now) else {
+                return OtelExportAttemptResult::failed(metric_count, "otel_header_secret_missing");
+            };
+            let Ok(body) = serde_json::to_vec(&body) else {
+                return OtelExportAttemptResult::failed(metric_count, "otel_payload_encode_failed");
+            };
+            let mut request = client
+                .post(&config.endpoint_url)
+                .timeout(Duration::from_secs(otel_export_timeout_seconds(config)))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::USER_AGENT, "starweaver-gateway");
+            for (name, value) in headers {
+                request = request.header(name, value);
+            }
+            match request.body(body).send().await {
+                Ok(response) if response.status().is_success() => {
+                    OtelExportAttemptResult::succeeded(metric_count)
+                }
+                Ok(response) if response.status().is_client_error() => {
+                    OtelExportAttemptResult::failed(metric_count, "collector_rejected")
+                }
+                Ok(_) | Err(_) => {
+                    OtelExportAttemptResult::failed(metric_count, "collector_unavailable")
+                }
+            }
+        }
+    }
+}
+
+fn synthetic_otel_export_result(
+    config: &OtelExportConfigRecord,
+    metric_count: i64,
+) -> OtelExportAttemptResult {
+    if otel_export_endpoint_unavailable(config) {
+        OtelExportAttemptResult::failed(metric_count, "collector_unavailable")
+    } else {
+        OtelExportAttemptResult::succeeded(metric_count)
+    }
+}
+
+fn otel_export_http_request_parts(
+    store: &InMemoryGatewayStore,
+    config: &OtelExportConfigRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<(
+    Value,
+    Vec<(reqwest::header::HeaderName, reqwest::header::HeaderValue)>,
+)> {
+    let mut headers = Vec::new();
+    for header_ref in &config.header_refs {
+        let secret = store.secret_value(&header_ref.secret_ref_id)?;
+        let name = reqwest::header::HeaderName::from_bytes(header_ref.name.as_bytes()).ok()?;
+        let value = reqwest::header::HeaderValue::from_str(secret.expose_secret()).ok()?;
+        headers.push((name, value));
+    }
+    Some((otel_export_payload(store, config, now), headers))
+}
+
+fn otel_export_timeout_seconds(config: &OtelExportConfigRecord) -> u64 {
+    u64::try_from(config.timeout_seconds)
+        .ok()
+        .filter(|value| (1..=60).contains(value))
+        .unwrap_or(10)
+}
+
+fn otel_export_payload(
+    store: &InMemoryGatewayStore,
+    config: &OtelExportConfigRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Value {
+    let counts = otel_export_counts(store, config);
+    let time_unix_nano = otel_time_unix_nano(now);
+    json!({
+        "resourceMetrics": [{
+            "resource": {
+                "attributes": otel_resource_attributes(config)
+            },
+            "scopeMetrics": [{
+                "scope": {
+                    "name": SERVICE_NAME,
+                    "version": env!("CARGO_PKG_VERSION")
+                },
+                "metrics": [
+                    otel_gauge_i64("gateway.export.metric_count", counts.metrics, time_unix_nano),
+                    otel_gauge_i64("gateway.ledger_bucket.count", counts.ledger_buckets, time_unix_nano),
+                    otel_gauge_i64("gateway.usage_event.count", counts.usage_events, time_unix_nano),
+                    otel_gauge_i64("gateway.route_decision.count", counts.route_decisions, time_unix_nano)
+                ]
+            }]
+        }]
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OtelExportCounts {
+    ledger_buckets: i64,
+    usage_events: i64,
+    route_decisions: i64,
+    metrics: i64,
+}
+
+fn otel_export_counts(
+    store: &InMemoryGatewayStore,
+    config: &OtelExportConfigRecord,
+) -> OtelExportCounts {
+    let ledger_buckets = store
         .ledger_buckets_for_tenant(&config.tenant_id)
         .into_iter()
         .filter(|bucket| {
@@ -6991,7 +8298,7 @@ fn otel_export_metric_count(store: &InMemoryGatewayStore, config: &OtelExportCon
             )
         })
         .fold(0_i64, |count, _| count.saturating_add(1));
-    let usage_event_count = store
+    let usage_events = store
         .usage_events_for_tenant(&config.tenant_id)
         .into_iter()
         .filter(|event| {
@@ -7002,7 +8309,7 @@ fn otel_export_metric_count(store: &InMemoryGatewayStore, config: &OtelExportCon
             )
         })
         .fold(0_i64, |count, _| count.saturating_add(1));
-    let route_decision_count = store
+    let route_decisions = store
         .route_decisions()
         .into_iter()
         .filter(|decision| {
@@ -7014,11 +8321,61 @@ fn otel_export_metric_count(store: &InMemoryGatewayStore, config: &OtelExportCon
                 )
         })
         .fold(0_i64, |count, _| count.saturating_add(1));
+    let metrics = 6_i64
+        .saturating_add(ledger_buckets.saturating_mul(6))
+        .saturating_add(usage_events.saturating_mul(4))
+        .saturating_add(route_decisions.saturating_mul(3));
+    OtelExportCounts {
+        ledger_buckets,
+        usage_events,
+        route_decisions,
+        metrics,
+    }
+}
 
-    6_i64
-        .saturating_add(ledger_count.saturating_mul(6))
-        .saturating_add(usage_event_count.saturating_mul(4))
-        .saturating_add(route_decision_count.saturating_mul(3))
+fn otel_resource_attributes(config: &OtelExportConfigRecord) -> Vec<Value> {
+    let mut attributes = vec![
+        otel_string_attribute("service.name", SERVICE_NAME),
+        otel_string_attribute("service.version", env!("CARGO_PKG_VERSION")),
+        otel_string_attribute("telemetry.sdk.language", "rust"),
+    ];
+    attributes.extend(
+        config
+            .resource_attributes
+            .iter()
+            .map(|attribute| otel_string_attribute(&attribute.key, &attribute.value)),
+    );
+    attributes
+}
+
+fn otel_string_attribute(key: &str, value: &str) -> Value {
+    json!({
+        "key": key,
+        "value": {
+            "stringValue": value
+        }
+    })
+}
+
+fn otel_gauge_i64(name: &str, value: i64, time_unix_nano: i64) -> Value {
+    json!({
+        "name": name,
+        "unit": "1",
+        "gauge": {
+            "dataPoints": [{
+                "timeUnixNano": time_unix_nano.to_string(),
+                "asInt": value.to_string()
+            }]
+        }
+    })
+}
+
+const fn otel_time_unix_nano(now: chrono::DateTime<chrono::Utc>) -> i64 {
+    now.timestamp_micros().saturating_mul(1_000)
+}
+
+fn otel_export_metric_count(store: &InMemoryGatewayStore, config: &OtelExportConfigRecord) -> i64 {
+    otel_export_counts(store, config).metrics
 }
 
 fn otel_config_scope_matches(
@@ -8014,11 +9371,75 @@ async fn start_auth_login_provider(
         });
     }
     let provider = active_login_provider(&state, &login_provider_id)?;
-    let start = login_provider_start_response(&provider)?;
+    let start = login_provider_start_response(&state, &provider, chrono::Utc::now()).await?;
     Ok(Json(json!({
         "schema": "gateway.auth.login_start.v1",
         "provider": auth_login_provider_resource_body(&provider),
         "authorization": start
+    })))
+}
+
+async fn complete_auth_login_provider_callback(
+    State(state): State<AppState>,
+    Path(login_provider_id): Path<String>,
+    Json(request): Json<ExternalLoginCallbackRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    let provider = active_login_provider(&state, &login_provider_id)?;
+    validate_external_login_callback_request_shape(&request)?;
+    ensure_external_login_callback_adapter_available(&state, &provider, &request)?;
+    let consumed_attempt = state.store.consume_login_attempt(
+        &login_secret_hash(&request.state),
+        &login_provider_id,
+        now,
+    )?;
+    let claims =
+        external_login_callback_claims(&state, &provider, &consumed_attempt, &request, now).await?;
+    validate_external_login_claims_against_attempt(&provider, &consumed_attempt.record, &claims)?;
+    let (user, identity, created_user) = state.store.upsert_external_login_identity(
+        UpsertExternalLoginIdentityRequest {
+            tenant_id: provider.tenant_id.clone(),
+            login_provider_id: provider.login_provider_id.clone(),
+            provider_kind: provider.provider_kind.clone(),
+            provider_subject: claims.subject.trim().to_owned(),
+            email: claims.email.as_deref().and_then(normalized_email),
+            email_verified: claims.email_verified,
+            display_name: external_login_display_name(&claims),
+        },
+        now,
+    )?;
+    if user.status != DirectoryStatus::Active {
+        return Err(GatewayError::Authentication);
+    }
+    let session = create_auth_session(
+        CreateAuthSessionRequest {
+            tenant_id: user.tenant_id.clone(),
+            principal_id: user.user_id.clone(),
+            active_organization_id: user.default_organization_id.clone(),
+            active_project_id: user.default_project_id.clone(),
+            expires_at: now + chrono::Duration::seconds(DEFAULT_AUTH_SESSION_TTL_SECONDS),
+        },
+        now,
+    );
+    let raw_token = session.raw_token.expose_secret().to_owned();
+    let expires_at = session.record.expires_at;
+    let csrf_body = auth_session_csrf_body(&session.record);
+    let session_body = auth_session_response_body(&state, &session.record);
+    state.store.insert_auth_session(session.record);
+    record_external_login_audit(&state, &provider, &user, &identity, created_user, now);
+    Ok(Json(json!({
+        "schema": "gateway.auth.external_login_callback.v1",
+        "provider": auth_login_provider_resource_body(&provider),
+        "session": {
+            "token_type": "Bearer",
+            "session_token": raw_token,
+            "expires_at": expires_at
+        },
+        "csrf": csrf_body,
+        "user": user_session_resource_body(&user),
+        "external_identity": external_identity_resource_body(&identity),
+        "auth_context": session_body,
+        "created_user": created_user
     })))
 }
 
@@ -8057,7 +9478,7 @@ async fn accept_auth_invitation(
     Path(token): Path<String>,
 ) -> Result<Json<Value>> {
     let now = chrono::Utc::now();
-    let session = verify_auth_session_from_headers(&state, &headers, now)?;
+    let session = verify_mutating_auth_session_from_headers(&state, &headers, now)?;
     let invitation = invitation_by_raw_token(&state, &token)?;
     verify_session_matches_invitation(&state, &session, &invitation)?;
     let accepted = state.store.accept_organization_invitation(
@@ -8140,6 +9561,7 @@ async fn single_user_login(
     );
     let raw_token = session.raw_token.expose_secret().to_owned();
     let expires_at = session.record.expires_at;
+    let csrf_body = auth_session_csrf_body(&session.record);
     state.store.insert_auth_session(session.record);
     Ok(Json(json!({
         "schema": "gateway.auth.single_user_login.v1",
@@ -8148,6 +9570,7 @@ async fn single_user_login(
             "session_token": raw_token,
             "expires_at": expires_at
         },
+        "csrf": csrf_body,
         "user": {
             "id": &config.user_id,
             "display_name": &config.user_display_name,
@@ -8183,7 +9606,7 @@ async fn update_session_default_organization(
     Json(request): Json<SessionDefaultOrganizationRequest>,
 ) -> Result<Json<Value>> {
     let now = chrono::Utc::now();
-    let session = verify_auth_session_from_headers(&state, &headers, now)?;
+    let session = verify_mutating_auth_session_from_headers(&state, &headers, now)?;
     let organization_id = normalized_auth_context_id(&request.organization_id, "organization_id")?;
     let organization = active_organization_for_session(&state, &session, &organization_id)?;
     let project = select_session_project_for_organization(
@@ -8216,7 +9639,7 @@ async fn update_session_active_organization(
     Json(request): Json<SessionActiveOrganizationRequest>,
 ) -> Result<Json<Value>> {
     let now = chrono::Utc::now();
-    let session = verify_auth_session_from_headers(&state, &headers, now)?;
+    let session = verify_mutating_auth_session_from_headers(&state, &headers, now)?;
     let organization_id = normalized_auth_context_id(&request.organization_id, "organization_id")?;
     let organization = active_organization_for_session(&state, &session, &organization_id)?;
     let project = select_session_project_for_organization(
@@ -8240,7 +9663,7 @@ async fn update_session_active_project(
     Json(request): Json<SessionActiveProjectRequest>,
 ) -> Result<Json<Value>> {
     let now = chrono::Utc::now();
-    let session = verify_auth_session_from_headers(&state, &headers, now)?;
+    let session = verify_mutating_auth_session_from_headers(&state, &headers, now)?;
     let project_id = normalized_auth_context_id(&request.project_id, "project_id")?;
     let project = active_project_for_session(&state, &session, &project_id, None)?;
     let updated = state.store.update_session_active_context_by_hash(
@@ -8257,7 +9680,7 @@ async fn logout_current_auth_session(
     headers: HeaderMap,
 ) -> Result<Json<Value>> {
     let now = chrono::Utc::now();
-    let session = verify_auth_session_from_headers(&state, &headers, now)?;
+    let session = verify_mutating_auth_session_from_headers(&state, &headers, now)?;
     let revoked = state
         .store
         .revoke_session_by_hash(&session.session_hash, now)?;
@@ -8285,6 +9708,29 @@ fn verify_auth_session_from_headers(
         return Err(GatewayError::Authentication);
     }
     Ok(session)
+}
+
+fn verify_mutating_auth_session_from_headers(
+    state: &AppState,
+    headers: &HeaderMap,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<AuthSessionRecord> {
+    let session = verify_auth_session_from_headers(state, headers, now)?;
+    verify_auth_session_csrf(headers, &session)?;
+    Ok(session)
+}
+
+fn verify_auth_session_csrf(headers: &HeaderMap, session: &AuthSessionRecord) -> Result<()> {
+    let presented_token = headers
+        .get(CSRF_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(GatewayError::Authentication)?;
+    let expected_token = auth_session_csrf_token(session);
+    if constant_time_bytes_eq(presented_token.as_bytes(), expected_token.as_bytes()) {
+        Ok(())
+    } else {
+        Err(GatewayError::Authentication)
+    }
 }
 
 fn normalized_auth_context_id(value: &str, field_name: &str) -> Result<String> {
@@ -8505,6 +9951,7 @@ fn auth_session_response_body(state: &AppState, session: &AuthSessionRecord) -> 
     json!({
         "schema": "gateway.auth.session.v1",
         "session": safe_auth_session_body(session),
+        "csrf": auth_session_csrf_body(session),
         "user": user.as_ref().map(user_session_resource_body),
         "organization_memberships": organization_memberships
             .iter()
@@ -8515,6 +9962,23 @@ fn auth_session_response_body(state: &AppState, session: &AuthSessionRecord) -> 
             .map(project_member_resource_body)
             .collect::<Vec<_>>()
     })
+}
+
+fn auth_session_csrf_body(session: &AuthSessionRecord) -> Value {
+    json!({
+        "header": CSRF_TOKEN_HEADER,
+        "token": auth_session_csrf_token(session)
+    })
+}
+
+fn auth_session_csrf_token(session: &AuthSessionRecord) -> String {
+    sha256_hex(
+        format!(
+            "gateway-csrf-v1:{}:{}",
+            session.auth_session_id, session.session_hash
+        )
+        .as_bytes(),
+    )
 }
 
 async fn list_route_policies(
@@ -11160,6 +12624,7 @@ fn validate_export_storage_backend(storage_backend: &str) -> Result<&'static str
     match storage_backend {
         "inline_manifest" => Ok("inline_manifest"),
         "object_storage" => Ok("object_storage"),
+        "file_object_storage" => Ok("file_object_storage"),
         _ => Err(GatewayError::BadRequest {
             message: "export_storage_backend_invalid".to_owned(),
         }),
@@ -11218,7 +12683,7 @@ fn export_query_document(
     })
 }
 
-fn build_export_result(
+async fn build_export_result(
     state: &AppState,
     job: &ExportJobRecord,
     scope: &DashboardScopeInput,
@@ -11227,15 +12692,45 @@ fn build_export_result(
     limit: usize,
     storage_backend: &str,
 ) -> Result<ExportBuildResult> {
-    if storage_backend == "object_storage" && !export_object_storage_connected(state) {
-        return build_object_storage_failure_export_result(job, scope, page, storage_backend);
+    if let Some(failure_reason) = export_storage_unavailable_reason(state, storage_backend) {
+        return build_export_storage_failure_result(
+            job,
+            scope,
+            page,
+            storage_backend,
+            failure_reason,
+        );
     }
-    let object_storage_connected = storage_backend == "object_storage";
+    let storage_connected = export_storage_connected(storage_backend);
     let object_ref = export_object_ref(job, storage_backend);
     let payload_document =
         export_payload_document(job, scope, request, page, limit, storage_backend);
     let payload_bytes = encode_export_document(&payload_document)?;
     let checksum = export_payload_checksum(&payload_bytes);
+    if storage_backend == "file_object_storage"
+        && write_file_export_object(state, job, &payload_bytes).is_err()
+    {
+        return build_export_storage_failure_result(
+            job,
+            scope,
+            page,
+            storage_backend,
+            "export_file_object_storage_write_failed",
+        );
+    }
+    if storage_backend == "object_storage"
+        && write_external_export_object(state, job, &payload_bytes)
+            .await
+            .is_err()
+    {
+        return build_export_storage_failure_result(
+            job,
+            scope,
+            page,
+            storage_backend,
+            "export_object_storage_write_failed",
+        );
+    }
     let manifest_document = export_manifest_document(
         job,
         scope,
@@ -11243,7 +12738,7 @@ fn build_export_result(
         &object_ref,
         &checksum,
         storage_backend,
-        object_storage_connected,
+        storage_connected,
     );
     Ok(ExportBuildResult {
         status: "completed",
@@ -11255,16 +12750,16 @@ fn build_export_result(
     })
 }
 
-fn build_object_storage_failure_export_result(
+fn build_export_storage_failure_result(
     job: &ExportJobRecord,
     scope: &DashboardScopeInput,
     page: &ExportPage,
     storage_backend: &str,
+    failure_reason: &str,
 ) -> Result<ExportBuildResult> {
-    const FAILURE_REASON: &str = "export_object_storage_unavailable";
-    let object_ref = export_unavailable_object_ref(job);
+    let object_ref = export_unavailable_object_ref(job, storage_backend);
     let payload_document =
-        export_failure_payload_document(job, scope, page, storage_backend, FAILURE_REASON);
+        export_failure_payload_document(job, scope, page, storage_backend, failure_reason);
     let payload_bytes = encode_export_document(&payload_document)?;
     let checksum = export_payload_checksum(&payload_bytes);
     let manifest_document = export_failure_manifest_document(
@@ -11274,7 +12769,7 @@ fn build_object_storage_failure_export_result(
         &object_ref,
         &checksum,
         storage_backend,
-        FAILURE_REASON,
+        failure_reason,
     );
     Ok(ExportBuildResult {
         status: "failed",
@@ -11292,8 +12787,133 @@ fn encode_export_document(document: &Value) -> Result<Vec<u8>> {
     })
 }
 
-const fn export_object_storage_connected(_state: &AppState) -> bool {
-    false
+fn export_storage_unavailable_reason(
+    state: &AppState,
+    storage_backend: &str,
+) -> Option<&'static str> {
+    match storage_backend {
+        "object_storage" => export_object_storage_unavailable_reason(state),
+        "file_object_storage" => export_file_object_storage_unavailable_reason(state),
+        _ => None,
+    }
+}
+
+fn export_object_storage_unavailable_reason(state: &AppState) -> Option<&'static str> {
+    let Some(config) = state.config.export_object_storage.as_ref() else {
+        return Some("export_object_storage_unconfigured");
+    };
+    if safe_export_object_storage_base_url_for_config(&state.config, &config.base_url).is_none() {
+        return Some("export_object_storage_url_invalid");
+    }
+    None
+}
+
+fn export_file_object_storage_unavailable_reason(state: &AppState) -> Option<&'static str> {
+    let Some(root) = state.config.export_object_storage_dir.as_deref() else {
+        return Some("export_file_object_storage_unconfigured");
+    };
+    if PathBuf::from(root).is_absolute() {
+        None
+    } else {
+        Some("export_file_object_storage_dir_not_absolute")
+    }
+}
+
+fn export_storage_connected(storage_backend: &str) -> bool {
+    matches!(storage_backend, "file_object_storage" | "object_storage")
+}
+
+fn write_file_export_object(
+    state: &AppState,
+    job: &ExportJobRecord,
+    payload_bytes: &[u8],
+) -> Result<()> {
+    let root = state
+        .config
+        .export_object_storage_dir
+        .as_deref()
+        .ok_or_else(|| GatewayError::Internal {
+            message: "export file object storage root missing".to_owned(),
+        })?;
+    let tenant_component = export_path_component(&job.tenant_id)?;
+    let job_component = export_path_component(&job.export_job_id)?;
+    let directory = PathBuf::from(root).join(tenant_component);
+    std::fs::create_dir_all(&directory).map_err(|error| GatewayError::Internal {
+        message: format!("failed to create export object directory: {error}"),
+    })?;
+    let object_path = directory.join(format!("{job_component}.json"));
+    std::fs::write(&object_path, payload_bytes).map_err(|error| GatewayError::Internal {
+        message: format!("failed to write export object: {error}"),
+    })?;
+    Ok(())
+}
+
+async fn write_external_export_object(
+    state: &AppState,
+    job: &ExportJobRecord,
+    payload_bytes: &[u8],
+) -> Result<()> {
+    let config =
+        state
+            .config
+            .export_object_storage
+            .as_ref()
+            .ok_or_else(|| GatewayError::Internal {
+                message: "export object storage config missing".to_owned(),
+            })?;
+    let object_url = export_object_storage_put_url(config, job)?;
+    let mut request = reqwest::Client::new()
+        .put(object_url)
+        .timeout(Duration::from_secs(config.timeout_seconds))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::USER_AGENT, SERVICE_NAME)
+        .header("x-gateway-export-job-id", job.export_job_id.as_str())
+        .body(payload_bytes.to_vec());
+    if let Some(authorization_header) = config.authorization_header.as_ref() {
+        request = request.header(header::AUTHORIZATION, authorization_header.expose_secret());
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|_| GatewayError::Authentication)?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(GatewayError::Authentication)
+    }
+}
+
+fn export_object_storage_put_url(
+    config: &ExportObjectStorageHttpConfig,
+    job: &ExportJobRecord,
+) -> Result<Url> {
+    let tenant_component = export_path_component(&job.tenant_id)?;
+    let job_component = export_path_component(&job.export_job_id)?;
+    let mut url = Url::parse(&config.base_url).map_err(|error| GatewayError::Internal {
+        message: format!("export object storage URL invalid: {error}"),
+    })?;
+    url.path_segments_mut()
+        .map_err(|()| GatewayError::Internal {
+            message: "export object storage URL cannot accept path segments".to_owned(),
+        })?
+        .push(tenant_component)
+        .push(&format!("{job_component}.json"));
+    Ok(url)
+}
+
+fn export_path_component(value: &str) -> Result<&str> {
+    let valid = !value.is_empty()
+        && value.len() <= 160
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
+    if valid {
+        Ok(value)
+    } else {
+        Err(GatewayError::Internal {
+            message: "export object path component invalid".to_owned(),
+        })
+    }
 }
 
 fn export_payload_document(
@@ -11361,8 +12981,14 @@ fn export_manifest_document(
     object_ref: &str,
     checksum: &str,
     storage_backend: &str,
-    object_storage_connected: bool,
+    storage_connected: bool,
 ) -> Value {
+    let inline_rows = storage_backend == "inline_manifest";
+    let rows = if inline_rows {
+        json!(&page.rows)
+    } else {
+        json!([])
+    };
     json!({
         "schema": "gateway.export_manifest.v1",
         "status": "completed",
@@ -11373,14 +12999,16 @@ fn export_manifest_document(
         "object": {
             "object_ref": object_ref,
             "backend": storage_backend,
-            "object_storage_connected": object_storage_connected
+            "connected": storage_connected,
+            "object_storage_connected": storage_backend == "object_storage" && storage_connected
         },
         "checksum": checksum,
         "record_count": page.rows.len(),
         "total_filtered_count": page.total_filtered_count,
         "next_cursor": &page.next_cursor,
-        "rows": &page.rows,
+        "rows": rows,
         "redaction": {
+            "rows_included": inline_rows,
             "raw_request_body_included": false,
             "raw_provider_body_included": false,
             "secret_material_included": false
@@ -11407,6 +13035,7 @@ fn export_failure_manifest_document(
         "object": {
             "object_ref": object_ref,
             "backend": storage_backend,
+            "connected": false,
             "object_storage_connected": false
         },
         "checksum": checksum,
@@ -11433,6 +13062,10 @@ fn export_object_ref(job: &ExportJobRecord, storage_backend: &str) -> String {
             "object-storage://gateway-exports/{}/{}.json",
             job.tenant_id, job.export_job_id
         ),
+        "file_object_storage" => format!(
+            "file-object://gateway-exports/{}/{}.json",
+            job.tenant_id, job.export_job_id
+        ),
         _ => format!(
             "memory://gateway-exports/{}/{}.json",
             job.tenant_id, job.export_job_id
@@ -11440,33 +13073,85 @@ fn export_object_ref(job: &ExportJobRecord, storage_backend: &str) -> String {
     }
 }
 
-fn export_unavailable_object_ref(job: &ExportJobRecord) -> String {
+fn export_unavailable_object_ref(job: &ExportJobRecord, storage_backend: &str) -> String {
+    let scheme = match storage_backend {
+        "file_object_storage" => "file-object",
+        _ => "object-storage",
+    };
     format!(
-        "object-storage://unavailable/{}/{}.json",
+        "{scheme}://unavailable/{}/{}.json",
         job.tenant_id, job.export_job_id
     )
 }
 
+/// Notification delivery transport used by the worker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NotificationDeliveryTransport {
+    /// Deliver webhooks through real HTTP requests.
+    Http,
+    /// Use deterministic delivery outcomes for tests and dry-run harnesses.
+    Synthetic,
+}
+
+impl NotificationDeliveryTransport {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Synthetic => "synthetic",
+        }
+    }
+}
+
 /// Delivers due notification outbox events for one tenant.
-#[must_use]
-pub fn deliver_due_notifications(
+pub async fn deliver_due_notifications(
     state: &AppState,
     tenant_id: &str,
     now: chrono::DateTime<chrono::Utc>,
     limit: usize,
 ) -> Vec<NotificationDeliveryAttemptRecord> {
-    state
-        .store
-        .due_notification_outbox_events(tenant_id, now, limit)
-        .into_iter()
-        .filter_map(|event| deliver_notification_outbox_event(state, event, now).ok())
-        .collect()
+    deliver_due_notifications_with_transport(
+        state,
+        tenant_id,
+        now,
+        limit,
+        NotificationDeliveryTransport::Http,
+    )
+    .await
 }
 
-fn deliver_notification_outbox_event(
+/// Delivers due notification outbox events with an explicit transport.
+pub async fn deliver_due_notifications_with_transport(
+    state: &AppState,
+    tenant_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    limit: usize,
+    transport: NotificationDeliveryTransport,
+) -> Vec<NotificationDeliveryAttemptRecord> {
+    let http_client = match transport {
+        NotificationDeliveryTransport::Http => Some(reqwest::Client::new()),
+        NotificationDeliveryTransport::Synthetic => None,
+    };
+    let mut attempts = Vec::new();
+    for event in state
+        .store
+        .due_notification_outbox_events(tenant_id, now, limit)
+    {
+        if let Ok(attempt) =
+            deliver_notification_outbox_event(state, event, now, transport, http_client.as_ref())
+                .await
+        {
+            attempts.push(attempt);
+        }
+    }
+    attempts
+}
+
+async fn deliver_notification_outbox_event(
     state: &AppState,
     event: crate::domain::NotificationOutboxEventRecord,
     now: chrono::DateTime<chrono::Utc>,
+    transport: NotificationDeliveryTransport,
+    http_client: Option<&reqwest::Client>,
 ) -> Result<NotificationDeliveryAttemptRecord> {
     let sink = event
         .notification_sink_id
@@ -11489,7 +13174,7 @@ fn deliver_notification_outbox_event(
             json!({"transport": "disabled"}),
         ),
         Some(sink) if sink.sink_kind == "webhook" => {
-            webhook_delivery_plan(state, sink, &event, now)?
+            webhook_delivery_plan(state, sink, &event, now, transport, http_client).await?
         }
         Some(sink) => NotificationDeliveryPlan::failure(
             "retryable_failed",
@@ -11577,11 +13262,13 @@ impl NotificationDeliveryPlan {
     }
 }
 
-fn webhook_delivery_plan(
+async fn webhook_delivery_plan(
     state: &AppState,
     sink: &NotificationSinkRecord,
     event: &crate::domain::NotificationOutboxEventRecord,
     now: chrono::DateTime<chrono::Utc>,
+    transport: NotificationDeliveryTransport,
+    http_client: Option<&reqwest::Client>,
 ) -> Result<NotificationDeliveryPlan> {
     let url = sink
         .endpoint_config
@@ -11590,8 +13277,10 @@ fn webhook_delivery_plan(
         .ok_or_else(|| GatewayError::BadRequest {
             message: "notification_sink_webhook_url_required".to_owned(),
         })?;
-    let host = safe_otel_endpoint_host(url).ok_or_else(|| GatewayError::BadRequest {
-        message: "notification_sink_webhook_url_invalid".to_owned(),
+    let host = safe_webhook_endpoint_host_for_config(&state.config, url).ok_or_else(|| {
+        GatewayError::BadRequest {
+            message: "notification_sink_webhook_url_invalid".to_owned(),
+        }
     })?;
     let signing_secret_ref_id =
         sink.signing_secret_ref_id
@@ -11614,56 +13303,50 @@ fn webhook_delivery_plan(
     let signature =
         notification_signature(signing_secret.expose_secret().as_bytes(), &timestamp, &body)?;
     let signature_sha256 = sha256_hex(signature.as_bytes());
-    let host_lower = host.to_ascii_lowercase();
-    let (status, response_status, error_message, next_attempt_at) = if host_lower.contains("gone")
-        || host_lower.contains("permanent")
-    {
-        (
-            "permanent_failed".to_owned(),
-            Some(410),
-            Some("notification_webhook_permanent_failure".to_owned()),
-            None,
-        )
-    } else if host_lower.contains("retry")
-        || host_lower.contains("unavailable")
-        || host_lower.contains("fail")
-    {
-        if event.attempt_count.saturating_add(1) >= NOTIFICATION_DELIVERY_MAX_ATTEMPTS {
-            (
-                "dead_lettered".to_owned(),
-                Some(503),
-                Some("notification_webhook_retry_exhausted".to_owned()),
-                None,
-            )
-        } else {
-            (
-                "retryable_failed".to_owned(),
-                Some(503),
-                Some("notification_webhook_retryable_failure".to_owned()),
-                Some(now + chrono::Duration::seconds(NOTIFICATION_DELIVERY_RETRY_DELAY_SECONDS)),
-            )
-        }
-    } else {
-        ("succeeded".to_owned(), Some(204), None, None)
-    };
+    let payload_schema = event
+        .payload_document
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("gateway.notification.v1");
+    let delivery = execute_webhook_delivery(WebhookDeliveryRequest {
+        transport,
+        http_client,
+        url,
+        body: &body,
+        delivery_id: &event.notification_outbox_event_id,
+        event_id: &event.dedupe_key,
+        event_type: &event.event_kind,
+        schema: payload_schema,
+        timestamp: &timestamp,
+        signature: &signature,
+        timeout_seconds: notification_webhook_timeout_seconds(sink),
+    })
+    .await?;
+    let (status, error_message, next_attempt_at) =
+        notification_delivery_status_from_result(event, sink, delivery.kind, now);
 
     Ok(NotificationDeliveryPlan {
         status,
-        response_status,
+        response_status: delivery.response_status,
         error_message,
         request_body_sha256: Some(body_sha256.clone()),
         signing_secret_ref_id: Some(signing_secret_ref_id.clone()),
         signature_sha256: Some(signature_sha256.clone()),
         delivery_headers: json!({
             "transport": "webhook",
+            "transport_mode": transport.as_str(),
             "url_host": host,
             "url_path": safe_url_path(url),
             "body_sha256": body_sha256,
             "signature_algorithm": "hmac-sha256",
             "signature_sha256": signature_sha256,
+            "timeout_seconds": delivery.timeout_seconds,
+            "response_status_class": delivery.response_status_class,
             "headers": {
                 "x-gateway-delivery-id": &event.notification_outbox_event_id,
                 "x-gateway-event-id": &event.dedupe_key,
+                "x-gateway-event-type": &event.event_kind,
+                "x-gateway-schema": payload_schema,
                 "x-gateway-timestamp": timestamp,
                 "x-gateway-signature": "hmac-sha256:***"
             },
@@ -11671,6 +13354,191 @@ fn webhook_delivery_plan(
         }),
         next_attempt_at,
     })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WebhookDeliveryResultKind {
+    Succeeded,
+    RetryableFailed,
+    PermanentFailed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WebhookDeliveryResult {
+    kind: WebhookDeliveryResultKind,
+    response_status: Option<i32>,
+    response_status_class: Option<String>,
+    timeout_seconds: u64,
+}
+
+struct WebhookDeliveryRequest<'a> {
+    transport: NotificationDeliveryTransport,
+    http_client: Option<&'a reqwest::Client>,
+    url: &'a str,
+    body: &'a [u8],
+    delivery_id: &'a str,
+    event_id: &'a str,
+    event_type: &'a str,
+    schema: &'a str,
+    timestamp: &'a str,
+    signature: &'a str,
+    timeout_seconds: u64,
+}
+
+async fn execute_webhook_delivery(
+    request: WebhookDeliveryRequest<'_>,
+) -> Result<WebhookDeliveryResult> {
+    match request.transport {
+        NotificationDeliveryTransport::Synthetic => Ok(synthetic_webhook_delivery_result(
+            request.url,
+            request.timeout_seconds,
+        )),
+        NotificationDeliveryTransport::Http => {
+            let Some(client) = request.http_client else {
+                return Err(GatewayError::Internal {
+                    message: "notification_http_client_missing".to_owned(),
+                });
+            };
+            let response = client
+                .post(request.url)
+                .timeout(Duration::from_secs(request.timeout_seconds))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::USER_AGENT, "starweaver-gateway")
+                .header("x-gateway-delivery-id", request.delivery_id)
+                .header("x-gateway-event-id", request.event_id)
+                .header("x-gateway-event-type", request.event_type)
+                .header("x-gateway-schema", request.schema)
+                .header("x-gateway-timestamp", request.timestamp)
+                .header("x-gateway-signature", request.signature)
+                .body(request.body.to_vec())
+                .send()
+                .await;
+            Ok(response.map_or(
+                WebhookDeliveryResult {
+                    kind: WebhookDeliveryResultKind::RetryableFailed,
+                    response_status: None,
+                    response_status_class: None,
+                    timeout_seconds: request.timeout_seconds,
+                },
+                |response| {
+                    webhook_result_from_http_status(
+                        response.status().as_u16(),
+                        request.timeout_seconds,
+                    )
+                },
+            ))
+        }
+    }
+}
+
+fn synthetic_webhook_delivery_result(url: &str, timeout_seconds: u64) -> WebhookDeliveryResult {
+    let host = safe_webhook_endpoint_host(url)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if host.contains("gone") || host.contains("permanent") {
+        return WebhookDeliveryResult {
+            kind: WebhookDeliveryResultKind::PermanentFailed,
+            response_status: Some(410),
+            response_status_class: Some("4xx".to_owned()),
+            timeout_seconds,
+        };
+    }
+    if host.contains("retry") || host.contains("unavailable") || host.contains("fail") {
+        return WebhookDeliveryResult {
+            kind: WebhookDeliveryResultKind::RetryableFailed,
+            response_status: Some(503),
+            response_status_class: Some("5xx".to_owned()),
+            timeout_seconds,
+        };
+    }
+    WebhookDeliveryResult {
+        kind: WebhookDeliveryResultKind::Succeeded,
+        response_status: Some(204),
+        response_status_class: Some("2xx".to_owned()),
+        timeout_seconds,
+    }
+}
+
+fn webhook_result_from_http_status(status: u16, timeout_seconds: u64) -> WebhookDeliveryResult {
+    let kind = if (200..=299).contains(&status) {
+        WebhookDeliveryResultKind::Succeeded
+    } else if matches!(status, 408 | 425 | 429) || status >= 500 {
+        WebhookDeliveryResultKind::RetryableFailed
+    } else {
+        WebhookDeliveryResultKind::PermanentFailed
+    };
+    WebhookDeliveryResult {
+        kind,
+        response_status: Some(i32::from(status)),
+        response_status_class: Some(http_status_class(status).to_owned()),
+        timeout_seconds,
+    }
+}
+
+const fn http_status_class(status: u16) -> &'static str {
+    match status {
+        100..=199 => "1xx",
+        200..=299 => "2xx",
+        300..=399 => "3xx",
+        400..=499 => "4xx",
+        500..=599 => "5xx",
+        _ => "unknown",
+    }
+}
+
+fn notification_delivery_status_from_result(
+    event: &crate::domain::NotificationOutboxEventRecord,
+    sink: &NotificationSinkRecord,
+    kind: WebhookDeliveryResultKind,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (
+    String,
+    Option<String>,
+    Option<chrono::DateTime<chrono::Utc>>,
+) {
+    match kind {
+        WebhookDeliveryResultKind::Succeeded => ("succeeded".to_owned(), None, None),
+        WebhookDeliveryResultKind::PermanentFailed => (
+            "permanent_failed".to_owned(),
+            Some("notification_webhook_permanent_failure".to_owned()),
+            None,
+        ),
+        WebhookDeliveryResultKind::RetryableFailed => {
+            if event.attempt_count.saturating_add(1) >= notification_delivery_max_attempts(sink) {
+                (
+                    "dead_lettered".to_owned(),
+                    Some("notification_webhook_retry_exhausted".to_owned()),
+                    None,
+                )
+            } else {
+                (
+                    "retryable_failed".to_owned(),
+                    Some("notification_webhook_retryable_failure".to_owned()),
+                    Some(
+                        now + chrono::Duration::seconds(NOTIFICATION_DELIVERY_RETRY_DELAY_SECONDS),
+                    ),
+                )
+            }
+        }
+    }
+}
+
+fn notification_delivery_max_attempts(sink: &NotificationSinkRecord) -> i32 {
+    sink.endpoint_config
+        .get("retry_policy")
+        .and_then(|policy| policy.get("max_attempts"))
+        .and_then(Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
+        .filter(|value| (1..=NOTIFICATION_WEBHOOK_MAX_RETRY_ATTEMPTS).contains(value))
+        .unwrap_or(NOTIFICATION_DELIVERY_MAX_ATTEMPTS)
+}
+
+fn notification_webhook_timeout_seconds(sink: &NotificationSinkRecord) -> u64 {
+    sink.endpoint_config
+        .get("timeout_seconds")
+        .and_then(Value::as_u64)
+        .filter(|value| (1..=NOTIFICATION_WEBHOOK_MAX_TIMEOUT_SECONDS).contains(value))
+        .unwrap_or(NOTIFICATION_WEBHOOK_DEFAULT_TIMEOUT_SECONDS)
 }
 
 fn notification_signature(signing_secret: &[u8], timestamp: &str, body: &[u8]) -> Result<String> {
@@ -12470,6 +14338,34 @@ fn upstream_credential_for_actor(
         .filter(|credential| credential.tenant_id == actor.tenant_id)
         .ok_or_else(|| GatewayError::NotFound {
             resource: format!("upstream credential {upstream_credential_id}"),
+        })
+}
+
+fn codex_oauth_connection_for_actor(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    codex_oauth_connection_id: &str,
+) -> Result<CodexOAuthConnectionRecord> {
+    state
+        .store
+        .codex_oauth_connection(codex_oauth_connection_id)
+        .filter(|connection| connection.tenant_id == actor.tenant_id)
+        .ok_or_else(|| GatewayError::NotFound {
+            resource: format!("codex oauth connection {codex_oauth_connection_id}"),
+        })
+}
+
+fn codex_oauth_session_for_actor(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    codex_oauth_session_id: &str,
+) -> Result<CodexOAuthSessionRecord> {
+    state
+        .store
+        .codex_oauth_session(codex_oauth_session_id)
+        .filter(|session| session.tenant_id == actor.tenant_id)
+        .ok_or_else(|| GatewayError::NotFound {
+            resource: format!("codex oauth session {codex_oauth_session_id}"),
         })
 }
 
@@ -13475,7 +15371,7 @@ fn otel_export_config_validation_errors(
 ) -> Vec<Value> {
     let mut errors = Vec::new();
     validate_otel_export_scope_fields(state, actor, request, &mut errors);
-    validate_otel_export_shape_fields(request, &mut errors);
+    validate_otel_export_shape_fields(&state.config, request, &mut errors);
     validate_otel_header_secret_ref_scope_fields(state, actor, request, &mut errors);
     let duplicate = state
         .store
@@ -13529,10 +15425,11 @@ fn validate_otel_export_scope_fields(
 }
 
 fn validate_otel_export_shape_fields(
+    config: &GatewayConfig,
     request: &AdminCreateOtelExportConfigRequest,
     errors: &mut Vec<Value>,
 ) {
-    if safe_otel_endpoint_host(&request.endpoint_url).is_none() {
+    if safe_otel_endpoint_host_for_config(config, &request.endpoint_url).is_none() {
         errors.push(validation_error("endpoint_url", "invalid_endpoint_url"));
     }
     if !matches!(request.protocol.as_str(), "otlp_http" | "otlp_grpc") {
@@ -13734,10 +15631,19 @@ fn merged_notification_sink_request(
 }
 
 fn safe_otel_endpoint_host(value: &str) -> Option<String> {
+    safe_otel_endpoint_host_with_policy(value, true)
+}
+
+fn safe_otel_endpoint_host_for_config(config: &GatewayConfig, value: &str) -> Option<String> {
+    safe_otel_endpoint_host_with_policy(value, allow_loopback_http_otel(config))
+}
+
+fn safe_otel_endpoint_host_with_policy(value: &str, allow_loopback_http: bool) -> Option<String> {
     let uri = value.parse::<http::Uri>().ok()?;
-    if uri.scheme_str() != Some("https") || uri.query().is_some() {
+    if uri.query().is_some() {
         return None;
     }
+    let scheme = uri.scheme_str()?;
     let authority = uri.authority()?;
     if authority.as_str().contains('@') {
         return None;
@@ -13746,7 +15652,92 @@ fn safe_otel_endpoint_host(value: &str) -> Option<String> {
     if host.is_empty() || host.len() > 253 {
         return None;
     }
-    Some(host.to_owned())
+    match scheme {
+        "https" => Some(host.to_owned()),
+        "http" if allow_loopback_http && is_loopback_host(host) => Some(host.to_owned()),
+        _ => None,
+    }
+}
+
+fn allow_loopback_http_otel(config: &GatewayConfig) -> bool {
+    allows_local_callback_adapter(&config.environment)
+}
+
+fn safe_webhook_endpoint_host_for_config(config: &GatewayConfig, value: &str) -> Option<String> {
+    safe_webhook_endpoint_host_with_policy(value, allow_loopback_http_webhooks(config))
+}
+
+fn safe_webhook_endpoint_host(value: &str) -> Option<String> {
+    safe_webhook_endpoint_host_with_policy(value, true)
+}
+
+fn safe_export_object_storage_base_url_for_config(
+    config: &GatewayConfig,
+    value: &str,
+) -> Option<String> {
+    safe_export_object_storage_base_url_with_policy(
+        value,
+        allow_loopback_http_object_storage(config),
+    )
+}
+
+fn safe_export_object_storage_base_url_with_policy(
+    value: &str,
+    allow_loopback_http: bool,
+) -> Option<String> {
+    let url = Url::parse(value).ok()?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let host = url.host_str()?;
+    if host.is_empty() || host.len() > 253 {
+        return None;
+    }
+    match url.scheme() {
+        "https" => Some(host.to_owned()),
+        "http" if allow_loopback_http && is_loopback_host(host) => Some(host.to_owned()),
+        _ => None,
+    }
+}
+
+fn allow_loopback_http_object_storage(config: &GatewayConfig) -> bool {
+    allows_local_callback_adapter(&config.environment)
+}
+
+fn safe_webhook_endpoint_host_with_policy(
+    value: &str,
+    allow_loopback_http: bool,
+) -> Option<String> {
+    let uri = value.parse::<http::Uri>().ok()?;
+    if uri.query().is_some() {
+        return None;
+    }
+    let scheme = uri.scheme_str()?;
+    let authority = uri.authority()?;
+    if authority.as_str().contains('@') {
+        return None;
+    }
+    let host = authority.host();
+    if host.is_empty() || host.len() > 253 {
+        return None;
+    }
+    match scheme {
+        "https" => Some(host.to_owned()),
+        "http" if allow_loopback_http && is_loopback_host(host) => Some(host.to_owned()),
+        _ => None,
+    }
+}
+
+fn allow_loopback_http_webhooks(config: &GatewayConfig) -> bool {
+    allows_local_callback_adapter(&config.environment)
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1")
 }
 
 fn valid_otel_header_name(value: &str) -> bool {
@@ -13833,7 +15824,7 @@ fn notification_sink_validation_errors_with_excluded_id(
         request.project_id.as_deref(),
         &mut errors,
     );
-    validate_notification_sink_shape_fields(request, &mut errors);
+    validate_notification_sink_shape_fields(&state.config, request, &mut errors);
     let inferred_organization_id = inferred_notification_organization_id(
         state,
         actor,
@@ -13905,6 +15896,7 @@ fn validate_notification_scope_fields(
 }
 
 fn validate_notification_sink_shape_fields(
+    config: &GatewayConfig,
     request: &AdminCreateNotificationSinkRequest,
     errors: &mut Vec<Value>,
 ) {
@@ -13918,7 +15910,7 @@ fn validate_notification_sink_shape_fields(
         ));
     }
     match request.sink_kind.as_str() {
-        "webhook" => validate_webhook_notification_sink_fields(request, errors),
+        "webhook" => validate_webhook_notification_sink_fields(config, request, errors),
         "stdout" | "disabled" => validate_local_notification_sink_fields(request, errors),
         "object_export" | "pubsub" => {
             errors.push(validation_error("sink_kind", "unsupported_sink_kind"));
@@ -13928,6 +15920,7 @@ fn validate_notification_sink_shape_fields(
 }
 
 fn validate_webhook_notification_sink_fields(
+    config: &GatewayConfig,
     request: &AdminCreateNotificationSinkRequest,
     errors: &mut Vec<Value>,
 ) {
@@ -13936,9 +15929,20 @@ fn validate_webhook_notification_sink_fields(
         return;
     };
     match object.get("url").and_then(Value::as_str) {
-        Some(url) if safe_otel_endpoint_host(url).is_some() => {}
+        Some(url) if safe_webhook_endpoint_host_for_config(config, url).is_some() => {}
         Some(_) => errors.push(validation_error("endpoint_config.url", "invalid_url")),
         None => errors.push(validation_error("endpoint_config.url", "required")),
+    }
+    if let Some(timeout_seconds) = object.get("timeout_seconds").and_then(Value::as_u64) {
+        if !(1..=NOTIFICATION_WEBHOOK_MAX_TIMEOUT_SECONDS).contains(&timeout_seconds) {
+            errors.push(validation_error(
+                "endpoint_config.timeout_seconds",
+                "invalid_timeout",
+            ));
+        }
+    }
+    if let Some(retry_policy) = object.get("retry_policy") {
+        validate_notification_retry_policy(retry_policy, errors);
     }
     if !request
         .signing_secret_ref_id
@@ -13949,6 +15953,32 @@ fn validate_webhook_notification_sink_fields(
             "signing_secret_ref_id",
             "required_secret_ref",
         ));
+    }
+}
+
+fn validate_notification_retry_policy(retry_policy: &Value, errors: &mut Vec<Value>) {
+    let Some(policy) = retry_policy.as_object() else {
+        errors.push(validation_error(
+            "endpoint_config.retry_policy",
+            "invalid_document",
+        ));
+        return;
+    };
+    if let Some(max_attempts) = policy.get("max_attempts").and_then(Value::as_i64) {
+        if !(1..=i64::from(NOTIFICATION_WEBHOOK_MAX_RETRY_ATTEMPTS)).contains(&max_attempts) {
+            errors.push(validation_error(
+                "endpoint_config.retry_policy.max_attempts",
+                "invalid_max_attempts",
+            ));
+        }
+    }
+    if let Some(max_duration_seconds) = policy.get("max_duration_seconds").and_then(Value::as_i64) {
+        if !(60..=86_400).contains(&max_duration_seconds) {
+            errors.push(validation_error(
+                "endpoint_config.retry_policy.max_duration_seconds",
+                "invalid_max_duration",
+            ));
+        }
     }
 }
 
@@ -14021,6 +16051,15 @@ fn login_provider_validation_errors(
         errors.push(validation_error("config_document", "invalid_config"));
         return errors;
     }
+    if login_config_string(&request.config_document, "callback_mode")
+        == Some("local_verified_claims")
+        && !allows_local_callback_adapter(&state.config.environment)
+    {
+        errors.push(validation_error(
+            "config_document.callback_mode",
+            "local_verified_claims_requires_local_or_test_profile",
+        ));
+    }
     if !login_config_string(&request.config_document, "client_id")
         .is_some_and(|value| !value.trim().is_empty() && value.len() <= 256)
     {
@@ -14038,31 +16077,29 @@ fn login_provider_validation_errors(
         ));
     }
     if !login_config_string(&request.config_document, "redirect_uri")
-        .is_some_and(login_provider_https_url_is_safe)
+        .is_some_and(|url| login_provider_url_is_safe_for_config(&state.config, url))
     {
         errors.push(validation_error(
             "config_document.redirect_uri",
             "invalid_redirect_uri",
         ));
     }
-    if request.provider_kind == "oidc" {
-        if !login_config_string(&request.config_document, "issuer")
-            .is_some_and(login_provider_https_url_is_safe)
-        {
-            errors.push(validation_error("config_document.issuer", "invalid_issuer"));
-        }
-        if !login_config_string(&request.config_document, "authorization_url")
-            .is_some_and(login_provider_https_url_is_safe)
-        {
-            errors.push(validation_error(
-                "config_document.authorization_url",
-                "invalid_authorization_url",
-            ));
-        }
+    if request.provider_kind == "oidc"
+        && !login_config_string(&request.config_document, "issuer")
+            .is_some_and(|url| login_provider_url_is_safe_for_config(&state.config, url))
+    {
+        errors.push(validation_error("config_document.issuer", "invalid_issuer"));
     }
-    for field in ["authorization_url", "token_url"] {
+    for field in [
+        "authorization_url",
+        "token_url",
+        "jwks_url",
+        "discovery_url",
+        "user_api_url",
+        "emails_api_url",
+    ] {
         if login_config_string(&request.config_document, field)
-            .is_some_and(|url| !login_provider_https_url_is_safe(url))
+            .is_some_and(|url| !login_provider_url_is_safe_for_config(&state.config, url))
         {
             errors.push(validation_error(
                 &format!("config_document.{field}"),
@@ -14195,6 +16232,24 @@ fn validate_login_provider_status(status: &ResourceStatus) -> Result<()> {
     }
 }
 
+fn validate_codex_oauth_connection_status_update(
+    status: &CodexOAuthConnectionStatus,
+) -> Result<()> {
+    if matches!(
+        status,
+        CodexOAuthConnectionStatus::Unauthenticated
+            | CodexOAuthConnectionStatus::Expired
+            | CodexOAuthConnectionStatus::Error
+            | CodexOAuthConnectionStatus::Disabled
+    ) {
+        Ok(())
+    } else {
+        Err(GatewayError::BadRequest {
+            message: "codex_oauth_connection_status_invalid".to_owned(),
+        })
+    }
+}
+
 fn validate_user_status(status: &DirectoryStatus) -> Result<()> {
     if matches!(
         status,
@@ -14231,8 +16286,32 @@ fn login_config_string<'a>(config: &'a Value, field: &str) -> Option<&'a str> {
     config.get(field).and_then(Value::as_str)
 }
 
-fn login_provider_https_url_is_safe(value: &str) -> bool {
-    value.starts_with("https://") && !value.contains(char::is_whitespace) && !value.contains('?')
+fn login_provider_url_is_safe_for_config(config: &GatewayConfig, value: &str) -> bool {
+    login_provider_url_is_safe_with_policy(
+        value,
+        allows_local_callback_adapter(&config.environment),
+    )
+}
+
+fn login_provider_url_is_safe_with_policy(value: &str, allow_loopback_http: bool) -> bool {
+    let Ok(uri) = value.parse::<http::Uri>() else {
+        return false;
+    };
+    if uri.query().is_some() || value.contains(char::is_whitespace) {
+        return false;
+    }
+    let Some(authority) = uri.authority() else {
+        return false;
+    };
+    if authority.as_str().contains('@') {
+        return false;
+    }
+    let host = authority.host();
+    match uri.scheme_str() {
+        Some("https") => true,
+        Some("http") if allow_loopback_http && is_loopback_host(host) => true,
+        _ => false,
+    }
 }
 
 fn login_provider_scopes_are_valid(value: &Value) -> bool {
@@ -15106,7 +17185,19 @@ fn user_resource_body(user: &crate::domain::UserRecord) -> Value {
 }
 
 fn user_session_resource_body(user: &crate::domain::UserRecord) -> Value {
-    user_resource_body(user)
+    json!({
+        "kind": "user",
+        "id": &user.user_id,
+        "tenant_id": &user.tenant_id,
+        "display_name": &user.display_name,
+        "email_hash": user.primary_email.as_deref().and_then(external_identity_email_hash),
+        "default_organization_id": &user.default_organization_id,
+        "default_project_id": &user.default_project_id,
+        "status": &user.status,
+        "version": user.resource_version,
+        "created_at": user.created_at,
+        "updated_at": user.updated_at
+    })
 }
 
 fn service_account_resource_envelope(account: &ServiceAccountRecord) -> Value {
@@ -15219,6 +17310,125 @@ fn secret_ref_locator_resource_body(secret_ref: &SecretRefRecord) -> Value {
         "version": secret_ref.resource_version,
         "status": &secret_ref.status,
         "updated_at": secret_ref.updated_at
+    })
+}
+
+fn codex_oauth_connection_resource_envelope(connection: &CodexOAuthConnectionRecord) -> Value {
+    json!({
+        "schema": "gateway.admin.resource.v1",
+        "resource": codex_oauth_connection_resource_body(connection)
+    })
+}
+
+fn codex_oauth_connection_resource_body(connection: &CodexOAuthConnectionRecord) -> Value {
+    json!({
+        "kind": "codex_oauth_connection",
+        "id": &connection.codex_oauth_connection_id,
+        "tenant_id": &connection.tenant_id,
+        "organization_id": &connection.organization_id,
+        "provider_endpoint_id": &connection.provider_endpoint_id,
+        "upstream_credential_id": &connection.upstream_credential_id,
+        "display_name": &connection.display_name,
+        "fixed_profile": codex_oauth_fixed_profile_body(),
+        "version": connection.resource_version,
+        "status": connection.status.as_str(),
+        "created_by": &connection.created_by,
+        "created_at": connection.created_at,
+        "updated_at": connection.updated_at
+    })
+}
+
+fn codex_oauth_session_resource_envelope(
+    state: &AppState,
+    session: &CodexOAuthSessionRecord,
+) -> Value {
+    json!({
+        "schema": "gateway.admin.resource.v1",
+        "resource": codex_oauth_session_resource_body(state, session)
+    })
+}
+
+fn codex_oauth_session_resource_body(state: &AppState, session: &CodexOAuthSessionRecord) -> Value {
+    let token_secret = state.store.secret_ref(&session.token_secret_ref_id);
+    json!({
+        "kind": "codex_oauth_session",
+        "id": &session.codex_oauth_session_id,
+        "tenant_id": &session.tenant_id,
+        "codex_oauth_connection_id": &session.codex_oauth_connection_id,
+        "upstream_credential_id": &session.upstream_credential_id,
+        "token_secret_ref_id": mask_secret_ref_id(&session.token_secret_ref_id),
+        "token_secret_display_mask": token_secret
+            .as_ref()
+            .map(|secret_ref| secret_ref.display_mask.as_str()),
+        "token_secret_fingerprint": token_secret
+            .as_ref()
+            .map(|secret_ref| secret_ref.fingerprint.as_str()),
+        "token_expires_at": session.token_expires_at,
+        "version": session.resource_version,
+        "status": session.status.as_str(),
+        "created_by": &session.created_by,
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+        "revoked_at": session.revoked_at
+    })
+}
+
+fn codex_oauth_refresh_status_body(refresh: &CodexOAuthRefreshStatusRecord) -> Value {
+    json!({
+        "kind": "codex_oauth_refresh_status",
+        "id": &refresh.codex_oauth_refresh_status_id,
+        "tenant_id": &refresh.tenant_id,
+        "codex_oauth_connection_id": &refresh.codex_oauth_connection_id,
+        "upstream_credential_id": &refresh.upstream_credential_id,
+        "status": refresh.status.as_str(),
+        "last_refresh_at": refresh.last_refresh_at,
+        "next_refresh_at": refresh.next_refresh_at,
+        "token_expires_at": refresh.token_expires_at,
+        "last_error": &refresh.last_error,
+        "updated_at": refresh.updated_at
+    })
+}
+
+fn codex_oauth_fixed_profile_body() -> Value {
+    json!({
+        "provider_kind": "codex",
+        "credential_kind": "codex_oauth",
+        "protocol_family": ProtocolFamily::OpenAiResponses,
+        "auth_issuer": CODEX_OAUTH_ISSUER,
+        "client_id": CODEX_OAUTH_CLIENT_ID,
+        "device_code_endpoint": CODEX_OAUTH_DEVICE_CODE_ENDPOINT,
+        "device_token_endpoint": CODEX_OAUTH_DEVICE_TOKEN_ENDPOINT,
+        "token_endpoint": CODEX_OAUTH_TOKEN_ENDPOINT,
+        "revoke_endpoint": CODEX_OAUTH_REVOKE_ENDPOINT,
+        "verification_url": CODEX_OAUTH_VERIFICATION_URL,
+        "redirect_uri": CODEX_OAUTH_REDIRECT_URI,
+        "api_base_url": CODEX_API_BASE_URL
+    })
+}
+
+fn codex_oauth_connection_diff(connection: &CodexOAuthConnectionRecord) -> Value {
+    json!({
+        "organization_id": &connection.organization_id,
+        "provider_endpoint_id": &connection.provider_endpoint_id,
+        "display_name": &connection.display_name,
+        "fixed_profile": codex_oauth_fixed_profile_body(),
+        "status": connection.status.as_str(),
+        "token_material_included": false
+    })
+}
+
+fn codex_oauth_session_diff(state: &AppState, session: &CodexOAuthSessionRecord) -> Value {
+    let token_secret = state.store.secret_ref(&session.token_secret_ref_id);
+    json!({
+        "codex_oauth_connection_id": &session.codex_oauth_connection_id,
+        "upstream_credential_id": &session.upstream_credential_id,
+        "token_secret_ref_id": mask_secret_ref_id(&session.token_secret_ref_id),
+        "token_secret_fingerprint": token_secret
+            .as_ref()
+            .map(|secret_ref| secret_ref.fingerprint.as_str()),
+        "token_expires_at": session.token_expires_at,
+        "status": session.status.as_str(),
+        "token_material_included": false
     })
 }
 
@@ -15842,8 +18052,12 @@ fn redacted_login_provider_config(provider: &LoginProviderRecord) -> Value {
     Value::Object(redacted)
 }
 
-fn login_provider_start_response(provider: &LoginProviderRecord) -> Result<Value> {
-    let authorization_endpoint = login_provider_authorization_endpoint(provider)?;
+async fn login_provider_start_response(
+    state: &AppState,
+    provider: &LoginProviderRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Value> {
+    let authorization_endpoint = login_provider_authorization_endpoint(state, provider).await?;
     let client_id =
         login_config_string(&provider.config_document, "client_id").ok_or_else(|| {
             GatewayError::BadRequest {
@@ -15856,17 +18070,32 @@ fn login_provider_start_response(provider: &LoginProviderRecord) -> Result<Value
                 message: "login_provider_redirect_uri_missing".to_owned(),
             }
         })?;
-    let state = random_login_token("gwst");
+    let state_token = random_login_token("gwst");
     let nonce = (provider.provider_kind == "oidc").then(|| random_login_token("gwnc"));
     let code_verifier = random_pkce_code_verifier();
     let code_challenge = pkce_s256_challenge(&code_verifier);
+    state.store.create_login_attempt(
+        CreateLoginAttemptRequest {
+            tenant_id: provider.tenant_id.clone(),
+            login_provider_id: provider.login_provider_id.clone(),
+            provider_kind: provider.provider_kind.clone(),
+            state_hash: login_secret_hash(&state_token),
+            nonce_hash: nonce.as_deref().map(login_secret_hash),
+            code_verifier_hash: login_secret_hash(&code_verifier),
+            code_verifier: SecretString::from(code_verifier.clone()),
+            code_challenge: code_challenge.clone(),
+            redirect_uri: redirect_uri.to_owned(),
+            expires_at: now + chrono::Duration::seconds(600),
+        },
+        now,
+    )?;
     let scope = login_provider_scope_values(provider).join(" ");
     let mut params = vec![
         ("response_type", "code".to_owned()),
         ("client_id", client_id.to_owned()),
         ("redirect_uri", redirect_uri.to_owned()),
         ("scope", scope),
-        ("state", state.clone()),
+        ("state", state_token.clone()),
         ("code_challenge", code_challenge.clone()),
         ("code_challenge_method", "S256".to_owned()),
     ];
@@ -15878,7 +18107,7 @@ fn login_provider_start_response(provider: &LoginProviderRecord) -> Result<Value
             "{authorization_endpoint}?{}",
             oauth_query_string(&params)
         ),
-        "state": state,
+        "state": state_token,
         "nonce": nonce,
         "pkce": {
             "code_challenge": code_challenge,
@@ -15888,16 +18117,778 @@ fn login_provider_start_response(provider: &LoginProviderRecord) -> Result<Value
     }))
 }
 
-fn login_provider_authorization_endpoint(provider: &LoginProviderRecord) -> Result<&str> {
-    if let Some(endpoint) = login_config_string(&provider.config_document, "authorization_url") {
-        return Ok(endpoint);
+async fn external_login_callback_claims(
+    state: &AppState,
+    provider: &LoginProviderRecord,
+    consumed_attempt: &ConsumedLoginAttempt,
+    request: &ExternalLoginCallbackRequest,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<ExternalLoginVerifiedClaims> {
+    if login_config_string(&provider.config_document, "callback_mode")
+        == Some("local_verified_claims")
+    {
+        let claims = request
+            .verified_claims
+            .as_ref()
+            .ok_or(GatewayError::Authentication)?;
+        validate_external_login_claims(provider, claims, now)?;
+        return Ok(claims.clone());
     }
     match provider.provider_kind.as_str() {
-        "github_oauth_app" => Ok("https://github.com/login/oauth/authorize"),
+        "github_oauth_app" => {
+            resolve_github_oauth_app_callback_claims(state, provider, consumed_attempt, request)
+                .await
+        }
+        "oidc" => {
+            resolve_oidc_callback_claims(state, provider, consumed_attempt, request, now).await
+        }
+        _ => Err(GatewayError::BadRequest {
+            message: "login_provider_callback_adapter_unavailable".to_owned(),
+        }),
+    }
+}
+
+fn ensure_external_login_callback_adapter_available(
+    state: &AppState,
+    provider: &LoginProviderRecord,
+    request: &ExternalLoginCallbackRequest,
+) -> Result<()> {
+    if login_config_string(&provider.config_document, "callback_mode")
+        == Some("local_verified_claims")
+    {
+        return ensure_local_verified_claims_callback_allowed(state, provider);
+    }
+    match provider.provider_kind.as_str() {
+        "github_oauth_app" if request.verified_claims.is_some() => Err(GatewayError::BadRequest {
+            message: "verified_claims_not_accepted_for_github_callback".to_owned(),
+        }),
+        "oidc" if request.verified_claims.is_some() => Err(GatewayError::BadRequest {
+            message: "verified_claims_not_accepted_for_oidc_callback".to_owned(),
+        }),
+        "github_oauth_app" | "oidc" => Ok(()),
+        _ => Err(GatewayError::BadRequest {
+            message: "login_provider_callback_adapter_unavailable".to_owned(),
+        }),
+    }
+}
+
+fn ensure_local_verified_claims_callback_allowed(
+    state: &AppState,
+    provider: &LoginProviderRecord,
+) -> Result<()> {
+    if login_config_string(&provider.config_document, "callback_mode")
+        != Some("local_verified_claims")
+    {
+        return Err(GatewayError::BadRequest {
+            message: "login_provider_callback_adapter_unavailable".to_owned(),
+        });
+    }
+    if !allows_local_callback_adapter(&state.config.environment) {
+        return Err(GatewayError::BadRequest {
+            message: "local_verified_claims_callback_requires_local_or_test_profile".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_external_login_callback_request_shape(
+    request: &ExternalLoginCallbackRequest,
+) -> Result<()> {
+    if !request.state.starts_with("gwst_") || request.code.trim().is_empty() {
+        return Err(GatewayError::Authentication);
+    }
+    Ok(())
+}
+
+fn validate_external_login_claims(
+    provider: &LoginProviderRecord,
+    claims: &ExternalLoginVerifiedClaims,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    if claims.subject.trim().is_empty() {
+        return Err(GatewayError::Authentication);
+    }
+    if claims
+        .email
+        .as_deref()
+        .is_some_and(|email| normalized_email(email).is_none() || !claims.email_verified)
+    {
+        return Err(GatewayError::Authentication);
+    }
+    if provider.provider_kind == "oidc" {
+        validate_oidc_verified_claims(provider, claims, now)?;
+    }
+    Ok(())
+}
+
+fn validate_oidc_verified_claims(
+    provider: &LoginProviderRecord,
+    claims: &ExternalLoginVerifiedClaims,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let issuer = login_config_string(&provider.config_document, "issuer");
+    let client_id = login_config_string(&provider.config_document, "client_id");
+    if claims.issuer.as_deref() != issuer {
+        return Err(GatewayError::Authentication);
+    }
+    if claims.audience.as_deref() != client_id {
+        return Err(GatewayError::Authentication);
+    }
+    if claims.expires_at.is_none_or(|expires_at| expires_at <= now) {
+        return Err(GatewayError::Authentication);
+    }
+    if claims
+        .nonce
+        .as_deref()
+        .is_none_or(|nonce| !nonce.starts_with("gwnc_"))
+    {
+        return Err(GatewayError::Authentication);
+    }
+    Ok(())
+}
+
+fn validate_external_login_claims_against_attempt(
+    provider: &LoginProviderRecord,
+    attempt: &LoginAttemptRecord,
+    claims: &ExternalLoginVerifiedClaims,
+) -> Result<()> {
+    if attempt.tenant_id != provider.tenant_id
+        || attempt.login_provider_id != provider.login_provider_id
+        || attempt.provider_kind != provider.provider_kind
+    {
+        return Err(GatewayError::Authentication);
+    }
+    if provider.provider_kind == "oidc"
+        && attempt.nonce_hash.as_deref()
+            != claims.nonce.as_deref().map(login_secret_hash).as_deref()
+    {
+        return Err(GatewayError::Authentication);
+    }
+    Ok(())
+}
+
+fn external_login_display_name(claims: &ExternalLoginVerifiedClaims) -> String {
+    claims
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(claims.email.as_deref())
+        .unwrap_or(claims.subject.as_str())
+        .to_owned()
+}
+
+fn record_external_login_audit(
+    state: &AppState,
+    provider: &LoginProviderRecord,
+    user: &crate::domain::UserRecord,
+    identity: &ExternalIdentityRecord,
+    created_user: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    state.store.record_audit_event(AuditEventRecord {
+        audit_event_id: new_prefixed_id("aud"),
+        event_type: "gateway.auth.external_login".to_owned(),
+        tenant_id: user.tenant_id.clone(),
+        organization_id: user.default_organization_id.clone(),
+        project_id: user.default_project_id.clone(),
+        scope_kind: "tenant".to_owned(),
+        scope_id: user.tenant_id.clone(),
+        resource_kind: "User".to_owned(),
+        resource_id: user.user_id.clone(),
+        before_version: None,
+        after_version: Some(user.resource_version),
+        actor_id: user.user_id.clone(),
+        actor_kind: ActorKind::User,
+        principal_id: Some(user.user_id.clone()),
+        request_id: new_prefixed_id("req"),
+        redacted_diff: json!({
+            "login_provider_id": &provider.login_provider_id,
+            "provider_kind": &provider.provider_kind,
+            "external_identity_id": &identity.external_identity_id,
+            "created_user": created_user,
+            "email_hash": identity.email.as_deref().and_then(external_identity_email_hash),
+            "raw_tokens_included": false,
+            "authorization_code_included": false
+        }),
+        occurred_at: now,
+    });
+}
+
+async fn resolve_oidc_callback_claims(
+    state: &AppState,
+    provider: &LoginProviderRecord,
+    consumed_attempt: &ConsumedLoginAttempt,
+    request: &ExternalLoginCallbackRequest,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<ExternalLoginVerifiedClaims> {
+    let client = reqwest::Client::new();
+    let metadata = resolve_oidc_provider_metadata(state, provider, &client).await?;
+    let id_token = exchange_oidc_authorization_code(
+        state,
+        provider,
+        consumed_attempt,
+        request,
+        &metadata,
+        &client,
+    )
+    .await?;
+    let claims =
+        validate_oidc_id_token(provider, consumed_attempt, &metadata, &id_token, &client).await?;
+    validate_external_login_claims(provider, &claims, now)?;
+    Ok(claims)
+}
+
+async fn resolve_github_oauth_app_callback_claims(
+    state: &AppState,
+    provider: &LoginProviderRecord,
+    consumed_attempt: &ConsumedLoginAttempt,
+    request: &ExternalLoginCallbackRequest,
+) -> Result<ExternalLoginVerifiedClaims> {
+    let client = reqwest::Client::new();
+    let access_token =
+        exchange_github_authorization_code(state, provider, consumed_attempt, request, &client)
+            .await?;
+    let user_api_url = github_endpoint_url(state, provider, "user_api_url", GITHUB_USER_API_URL)?;
+    let user =
+        fetch_github_json::<GitHubUserResponse>(&client, &user_api_url, access_token.as_str())
+            .await?;
+    let email =
+        resolve_github_verified_email(state, provider, &client, access_token.as_str()).await?;
+    github_user_claims(&user, email)
+}
+
+async fn exchange_github_authorization_code(
+    state: &AppState,
+    provider: &LoginProviderRecord,
+    consumed_attempt: &ConsumedLoginAttempt,
+    request: &ExternalLoginCallbackRequest,
+    client: &reqwest::Client,
+) -> Result<String> {
+    let client_id = required_login_config_string(provider, "client_id")?;
+    let client_secret_ref = required_login_config_string(provider, "client_secret_ref")?;
+    let client_secret = state
+        .store
+        .secret_value(client_secret_ref)
+        .ok_or(GatewayError::Authentication)?;
+    let token_url = github_endpoint_url(state, provider, "token_url", GITHUB_OAUTH_TOKEN_URL)?;
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs([
+            ("client_id", client_id),
+            ("client_secret", client_secret.expose_secret()),
+            ("code", request.code.trim()),
+            (
+                "redirect_uri",
+                consumed_attempt.record.redirect_uri.as_str(),
+            ),
+            (
+                "code_verifier",
+                consumed_attempt.code_verifier.expose_secret(),
+            ),
+        ])
+        .finish();
+    let response = client
+        .post(token_url)
+        .timeout(Duration::from_secs(10))
+        .header(header::ACCEPT, "application/json")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(header::USER_AGENT, SERVICE_NAME)
+        .body(body)
+        .send()
+        .await
+        .map_err(|_| GatewayError::Authentication)?;
+    if !response.status().is_success() {
+        return Err(GatewayError::Authentication);
+    }
+    let token_response = response_json_body::<GitHubTokenResponse>(response)
+        .await
+        .map_err(|_| GatewayError::Authentication)?;
+    if token_response.access_token.trim().is_empty() {
+        return Err(GatewayError::Authentication);
+    }
+    Ok(token_response.access_token)
+}
+
+async fn resolve_github_verified_email(
+    state: &AppState,
+    provider: &LoginProviderRecord,
+    client: &reqwest::Client,
+    access_token: &str,
+) -> Result<Option<String>> {
+    let emails_api_url = github_endpoint_url(
+        state,
+        provider,
+        "emails_api_url",
+        GITHUB_USER_EMAILS_API_URL,
+    )?;
+    let emails =
+        fetch_github_json::<Vec<GitHubEmailResponse>>(client, &emails_api_url, access_token)
+            .await?;
+    Ok(github_verified_email(&emails))
+}
+
+fn github_verified_email(emails: &[GitHubEmailResponse]) -> Option<String> {
+    emails
+        .iter()
+        .find(|email| email.primary && email.verified)
+        .or_else(|| emails.iter().find(|email| email.verified))
+        .and_then(|email| normalized_email(&email.email))
+}
+
+async fn fetch_github_json<T: DeserializeOwned>(
+    client: &reqwest::Client,
+    url: &str,
+    access_token: &str,
+) -> Result<T> {
+    let response = client
+        .get(url)
+        .timeout(Duration::from_secs(10))
+        .bearer_auth(access_token)
+        .header(header::ACCEPT, "application/vnd.github+json")
+        .header(header::USER_AGENT, SERVICE_NAME)
+        .send()
+        .await
+        .map_err(|_| GatewayError::Authentication)?;
+    if !response.status().is_success() {
+        return Err(GatewayError::Authentication);
+    }
+    response_json_body::<T>(response)
+        .await
+        .map_err(|_| GatewayError::Authentication)
+}
+
+fn github_user_claims(
+    user: &GitHubUserResponse,
+    email: Option<String>,
+) -> Result<ExternalLoginVerifiedClaims> {
+    let subject = github_user_subject(user)?;
+    let email_verified = email.is_some();
+    let display_name = user
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            user.login
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or(subject.as_str())
+        .to_owned();
+    Ok(ExternalLoginVerifiedClaims {
+        subject,
+        email,
+        email_verified,
+        display_name: Some(display_name),
+        nonce: None,
+        issuer: None,
+        audience: None,
+        expires_at: None,
+    })
+}
+
+fn github_user_subject(user: &GitHubUserResponse) -> Result<String> {
+    if let Some(node_id) = user
+        .node_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(node_id.to_owned());
+    }
+    if let Some(id) = user.id.as_u64() {
+        return Ok(id.to_string());
+    }
+    if let Some(id) = user.id.as_i64().filter(|id| *id >= 0) {
+        return Ok(id.to_string());
+    }
+    if let Some(id) = user.id.as_str().map(str::trim).filter(|id| !id.is_empty()) {
+        return Ok(id.to_owned());
+    }
+    Err(GatewayError::Authentication)
+}
+
+fn github_endpoint_url(
+    state: &AppState,
+    provider: &LoginProviderRecord,
+    field: &str,
+    default_url: &str,
+) -> Result<String> {
+    let url = login_config_string(&provider.config_document, field).unwrap_or(default_url);
+    if login_provider_url_is_safe_for_config(&state.config, url) {
+        Ok(url.to_owned())
+    } else {
+        Err(GatewayError::BadRequest {
+            message: format!("login_provider_{field}_invalid"),
+        })
+    }
+}
+
+async fn exchange_oidc_authorization_code(
+    state: &AppState,
+    provider: &LoginProviderRecord,
+    consumed_attempt: &ConsumedLoginAttempt,
+    request: &ExternalLoginCallbackRequest,
+    metadata: &OidcProviderMetadata,
+    client: &reqwest::Client,
+) -> Result<String> {
+    let client_id = required_login_config_string(provider, "client_id")?;
+    let client_secret_ref = required_login_config_string(provider, "client_secret_ref")?;
+    let client_secret = state
+        .store
+        .secret_value(client_secret_ref)
+        .ok_or(GatewayError::Authentication)?;
+    let auth_method = login_config_string(&provider.config_document, "token_endpoint_auth_method")
+        .unwrap_or("client_secret_basic");
+    let mut form = vec![
+        ("grant_type", "authorization_code"),
+        ("code", request.code.trim()),
+        (
+            "redirect_uri",
+            consumed_attempt.record.redirect_uri.as_str(),
+        ),
+        (
+            "code_verifier",
+            consumed_attempt.code_verifier.expose_secret(),
+        ),
+    ];
+    if auth_method == "client_secret_post" {
+        form.push(("client_id", client_id));
+        form.push(("client_secret", client_secret.expose_secret()));
+    }
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(form)
+        .finish();
+    let mut token_request = client
+        .post(&metadata.token_endpoint)
+        .timeout(Duration::from_secs(10))
+        .header(header::ACCEPT, "application/json")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(body);
+    if auth_method == "client_secret_basic" {
+        token_request = token_request.basic_auth(client_id, Some(client_secret.expose_secret()));
+    } else if auth_method != "client_secret_post" {
+        return Err(GatewayError::Authentication);
+    }
+    let response = token_request
+        .send()
+        .await
+        .map_err(|_| GatewayError::Authentication)?;
+    if !response.status().is_success() {
+        return Err(GatewayError::Authentication);
+    }
+    let token_response = response_json_body::<OidcTokenResponse>(response)
+        .await
+        .map_err(|_| GatewayError::Authentication)?;
+    if token_response.id_token.trim().is_empty() {
+        return Err(GatewayError::Authentication);
+    }
+    Ok(token_response.id_token)
+}
+
+async fn validate_oidc_id_token(
+    provider: &LoginProviderRecord,
+    consumed_attempt: &ConsumedLoginAttempt,
+    metadata: &OidcProviderMetadata,
+    id_token: &str,
+    client: &reqwest::Client,
+) -> Result<ExternalLoginVerifiedClaims> {
+    let client_id = required_login_config_string(provider, "client_id")?;
+    let header = decode_header(id_token).map_err(|_| GatewayError::Authentication)?;
+    if !metadata.supported_algs.contains(&header.alg) || !oidc_algorithm_is_asymmetric(header.alg) {
+        return Err(GatewayError::Authentication);
+    }
+    let jwks = fetch_json::<JwkSet>(client, &metadata.jwks_uri)
+        .await
+        .map_err(|_| GatewayError::Authentication)?;
+    let jwk = select_oidc_jwk(&jwks, header.kid.as_deref(), header.alg)?;
+    let decoding_key = DecodingKey::from_jwk(jwk).map_err(|_| GatewayError::Authentication)?;
+    let mut validation = Validation::new(header.alg);
+    validation.set_issuer(&[metadata.issuer.as_str()]);
+    validation.set_audience(&[client_id]);
+    validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
+    let token = decode::<OidcIdTokenClaims>(id_token, &decoding_key, &validation)
+        .map_err(|_| GatewayError::Authentication)?;
+    if !token.claims.aud.contains(client_id) {
+        return Err(GatewayError::Authentication);
+    }
+    let nonce = token
+        .claims
+        .nonce
+        .clone()
+        .ok_or(GatewayError::Authentication)?;
+    if consumed_attempt.record.nonce_hash.as_deref() != Some(login_secret_hash(&nonce).as_str()) {
+        return Err(GatewayError::Authentication);
+    }
+    let expires_at = chrono::DateTime::from_timestamp(token.claims.exp, 0)
+        .ok_or(GatewayError::Authentication)?;
+    Ok(ExternalLoginVerifiedClaims {
+        subject: token.claims.sub,
+        email: token.claims.email,
+        email_verified: token.claims.email_verified,
+        display_name: token.claims.name.or(token.claims.preferred_username),
+        nonce: Some(nonce),
+        issuer: Some(token.claims.iss),
+        audience: Some(client_id.to_owned()),
+        expires_at: Some(expires_at),
+    })
+}
+
+fn select_oidc_jwk<'a>(jwks: &'a JwkSet, kid: Option<&str>, alg: Algorithm) -> Result<&'a Jwk> {
+    let mut candidates = jwks
+        .keys
+        .iter()
+        .filter(|jwk| oidc_jwk_is_usable(jwk, kid, alg))
+        .collect::<Vec<_>>();
+    if let Some(kid) = kid {
+        return candidates
+            .into_iter()
+            .find(|jwk| jwk.common.key_id.as_deref() == Some(kid))
+            .ok_or(GatewayError::Authentication);
+    }
+    if candidates.len() == 1 {
+        Ok(candidates.remove(0))
+    } else {
+        Err(GatewayError::Authentication)
+    }
+}
+
+fn oidc_jwk_is_usable(jwk: &Jwk, kid: Option<&str>, alg: Algorithm) -> bool {
+    if jwk
+        .common
+        .public_key_use
+        .as_ref()
+        .is_some_and(|key_use| key_use != &PublicKeyUse::Signature)
+    {
+        return false;
+    }
+    if kid.is_some() && jwk.common.key_id.as_deref() != kid {
+        return false;
+    }
+    jwk.common
+        .key_algorithm
+        .is_none_or(|key_alg| oidc_algorithm_from_str(&key_alg.to_string()) == Some(alg))
+}
+
+async fn login_provider_authorization_endpoint(
+    state: &AppState,
+    provider: &LoginProviderRecord,
+) -> Result<String> {
+    if let Some(endpoint) = login_config_string(&provider.config_document, "authorization_url") {
+        return Ok(endpoint.to_owned());
+    }
+    match provider.provider_kind.as_str() {
+        "github_oauth_app" => Ok(GITHUB_OAUTH_AUTHORIZATION_URL.to_owned()),
+        "oidc" => {
+            let client = reqwest::Client::new();
+            Ok(resolve_oidc_provider_metadata(state, provider, &client)
+                .await?
+                .authorization_endpoint)
+        }
         _ => Err(GatewayError::BadRequest {
             message: "login_provider_authorization_url_missing".to_owned(),
         }),
     }
+}
+
+async fn resolve_oidc_provider_metadata(
+    state: &AppState,
+    provider: &LoginProviderRecord,
+    client: &reqwest::Client,
+) -> Result<OidcProviderMetadata> {
+    let issuer = required_login_config_string(provider, "issuer")?;
+    let discovery = if oidc_metadata_needs_discovery(provider) {
+        let discovery_url = login_config_string(&provider.config_document, "discovery_url")
+            .map_or_else(|| oidc_discovery_url(issuer), ToOwned::to_owned);
+        if !login_provider_url_is_safe_for_config(&state.config, &discovery_url) {
+            return Err(GatewayError::BadRequest {
+                message: "login_provider_discovery_url_invalid".to_owned(),
+            });
+        }
+        Some(fetch_json::<OidcDiscoveryDocument>(client, &discovery_url).await?)
+    } else {
+        None
+    };
+    if discovery
+        .as_ref()
+        .is_some_and(|document| document.issuer != issuer)
+    {
+        return Err(GatewayError::BadRequest {
+            message: "login_provider_issuer_mismatch".to_owned(),
+        });
+    }
+    let authorization_endpoint = oidc_metadata_field(
+        provider,
+        discovery.as_ref(),
+        "authorization_url",
+        |document| document.authorization_endpoint.as_str(),
+    )?;
+    let token_endpoint =
+        oidc_metadata_field(provider, discovery.as_ref(), "token_url", |document| {
+            document.token_endpoint.as_str()
+        })?;
+    let jwks_uri = oidc_metadata_field(provider, discovery.as_ref(), "jwks_url", |document| {
+        document.jwks_uri.as_str()
+    })?;
+    for url in [&authorization_endpoint, &token_endpoint, &jwks_uri] {
+        if !login_provider_url_is_safe_for_config(&state.config, url) {
+            return Err(GatewayError::BadRequest {
+                message: "login_provider_oidc_endpoint_invalid".to_owned(),
+            });
+        }
+    }
+    let supported_algs = oidc_supported_algorithms(provider, discovery.as_ref());
+    Ok(OidcProviderMetadata {
+        issuer: issuer.to_owned(),
+        authorization_endpoint,
+        token_endpoint,
+        jwks_uri,
+        supported_algs,
+    })
+}
+
+fn oidc_metadata_needs_discovery(provider: &LoginProviderRecord) -> bool {
+    ["authorization_url", "token_url", "jwks_url"]
+        .into_iter()
+        .any(|field| login_config_string(&provider.config_document, field).is_none())
+}
+
+fn oidc_metadata_field(
+    provider: &LoginProviderRecord,
+    discovery: Option<&OidcDiscoveryDocument>,
+    config_field: &str,
+    discovery_field: fn(&OidcDiscoveryDocument) -> &str,
+) -> Result<String> {
+    login_config_string(&provider.config_document, config_field)
+        .map(ToOwned::to_owned)
+        .or_else(|| discovery.map(discovery_field).map(ToOwned::to_owned))
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| GatewayError::BadRequest {
+            message: format!("login_provider_{config_field}_missing"),
+        })
+}
+
+fn oidc_supported_algorithms(
+    provider: &LoginProviderRecord,
+    discovery: Option<&OidcDiscoveryDocument>,
+) -> Vec<Algorithm> {
+    let configured = provider
+        .config_document
+        .get("id_token_signing_algs")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .filter_map(oidc_algorithm_from_str)
+                .filter(|alg| oidc_algorithm_is_asymmetric(*alg))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let algorithms = if configured.is_empty() {
+        discovery
+            .map(|document| {
+                document
+                    .id_token_signing_alg_values_supported
+                    .iter()
+                    .filter_map(|alg| oidc_algorithm_from_str(alg))
+                    .filter(|alg| oidc_algorithm_is_asymmetric(*alg))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        configured
+    };
+    let mut unique_algorithms = Vec::with_capacity(algorithms.len());
+    for algorithm in algorithms {
+        if !unique_algorithms.contains(&algorithm) {
+            unique_algorithms.push(algorithm);
+        }
+    }
+    let mut algorithms = unique_algorithms;
+    if algorithms.is_empty() {
+        algorithms.push(Algorithm::RS256);
+    }
+    algorithms
+}
+
+fn oidc_algorithm_from_str(value: &str) -> Option<Algorithm> {
+    match value {
+        "RS256" => Some(Algorithm::RS256),
+        "RS384" => Some(Algorithm::RS384),
+        "RS512" => Some(Algorithm::RS512),
+        "PS256" => Some(Algorithm::PS256),
+        "PS384" => Some(Algorithm::PS384),
+        "PS512" => Some(Algorithm::PS512),
+        "ES256" => Some(Algorithm::ES256),
+        "ES384" => Some(Algorithm::ES384),
+        "EdDSA" => Some(Algorithm::EdDSA),
+        _ => None,
+    }
+}
+
+const fn oidc_algorithm_is_asymmetric(alg: Algorithm) -> bool {
+    matches!(
+        alg,
+        Algorithm::RS256
+            | Algorithm::RS384
+            | Algorithm::RS512
+            | Algorithm::PS256
+            | Algorithm::PS384
+            | Algorithm::PS512
+            | Algorithm::ES256
+            | Algorithm::ES384
+            | Algorithm::EdDSA
+    )
+}
+
+fn oidc_discovery_url(issuer: &str) -> String {
+    format!(
+        "{}/.well-known/openid-configuration",
+        issuer.trim_end_matches('/')
+    )
+}
+
+async fn fetch_json<T: DeserializeOwned>(client: &reqwest::Client, url: &str) -> Result<T> {
+    let response = client
+        .get(url)
+        .timeout(Duration::from_secs(10))
+        .header(header::ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|_| GatewayError::BadRequest {
+            message: "login_provider_http_request_failed".to_owned(),
+        })?;
+    if !response.status().is_success() {
+        return Err(GatewayError::BadRequest {
+            message: "login_provider_http_request_failed".to_owned(),
+        });
+    }
+    response_json_body(response).await
+}
+
+async fn response_json_body<T: DeserializeOwned>(response: reqwest::Response) -> Result<T> {
+    let body = response
+        .text()
+        .await
+        .map_err(|_| GatewayError::BadRequest {
+            message: "login_provider_response_read_failed".to_owned(),
+        })?;
+    serde_json::from_str(&body).map_err(|_| GatewayError::BadRequest {
+        message: "login_provider_response_json_invalid".to_owned(),
+    })
+}
+
+fn required_login_config_string<'a>(
+    provider: &'a LoginProviderRecord,
+    field: &str,
+) -> Result<&'a str> {
+    login_config_string(&provider.config_document, field)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| GatewayError::BadRequest {
+            message: format!("login_provider_{field}_missing"),
+        })
 }
 
 fn login_provider_scope_values(provider: &LoginProviderRecord) -> Vec<String> {
@@ -15940,7 +18931,11 @@ fn generate_invitation_token() -> String {
 }
 
 fn invitation_token_hash(raw_token: &str) -> String {
-    let digest = Sha256::digest(raw_token.as_bytes());
+    login_secret_hash(raw_token)
+}
+
+fn login_secret_hash(raw_value: &str) -> String {
+    let digest = Sha256::digest(raw_value.as_bytes());
     format!("sha256:{digest:x}")
 }
 
@@ -16011,9 +19006,10 @@ fn redacted_notification_endpoint_config(sink: &NotificationSinkRecord) -> Value
 fn redacted_webhook_endpoint_config(endpoint_config: &Value) -> Value {
     let url = endpoint_config.get("url").and_then(Value::as_str);
     json!({
-        "url_host": url.and_then(safe_otel_endpoint_host),
+        "url_host": url.and_then(safe_webhook_endpoint_host),
         "url_path": url.and_then(safe_url_path),
         "retry_policy": endpoint_config.get("retry_policy"),
+        "timeout_seconds": endpoint_config.get("timeout_seconds"),
         "batching": endpoint_config.get("batching")
     })
 }
@@ -17686,26 +20682,38 @@ fn latest_snapshot_for_actor(
 
 #[cfg(test)]
 mod tests {
-    use axum::body::{to_bytes, Body};
-    use axum::http::{header, HeaderMap, HeaderValue, Request, Response, StatusCode};
+    use std::sync::{mpsc, Arc, Mutex};
+
+    use axum::body::{to_bytes, Body, Bytes};
+    use axum::http::{header, HeaderMap, HeaderValue, Request, Response, StatusCode, Uri};
+    use axum::routing::{get, post, put};
+    use axum::{Json, Router};
     use chrono::Duration;
-    use secrecy::ExposeSecret;
-    use serde_json::json;
+    use jsonwebtoken::jwk::{Jwk, PublicKeyUse};
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use secrecy::{ExposeSecret, SecretString};
+    use serde_json::{json, Value};
     use tower::ServiceExt;
 
     use super::{
-        authenticate_request, deliver_due_notifications, enforce_runtime_policy_preflight,
-        release_runtime_policy_reservations, router, run_otel_exporter_once,
-        run_runtime_policy_reconciler_once, runtime_budget_reservation_key,
-        runtime_quota_counter_key, runtime_quota_loss_allowance_key, runtime_route_target,
-        validate_gateway_config, AppState, DependencyProbeMode, GatewayConfig,
-        SingleUserAuthConfig, PROJECT_ID_HEADER, REQUEST_ID_HEADER,
+        auth_session_csrf_token, authenticate_request, deliver_due_notifications,
+        deliver_due_notifications_with_transport, enforce_runtime_policy_preflight,
+        export_payload_checksum, notification_signature, release_runtime_policy_reservations,
+        router, run_background_worker_tick_once, run_otel_exporter_once,
+        run_otel_exporter_once_with_transport, run_runtime_policy_reconciler_once,
+        runtime_budget_reservation_key, runtime_quota_counter_key,
+        runtime_quota_loss_allowance_key, runtime_route_target, validate_gateway_config, AppState,
+        BackgroundWorkerMode, DependencyProbeMode, ExportObjectStorageHttpConfig, GatewayConfig,
+        NotificationDeliveryTransport, OtelExporterTransport, SingleUserAuthConfig,
+        CODEX_API_BASE_URL, CSRF_TOKEN_HEADER, PROJECT_ID_HEADER, REQUEST_ID_HEADER,
         RUNTIME_BUDGET_LEASE_TTL_SECONDS, SESSION_TOKEN_PREFIX, SINGLE_USER_ID,
         SINGLE_USER_ORGANIZATION_ID, SINGLE_USER_PROJECT_ID, SINGLE_USER_PROVIDER_ID,
         SINGLE_USER_TENANT_ID,
     };
     use crate::action::{ActionGrant, BuiltInRole};
-    use crate::auth::{create_auth_session, verify_api_key, CreateAuthSessionRequest};
+    use crate::auth::{
+        create_auth_session, verify_api_key, verify_session_token, CreateAuthSessionRequest,
+    };
     use crate::config::{publish_config_snapshot, PublishConfigSnapshotRequest};
     use crate::domain::{
         new_prefixed_id, ActorKind, DirectoryStatus, ExternalIdentityRecord, MembershipStatus,
@@ -17724,9 +20732,10 @@ mod tests {
         RouteEvidenceSink, RouteFilterReason,
     };
     use crate::storage::{
-        CatalogAdminRepository, CompleteExportJobRequest, ConfigPublicationRepository,
-        ConfigSnapshotStore, CreateExportJobRequest, CreateNotificationOutboxEventRequest,
-        CreateSecretRefRequest, ExportRepository, InMemoryGatewayStore,
+        CatalogAdminRepository, CodexOAuthRepository, CompleteExportJobRequest,
+        ConfigPublicationRepository, ConfigSnapshotStore, CreateExportJobRequest,
+        CreateNotificationOutboxEventRequest, CreateNotificationSinkRequest,
+        CreateSecretRefRequest, ExportRepository, ExternalIdentityRepository, InMemoryGatewayStore,
         NotificationOutboxRepository, ProviderAdminRepository, RuntimePolicyRepository,
         SecretRefAdminRepository, ServiceAccountAdminRepository, TenancyBootstrapRepository,
         TenancyRepository, UsageAccountingRepository, ValidationDiagnosticRepository,
@@ -17786,14 +20795,28 @@ mod tests {
         const KEYS: &[&str] = &[
             "STARWEAVER_GATEWAY_DATABASE_URL",
             "STARWEAVER_GATEWAY_REDIS_URL",
+            "STARWEAVER_GATEWAY_RUNTIME_STORE",
             "STARWEAVER_GATEWAY_ENV",
             "STARWEAVER_GATEWAY_DEPENDENCY_PROBE_MODE",
             "STARWEAVER_GATEWAY_READINESS_PROBE_TIMEOUT_MS",
+            "STARWEAVER_GATEWAY_PUBLIC_BASE_URL",
+            "STARWEAVER_GATEWAY_CORS_ALLOWED_ORIGINS",
+            "STARWEAVER_GATEWAY_SESSION_COOKIE_SECURE",
+            "STARWEAVER_GATEWAY_SESSION_COOKIE_HTTP_ONLY",
+            "STARWEAVER_GATEWAY_SESSION_COOKIE_SAME_SITE",
             "STARWEAVER_GATEWAY_SINGLE_USER_USERNAME",
             "STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD",
             "STARWEAVER_GATEWAY_SINGLE_USER_EMAIL",
             "STARWEAVER_GATEWAY_SINGLE_USER_DISPLAY_NAME",
             "STARWEAVER_GATEWAY_SINGLE_USER_SESSION_TTL_SECONDS",
+            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_DIR",
+            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_URL",
+            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_AUTHORIZATION",
+            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_TIMEOUT_SECONDS",
+            "STARWEAVER_GATEWAY_BACKGROUND_WORKERS",
+            "STARWEAVER_GATEWAY_WORKER_ID",
+            "STARWEAVER_GATEWAY_WORKER_TICK_INTERVAL_SECONDS",
+            "STARWEAVER_GATEWAY_NOTIFICATION_WORKER_BATCH_LIMIT",
         ];
 
         let _lock = ENV_TEST_MUTEX
@@ -17824,6 +20847,12 @@ mod tests {
         );
         std::env::set_var("STARWEAVER_GATEWAY_SINGLE_USER_DISPLAY_NAME", " Admin ");
         std::env::set_var("STARWEAVER_GATEWAY_SINGLE_USER_SESSION_TTL_SECONDS", "600");
+        let export_dir = std::env::temp_dir().join("starweaver-gateway-exports");
+        let export_dir_text = export_dir.to_string_lossy().to_string();
+        std::env::set_var(
+            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_DIR",
+            &export_dir_text,
+        );
 
         let config = GatewayConfig::from_env();
         let single_user = config
@@ -17836,12 +20865,151 @@ mod tests {
             config.dependency_probe_mode,
             DependencyProbeMode::Configured
         );
+        assert_eq!(config.runtime_store_profile, "memory");
         assert_eq!(
             single_user.user_primary_email.as_deref(),
             Some("admin@example.com")
         );
         assert_eq!(single_user.user_display_name, "Admin");
         assert_eq!(single_user.session_ttl_seconds, 600);
+        assert_eq!(
+            config.export_object_storage_dir.as_deref(),
+            Some(export_dir_text.as_str())
+        );
+    }
+
+    #[test]
+    fn gateway_config_from_env_reads_external_object_storage_controls() {
+        const KEYS: &[&str] = &[
+            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_URL",
+            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_AUTHORIZATION",
+            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_TIMEOUT_SECONDS",
+        ];
+
+        let _lock = ENV_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = EnvRestore::capture(KEYS);
+        for key in KEYS {
+            std::env::remove_var(key);
+        }
+
+        assert!(GatewayConfig::from_env().export_object_storage.is_none());
+
+        std::env::set_var(
+            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_URL",
+            " https://objects.example/gateway-exports ",
+        );
+        std::env::set_var(
+            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_AUTHORIZATION",
+            " Bearer export-object-token ",
+        );
+        std::env::set_var(
+            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_TIMEOUT_SECONDS",
+            "5",
+        );
+        let config = GatewayConfig::from_env();
+        let object_storage = config
+            .export_object_storage
+            .as_ref()
+            .unwrap_or_else(|| panic!("object storage config should be enabled"));
+        let debug_text = format!("{object_storage:?}");
+        assert_eq!(
+            object_storage.base_url,
+            "https://objects.example/gateway-exports"
+        );
+        assert_eq!(
+            object_storage
+                .authorization_header
+                .as_ref()
+                .map(secrecy::ExposeSecret::expose_secret),
+            Some("Bearer export-object-token")
+        );
+        assert_eq!(object_storage.timeout_seconds, 5);
+        assert!(!debug_text.contains("export-object-token"));
+
+        std::env::set_var(
+            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_TIMEOUT_SECONDS",
+            "999",
+        );
+        let fallback = GatewayConfig::from_env()
+            .export_object_storage
+            .unwrap_or_else(|| panic!("object storage config should remain enabled"));
+        assert_eq!(fallback.timeout_seconds, 10);
+
+        let invalid_production = GatewayConfig {
+            environment: "production".to_owned(),
+            database_url: Some("postgres://gateway.example/starweaver".to_owned()),
+            redis_url: Some("rediss://redis.example/0".to_owned()),
+            runtime_store_profile: "postgres".to_owned(),
+            secret_backend_profile: "gcp-secret-manager".to_owned(),
+            telemetry_profile: "otlp".to_owned(),
+            public_base_url: Some("https://gateway.example.com".to_owned()),
+            cors_allowed_origins: vec!["https://admin.example.com".to_owned()],
+            session_cookie_secure: true,
+            require_published_snapshot: true,
+            export_object_storage: Some(ExportObjectStorageHttpConfig {
+                base_url: "http://objects.example/gateway-exports".to_owned(),
+                authorization_header: None,
+                timeout_seconds: 5,
+            }),
+            ..GatewayConfig::default()
+        };
+        let error = match validate_gateway_config(&invalid_production) {
+            Ok(()) => panic!("unsafe production object storage URL should be rejected"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("export_object_storage_url_invalid"));
+    }
+
+    #[test]
+    fn gateway_config_from_env_reads_background_worker_controls() {
+        const KEYS: &[&str] = &[
+            "STARWEAVER_GATEWAY_BACKGROUND_WORKERS",
+            "STARWEAVER_GATEWAY_WORKER_ID",
+            "STARWEAVER_GATEWAY_WORKER_TICK_INTERVAL_SECONDS",
+            "STARWEAVER_GATEWAY_NOTIFICATION_WORKER_BATCH_LIMIT",
+        ];
+
+        let _lock = ENV_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = EnvRestore::capture(KEYS);
+        for key in KEYS {
+            std::env::remove_var(key);
+        }
+
+        let defaults = GatewayConfig::from_env();
+        assert_eq!(
+            defaults.background_worker_mode,
+            BackgroundWorkerMode::Enabled
+        );
+        assert_eq!(defaults.worker_id, None);
+        assert_eq!(defaults.worker_tick_interval_seconds, 30);
+        assert_eq!(defaults.notification_worker_batch_limit, 100);
+
+        std::env::set_var("STARWEAVER_GATEWAY_BACKGROUND_WORKERS", "off");
+        std::env::set_var("STARWEAVER_GATEWAY_WORKER_ID", " gateway-worker-a ");
+        std::env::set_var("STARWEAVER_GATEWAY_WORKER_TICK_INTERVAL_SECONDS", "5");
+        std::env::set_var("STARWEAVER_GATEWAY_NOTIFICATION_WORKER_BATCH_LIMIT", "25");
+        let configured = GatewayConfig::from_env();
+        assert_eq!(
+            configured.background_worker_mode,
+            BackgroundWorkerMode::Disabled
+        );
+        assert_eq!(configured.worker_id.as_deref(), Some("gateway-worker-a"));
+        assert_eq!(configured.worker_tick_interval_seconds, 5);
+        assert_eq!(configured.notification_worker_batch_limit, 25);
+
+        std::env::set_var("STARWEAVER_GATEWAY_WORKER_ID", "bad/id");
+        std::env::set_var("STARWEAVER_GATEWAY_WORKER_TICK_INTERVAL_SECONDS", "0");
+        std::env::set_var("STARWEAVER_GATEWAY_NOTIFICATION_WORKER_BATCH_LIMIT", "0");
+        let invalid = GatewayConfig::from_env();
+        assert_eq!(invalid.worker_id, None);
+        assert_eq!(invalid.worker_tick_interval_seconds, 30);
+        assert_eq!(invalid.notification_worker_batch_limit, 100);
     }
 
     #[test]
@@ -17849,9 +21017,22 @@ mod tests {
         const KEYS: &[&str] = &[
             "STARWEAVER_GATEWAY_DATABASE_URL",
             "STARWEAVER_GATEWAY_REDIS_URL",
+            "STARWEAVER_GATEWAY_RUNTIME_STORE",
             "STARWEAVER_GATEWAY_ENV",
             "STARWEAVER_GATEWAY_DEPENDENCY_PROBE_MODE",
             "STARWEAVER_GATEWAY_READINESS_PROBE_TIMEOUT_MS",
+            "STARWEAVER_GATEWAY_PUBLIC_BASE_URL",
+            "STARWEAVER_GATEWAY_CORS_ALLOWED_ORIGINS",
+            "STARWEAVER_GATEWAY_SESSION_COOKIE_SECURE",
+            "STARWEAVER_GATEWAY_SESSION_COOKIE_HTTP_ONLY",
+            "STARWEAVER_GATEWAY_SESSION_COOKIE_SAME_SITE",
+            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_URL",
+            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_AUTHORIZATION",
+            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_TIMEOUT_SECONDS",
+            "STARWEAVER_GATEWAY_BACKGROUND_WORKERS",
+            "STARWEAVER_GATEWAY_WORKER_ID",
+            "STARWEAVER_GATEWAY_WORKER_TICK_INTERVAL_SECONDS",
+            "STARWEAVER_GATEWAY_NOTIFICATION_WORKER_BATCH_LIMIT",
         ];
 
         let _lock = ENV_TEST_MUTEX
@@ -17892,6 +21073,89 @@ mod tests {
             GatewayConfig::from_env().dependency_probe_mode,
             DependencyProbeMode::Live
         );
+
+        std::env::set_var("STARWEAVER_GATEWAY_RUNTIME_STORE", "Postgres");
+        assert_eq!(GatewayConfig::from_env().runtime_store_profile, "postgres");
+    }
+
+    #[test]
+    fn gateway_config_from_env_reads_production_security_controls() {
+        const KEYS: &[&str] = &[
+            "STARWEAVER_GATEWAY_DATABASE_URL",
+            "STARWEAVER_GATEWAY_REDIS_URL",
+            "STARWEAVER_GATEWAY_RUNTIME_STORE",
+            "STARWEAVER_GATEWAY_ENV",
+            "STARWEAVER_GATEWAY_SECRET_BACKEND",
+            "STARWEAVER_GATEWAY_TELEMETRY",
+            "STARWEAVER_GATEWAY_REQUIRE_SNAPSHOT",
+            "STARWEAVER_GATEWAY_PUBLIC_BASE_URL",
+            "STARWEAVER_GATEWAY_CORS_ALLOWED_ORIGINS",
+            "STARWEAVER_GATEWAY_SESSION_COOKIE_SECURE",
+            "STARWEAVER_GATEWAY_SESSION_COOKIE_HTTP_ONLY",
+            "STARWEAVER_GATEWAY_SESSION_COOKIE_SAME_SITE",
+            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_URL",
+            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_AUTHORIZATION",
+            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_TIMEOUT_SECONDS",
+            "STARWEAVER_GATEWAY_BACKGROUND_WORKERS",
+            "STARWEAVER_GATEWAY_WORKER_ID",
+            "STARWEAVER_GATEWAY_WORKER_TICK_INTERVAL_SECONDS",
+            "STARWEAVER_GATEWAY_NOTIFICATION_WORKER_BATCH_LIMIT",
+        ];
+
+        let _lock = ENV_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = EnvRestore::capture(KEYS);
+        for key in KEYS {
+            std::env::remove_var(key);
+        }
+
+        std::env::set_var("STARWEAVER_GATEWAY_ENV", "production");
+        std::env::set_var(
+            "STARWEAVER_GATEWAY_DATABASE_URL",
+            "postgres://gateway.example/starweaver",
+        );
+        std::env::set_var("STARWEAVER_GATEWAY_REDIS_URL", "rediss://redis.example/0");
+        std::env::set_var("STARWEAVER_GATEWAY_SECRET_BACKEND", "gcp-secret-manager");
+        std::env::set_var("STARWEAVER_GATEWAY_TELEMETRY", "otlp");
+        std::env::set_var("STARWEAVER_GATEWAY_REQUIRE_SNAPSHOT", "true");
+        std::env::set_var(
+            "STARWEAVER_GATEWAY_PUBLIC_BASE_URL",
+            "https://gateway.example.com",
+        );
+        std::env::set_var(
+            "STARWEAVER_GATEWAY_CORS_ALLOWED_ORIGINS",
+            " https://app.example.com,https://admin.example.com/ ",
+        );
+        std::env::set_var("STARWEAVER_GATEWAY_SESSION_COOKIE_SECURE", "true");
+        std::env::set_var("STARWEAVER_GATEWAY_SESSION_COOKIE_HTTP_ONLY", "true");
+        std::env::set_var("STARWEAVER_GATEWAY_SESSION_COOKIE_SAME_SITE", "Strict");
+        let config = GatewayConfig::from_env();
+
+        assert_eq!(
+            config.public_base_url.as_deref(),
+            Some("https://gateway.example.com")
+        );
+        assert_eq!(
+            config.cors_allowed_origins,
+            vec![
+                "https://app.example.com".to_owned(),
+                "https://admin.example.com/".to_owned()
+            ]
+        );
+        assert!(config.session_cookie_secure);
+        assert!(config.session_cookie_http_only);
+        assert_eq!(config.session_cookie_same_site, "strict");
+        let error = match validate_gateway_config(&config) {
+            Ok(()) => panic!("production memory runtime store should be rejected"),
+            Err(error) => error,
+        };
+        let error_text = error.to_string();
+        assert!(error_text.contains("durable_runtime_store_required"));
+        assert!(!error_text.contains("public_base_url_https_required"));
+        assert!(!error_text.contains("cors_allowed_origins"));
+        assert!(!error_text.contains("secure_session_cookie_required"));
+        assert!(!error_text.contains("session_cookie_same_site_invalid"));
     }
 
     #[tokio::test]
@@ -17971,23 +21235,71 @@ mod tests {
         assert!(error
             .to_string()
             .contains("database_url_required,redis_url_required"));
+        assert!(error.to_string().contains("durable_runtime_store_required"));
         assert!(error
             .to_string()
             .contains("durable_secret_backend_required"));
         assert!(error.to_string().contains("telemetry_required"));
+        assert!(error.to_string().contains("public_base_url_https_required"));
+        assert!(error.to_string().contains("cors_allowed_origins_required"));
+        assert!(error.to_string().contains("secure_session_cookie_required"));
         assert!(error.to_string().contains("published_snapshot_required"));
         assert!(error.to_string().contains("live_dependency_probe_required"));
+
+        let invalid_security = match validate_gateway_config(&GatewayConfig {
+            environment: "production".to_owned(),
+            database_url: Some("postgres://gateway.example/starweaver".to_owned()),
+            redis_url: Some("rediss://redis.example/0".to_owned()),
+            public_base_url: Some("http://gateway.example.com".to_owned()),
+            cors_allowed_origins: vec!["*".to_owned()],
+            secret_backend_profile: "gcp-secret-manager".to_owned(),
+            telemetry_profile: "otlp".to_owned(),
+            session_cookie_secure: true,
+            session_cookie_http_only: false,
+            session_cookie_same_site: "invalid".to_owned(),
+            dependency_probe_mode: DependencyProbeMode::Live,
+            require_published_snapshot: true,
+            ..GatewayConfig::default()
+        }) {
+            Ok(()) => panic!("invalid production security profile should be rejected"),
+            Err(error) => error,
+        };
+        assert!(invalid_security
+            .to_string()
+            .contains("public_base_url_https_required"));
+        assert!(invalid_security
+            .to_string()
+            .contains("cors_allowed_origins_invalid"));
+        assert!(invalid_security
+            .to_string()
+            .contains("http_only_session_cookie_required"));
+        assert!(invalid_security
+            .to_string()
+            .contains("session_cookie_same_site_invalid"));
+
+        let unsupported_store = match validate_gateway_config(&GatewayConfig {
+            runtime_store_profile: "postgres".to_owned(),
+            ..GatewayConfig::default()
+        }) {
+            Ok(()) => panic!("unsupported runtime store should be rejected"),
+            Err(error) => error,
+        };
+        assert!(unsupported_store
+            .to_string()
+            .contains("runtime_store_profile_unsupported"));
     }
 
     #[tokio::test]
     async fn readyz_reports_live_dependency_failures() {
         let state = AppState::new(
             GatewayConfig {
-                environment: "production".to_owned(),
                 database_url: Some("not-a-postgres-url".to_owned()),
                 redis_url: Some("not-a-redis-url".to_owned()),
+                public_base_url: Some("https://gateway.example.com".to_owned()),
+                cors_allowed_origins: vec!["https://app.example.com".to_owned()],
                 secret_backend_profile: "gcp-secret-manager".to_owned(),
                 telemetry_profile: "otlp".to_owned(),
+                session_cookie_secure: true,
                 dependency_probe_mode: DependencyProbeMode::Live,
                 readiness_probe_timeout_ms: 50,
                 require_published_snapshot: true,
@@ -18012,9 +21324,10 @@ mod tests {
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["reason"], "dependency_unready");
-        assert_eq!(body["profile"]["production_profile"], true);
+        assert_eq!(body["profile"]["production_profile"], false);
         assert_eq!(body["profile"]["production_profile_valid"], true);
         assert_eq!(body["profile"]["dependency_probe_mode"], "live");
+        assert_eq!(body["profile"]["runtime_store_profile"], "memory");
         assert_eq!(body["dependencies"]["database"], "unavailable");
         assert_eq!(body["dependencies"]["database_migrations"], "unavailable");
         assert_eq!(
@@ -18945,7 +22258,7 @@ mod tests {
         );
         assert_eq!(
             body["manifest"]["manifest"]["failure"]["reason"],
-            "export_object_storage_unavailable"
+            "export_object_storage_unconfigured"
         );
         assert_eq!(
             body["manifest"]["manifest"]["redaction"]["rows_included"],
@@ -18976,7 +22289,7 @@ mod tests {
         assert_eq!(manifest_status, StatusCode::OK, "{manifest_body:?}");
         assert_eq!(
             manifest_body["resource"]["manifest"]["failure"]["reason"],
-            "export_object_storage_unavailable"
+            "export_object_storage_unconfigured"
         );
 
         let failed_list =
@@ -18986,6 +22299,179 @@ mod tests {
             failed_list_body["resources"].as_array().map_or(0, Vec::len),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn admin_export_jobs_write_file_object_storage_payload() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        publish_catalog_snapshot(&store, catalog_payload());
+        let response = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let export_root = std::env::temp_dir().join(format!(
+            "starweaver-gateway-export-{}",
+            new_prefixed_id("t")
+        ));
+        let config = GatewayConfig {
+            export_object_storage_dir: Some(export_root.to_string_lossy().to_string()),
+            ..GatewayConfig::default()
+        };
+        let export = post_admin_json_with_config(
+            store.clone(),
+            config,
+            &raw_session,
+            "/admin/v1/exports/jobs",
+            json!({
+                "idempotency_key": "idem_usage_export_file_object_storage",
+                "export_kind": "usage",
+                "storage_backend": "file_object_storage",
+                "scope_kind": "project",
+                "scope_id": TEST_PROJECT_ID,
+                "limit": 10,
+                "retention_days": 7
+            }),
+        )
+        .await;
+        let status = export.status();
+        let body = response_json(export).await;
+        let body_text = body.to_string();
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        assert_eq!(body["resource"]["status"], "completed");
+        assert_eq!(body["resource"]["storage_backend"], "file_object_storage");
+        assert_eq!(body["manifest"]["record_count"], 1);
+        assert!(body["manifest"]["object_ref"]
+            .as_str()
+            .is_some_and(|object_ref| object_ref.starts_with("file-object://gateway-exports/")));
+        assert_eq!(body["manifest"]["manifest"]["status"], "completed");
+        assert_eq!(
+            body["manifest"]["manifest"]["object"]["backend"],
+            "file_object_storage"
+        );
+        assert_eq!(body["manifest"]["manifest"]["object"]["connected"], true);
+        assert_eq!(
+            body["manifest"]["manifest"]["object"]["object_storage_connected"],
+            false
+        );
+        assert_eq!(
+            body["manifest"]["manifest"]["redaction"]["rows_included"],
+            false
+        );
+        assert_eq!(
+            body["manifest"]["manifest"]["rows"]
+                .as_array()
+                .map_or(usize::MAX, Vec::len),
+            0
+        );
+        assert!(!body_text.contains("prompt text"));
+        assert!(!body_text.contains("sec_openai"));
+
+        let export_job_id = body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("export job id should be present"));
+        let object_path = export_root
+            .join(TEST_TENANT_ID)
+            .join(format!("{export_job_id}.json"));
+        let payload_bytes = std::fs::read(&object_path)
+            .unwrap_or_else(|error| panic!("export object should be readable: {error}"));
+        let payload_checksum = export_payload_checksum(&payload_bytes);
+        assert_eq!(
+            body["manifest"]["checksum"].as_str(),
+            Some(payload_checksum.as_str())
+        );
+        let payload: serde_json::Value = serde_json::from_slice(&payload_bytes)
+            .unwrap_or_else(|error| panic!("export object should be JSON: {error}"));
+        let payload_text = payload.to_string();
+        assert_eq!(payload["schema"], "gateway.export_payload.v1");
+        assert_eq!(payload["storage_backend"], "file_object_storage");
+        assert_eq!(payload["rows"].as_array().map_or(0, Vec::len), 1);
+        assert_eq!(payload["redaction"]["secret_material_included"], false);
+        assert!(!payload_text.contains("prompt text"));
+        assert!(!payload_text.contains("sec_openai"));
+        std::fs::remove_dir_all(&export_root)
+            .unwrap_or_else(|error| panic!("export test directory should clean up: {error}"));
+    }
+
+    #[tokio::test]
+    async fn admin_export_jobs_write_external_object_storage_payload() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        publish_catalog_snapshot(&store, catalog_payload());
+        let response = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let (object_storage_url, captured_puts, object_storage_handle) =
+            spawn_local_export_object_storage_receiver().await;
+        let config = GatewayConfig {
+            export_object_storage: Some(ExportObjectStorageHttpConfig {
+                base_url: object_storage_url,
+                authorization_header: Some(SecretString::from("Bearer object-storage-token")),
+                timeout_seconds: 5,
+            }),
+            ..GatewayConfig::default()
+        };
+
+        let export = post_admin_json_with_config(
+            store.clone(),
+            config,
+            &raw_session,
+            "/admin/v1/exports/jobs",
+            json!({
+                "idempotency_key": "idem_usage_export_external_object_storage",
+                "export_kind": "usage",
+                "storage_backend": "object_storage",
+                "scope_kind": "project",
+                "scope_id": TEST_PROJECT_ID,
+                "limit": 10,
+                "retention_days": 7
+            }),
+        )
+        .await;
+        let status = export.status();
+        let body = response_json(export).await;
+        let body_text = body.to_string();
+        let captured = captured_puts
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap_or_else(|error| panic!("object storage receiver should capture PUT: {error}"));
+        object_storage_handle.abort();
+        let export_job_id = body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("export job id should be present"));
+        let payload: serde_json::Value = serde_json::from_slice(&captured.body)
+            .unwrap_or_else(|error| panic!("object storage payload should be JSON: {error}"));
+        let payload_text = payload.to_string();
+
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        assert_eq!(body["resource"]["status"], "completed");
+        assert_eq!(body["resource"]["storage_backend"], "object_storage");
+        assert_eq!(body["manifest"]["record_count"], 1);
+        assert_eq!(
+            body["manifest"]["object_ref"],
+            format!("object-storage://gateway-exports/{TEST_TENANT_ID}/{export_job_id}.json")
+        );
+        assert_eq!(
+            body["manifest"]["manifest"]["object"]["backend"],
+            "object_storage"
+        );
+        assert_eq!(body["manifest"]["manifest"]["object"]["connected"], true);
+        assert_eq!(
+            body["manifest"]["manifest"]["object"]["object_storage_connected"],
+            true
+        );
+        assert_eq!(
+            captured.path,
+            format!("/gateway-exports/{TEST_TENANT_ID}/{export_job_id}.json")
+        );
+        assert_eq!(
+            captured.authorization.as_deref(),
+            Some("Bearer object-storage-token")
+        );
+        assert_eq!(captured.content_type.as_deref(), Some("application/json"));
+        assert_eq!(payload["schema"], "gateway.export_payload.v1");
+        assert_eq!(payload["storage_backend"], "object_storage");
+        assert_eq!(payload["rows"].as_array().map_or(0, Vec::len), 1);
+        assert_eq!(payload["redaction"]["secret_material_included"], false);
+        assert!(!body_text.contains("object-storage-token"));
+        assert!(!body_text.contains("prompt text"));
+        assert!(!payload_text.contains("object-storage-token"));
+        assert!(!payload_text.contains("sec_openai"));
     }
 
     #[tokio::test]
@@ -21703,6 +25189,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_codex_oauth_connection_requires_codex_endpoint() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let non_codex_endpoint_id =
+            create_provider_endpoint_over_http(store.clone(), &raw_session).await;
+
+        let rejected = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/codex/oauth/connections",
+            json!({
+                "idempotency_key": "idem_codex_oauth_wrong_endpoint",
+                "organization_id": TEST_ORGANIZATION_ID,
+                "provider_endpoint_id": non_codex_endpoint_id,
+                "display_name": "Codex OAuth"
+            }),
+        )
+        .await;
+        let rejected_status = rejected.status();
+        let rejected_body = response_json(rejected).await;
+
+        assert_eq!(rejected_status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            rejected_body["error"]["message"],
+            "bad request: codex_oauth_requires_codex_provider_endpoint"
+        );
+        assert!(store
+            .codex_oauth_connections_for_tenant(TEST_TENANT_ID)
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn admin_codex_oauth_session_lifecycle_uses_secret_backend_and_redacts_tokens() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        let codex_endpoint_id =
+            create_codex_provider_endpoint_over_http(store.clone(), &raw_session).await;
+        let token_secret_ref_id = seed_secret_ref_for_test(
+            &store,
+            Some(TEST_ORGANIZATION_ID),
+            None,
+            "codex oauth token bundle",
+            r#"{"access_token":"codex-access-token","refresh_token":"codex-refresh-token"}"#,
+        );
+        let (connection_status, connection_body, connection_replay_body, connection_id) =
+            create_codex_oauth_connection_over_http(
+                store.clone(),
+                &raw_session,
+                &codex_endpoint_id,
+            )
+            .await;
+        let api_key_list =
+            get_public_with_bearer(store.clone(), &raw_key, "/admin/v1/codex/oauth/connections")
+                .await;
+        let (session_status, session_body, session_id, credential_id) =
+            start_codex_oauth_session_over_http(
+                store.clone(),
+                &raw_session,
+                &connection_id,
+                &token_secret_ref_id,
+            )
+            .await;
+        let refresh = get_admin(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/codex/oauth/refresh-status/{connection_id}"),
+        )
+        .await;
+        let refresh_status = refresh.status();
+        let refresh_body = response_json(refresh).await;
+        let revoke = post_admin_json(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/codex/oauth/sessions/{session_id}/revoke"),
+            json!({
+                "reason": "Rotate Codex OAuth token bundle."
+            }),
+        )
+        .await;
+        let revoke_status = revoke.status();
+        let revoke_body = response_json(revoke).await;
+        let connection_after_revoke = get_admin(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/codex/oauth/connections/{connection_id}"),
+        )
+        .await;
+        let connection_after_revoke_body = response_json(connection_after_revoke).await;
+        let combined_text = codex_oauth_lifecycle_text(
+            &store,
+            &connection_body,
+            &connection_replay_body,
+            &session_body,
+            &refresh_body,
+            &revoke_body,
+        );
+
+        assert_eq!(connection_status, StatusCode::OK);
+        assert_eq!(connection_replay_body["idempotency_replayed"], true);
+        assert_eq!(api_key_list.status(), StatusCode::FORBIDDEN);
+        assert_eq!(session_status, StatusCode::OK);
+        assert_eq!(refresh_status, StatusCode::OK);
+        assert_eq!(revoke_status, StatusCode::OK);
+        assert_codex_oauth_secret_and_credential_state(
+            &store,
+            &credential_id,
+            &token_secret_ref_id,
+            &session_body,
+        );
+        assert_eq!(refresh_body["resource"]["status"], "active");
+        assert_eq!(
+            connection_after_revoke_body["resource"]["status"],
+            "unauthenticated"
+        );
+        assert_eq!(revoke_body["resource"]["status"], "revoked");
+        assert!(connection_body["resource"]["fixed_profile"]["api_base_url"]
+            .as_str()
+            .is_some_and(|url| url == CODEX_API_BASE_URL));
+        assert!(!combined_text.contains("codex-access-token"));
+        assert!(!combined_text.contains("codex-refresh-token"));
+        assert!(!combined_text.contains(&token_secret_ref_id));
+    }
+
+    #[tokio::test]
     async fn admin_audit_event_list_requires_strong_auth_and_redacts_diffs() {
         let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
         let endpoint_id = create_provider_endpoint_over_http(store.clone(), &raw_session).await;
@@ -22696,11 +26304,18 @@ mod tests {
     #[tokio::test]
     async fn otel_exporter_worker_records_success_and_realtime_health() {
         let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        let (collector_url, captured_requests, collector_handle) =
+            spawn_local_webhook_receiver(StatusCode::NO_CONTENT).await;
         publish_catalog_snapshot(&store, catalog_payload());
         let runtime = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
         assert_eq!(runtime.status(), StatusCode::OK);
-        let otel_export_config_id =
-            create_otel_export_config_over_http(store.clone(), &raw_session).await;
+        let (otel_export_config_id, collector_secret) =
+            create_otel_export_config_with_endpoint_over_http(
+                store.clone(),
+                &raw_session,
+                &collector_url,
+            )
+            .await;
 
         let summary = run_otel_exporter_once(
             &store,
@@ -22708,7 +26323,12 @@ mod tests {
             "otel_worker_test",
             chrono::Utc::now(),
         )
+        .await
         .unwrap_or_else(|error| panic!("otel exporter tick should succeed: {error}"));
+        let captured = captured_requests
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap_or_else(|error| panic!("otel collector should capture request: {error}"));
+        collector_handle.abort();
         let get = get_admin(
             store.clone(),
             &raw_session,
@@ -22726,6 +26346,7 @@ mod tests {
         assert_eq!(summary.attempted_config_count, 1);
         assert_eq!(summary.succeeded_count, 1);
         assert!(summary.exported_metric_count > 0);
+        assert_captured_otel_export(&captured, &collector_secret);
         assert_eq!(get_status, StatusCode::OK);
         assert_eq!(get_body["resource"]["exporter_health_status"], "succeeded");
         assert_eq!(get_body["resource"]["exporter_failure_count"], 0);
@@ -22770,12 +26391,14 @@ mod tests {
             .unwrap_or_else(|| panic!("otel export config id should be present"))
             .to_owned();
 
-        let summary = run_otel_exporter_once(
+        let summary = run_otel_exporter_once_with_transport(
             &store,
             TEST_TENANT_ID,
             "otel_worker_test",
             chrono::Utc::now(),
+            OtelExporterTransport::Synthetic,
         )
+        .await
         .unwrap_or_else(|error| panic!("otel exporter tick should record outage: {error}"));
         publish_catalog_snapshot(&store, catalog_payload());
         let runtime = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
@@ -22830,6 +26453,7 @@ mod tests {
             "otel_worker_test",
             chrono::Utc::now(),
         )
+        .await
         .unwrap_or_else(|error| {
             panic!("otel exporter tick should record disabled config: {error}")
         });
@@ -22848,6 +26472,104 @@ mod tests {
         assert_eq!(get_body["resource"]["exporter_failure_count"], 0);
         assert_eq!(get_body["resource"]["dropped_metric_count"], 0);
         assert_eq!(readiness_body["dependencies"]["otel_exporter"], "disabled");
+    }
+
+    #[tokio::test]
+    async fn background_worker_tick_processes_due_work_by_tenant_and_interval() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        let (collector_url, captured_requests, collector_handle) =
+            spawn_local_webhook_receiver(StatusCode::NO_CONTENT).await;
+        publish_catalog_snapshot(&store, catalog_payload());
+        let runtime = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
+        assert_eq!(runtime.status(), StatusCode::OK);
+        let (otel_export_config_id, collector_secret) =
+            create_otel_export_config_with_endpoint_over_http(
+                store.clone(),
+                &raw_session,
+                &collector_url,
+            )
+            .await;
+        let now = chrono::Utc::now();
+        let sink = store
+            .create_notification_sink(
+                CreateNotificationSinkRequest {
+                    tenant_id: TEST_TENANT_ID.to_owned(),
+                    organization_id: Some(TEST_ORGANIZATION_ID.to_owned()),
+                    project_id: Some(TEST_PROJECT_ID.to_owned()),
+                    name: "worker stdout sink".to_owned(),
+                    sink_kind: "stdout".to_owned(),
+                    endpoint_config: json!({}),
+                    signing_secret_ref_id: None,
+                    created_by: TEST_USER_ID.to_owned(),
+                },
+                now,
+            )
+            .unwrap_or_else(|error| panic!("notification sink should create: {error}"));
+        let outbox = store.append_notification_outbox_event(
+            CreateNotificationOutboxEventRequest {
+                tenant_id: TEST_TENANT_ID.to_owned(),
+                organization_id: Some(TEST_ORGANIZATION_ID.to_owned()),
+                project_id: Some(TEST_PROJECT_ID.to_owned()),
+                notification_subscription_id: None,
+                notification_sink_id: Some(sink.notification_sink_id),
+                event_kind: "gateway.test.worker_tick".to_owned(),
+                dedupe_key: "worker_tick_due_event".to_owned(),
+                payload_document: json!({
+                    "schema": "gateway.test.worker_tick.v1",
+                    "redaction": {
+                        "secret_material_included": false
+                    }
+                }),
+                next_attempt_at: Some(now),
+            },
+            now,
+        );
+        let state = AppState::new(
+            GatewayConfig {
+                notification_worker_batch_limit: 1,
+                ..GatewayConfig::default()
+            },
+            store.clone(),
+        );
+
+        let first = run_background_worker_tick_once(&state, "background_worker_test", now).await;
+        let captured = captured_requests
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap_or_else(|error| panic!("otel collector should capture request: {error}"));
+        let second = run_background_worker_tick_once(
+            &state,
+            "background_worker_test",
+            now + Duration::seconds(1),
+        )
+        .await;
+        collector_handle.abort();
+        let delivered_outbox = store
+            .notification_outbox_event(&outbox.notification_outbox_event_id)
+            .unwrap_or_else(|| panic!("outbox event should remain stored"));
+        let attempts =
+            store.notification_delivery_attempts_for_event(&outbox.notification_outbox_event_id);
+        let health = store
+            .otel_exporter_health(&otel_export_config_id)
+            .unwrap_or_else(|| panic!("otel exporter health should be recorded"));
+
+        assert_eq!(first.worker_id, "background_worker_test");
+        assert_eq!(first.tenant_count, 1);
+        assert_eq!(first.notification_attempt_count, 1);
+        assert_eq!(first.otel_attempted_config_count, 1);
+        assert!(first.otel_exported_metric_count > 0);
+        assert_eq!(first.otel_dropped_metric_count, 0);
+        assert_eq!(first.error_count, 0);
+        assert_captured_otel_export(&captured, &collector_secret);
+        assert_eq!(delivered_outbox.status, "delivered");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].status, "succeeded");
+        assert_eq!(attempts[0].delivery_headers["transport"], "stdout");
+        assert_eq!(health.worker_id, "background_worker_test");
+        assert_eq!(health.status, "succeeded");
+        assert_eq!(second.tenant_count, 1);
+        assert_eq!(second.notification_attempt_count, 0);
+        assert_eq!(second.otel_attempted_config_count, 0);
+        assert_eq!(second.error_count, 0);
     }
 
     #[tokio::test]
@@ -23158,10 +26880,9 @@ mod tests {
         assert!(errors.iter().any(|error| {
             error["field"] == "config_document.issuer" && error["reason"] == "invalid_issuer"
         }));
-        assert!(errors.iter().any(|error| {
-            error["field"] == "config_document.authorization_url"
-                && error["reason"] == "invalid_authorization_url"
-        }));
+        assert!(!errors
+            .iter()
+            .any(|error| error["field"] == "config_document.authorization_url"));
         assert!(errors.iter().any(|error| {
             error["field"] == "config_document.scopes" && error["reason"] == "invalid_scopes"
         }));
@@ -23270,6 +26991,445 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn external_login_callback_creates_user_session_and_rejects_state_replay() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let login_provider_id = create_github_callback_provider_over_http(
+            store.clone(),
+            &raw_session,
+            "idem_github_callback_provider",
+        )
+        .await;
+        let start = get_public(
+            store.clone(),
+            &format!("/auth/v1/providers/{login_provider_id}/login"),
+        )
+        .await;
+        let start_body = response_json(start).await;
+        let state_token = login_start_state(&start_body);
+
+        let callback_body = github_callback_body(&state_token);
+        let callback = post_public_json_with_config(
+            store.clone(),
+            GatewayConfig::default(),
+            &format!("/auth/v1/providers/{login_provider_id}/callback"),
+            callback_body.clone(),
+        )
+        .await;
+        let callback_status = callback.status();
+        let callback_body_json = response_json(callback).await;
+        let callback_text = callback_body_json.to_string();
+        let replay = post_public_json_with_config(
+            store.clone(),
+            GatewayConfig::default(),
+            &format!("/auth/v1/providers/{login_provider_id}/callback"),
+            callback_body,
+        )
+        .await;
+        let replay_status = replay.status();
+        let session_token = callback_body_json["session"]["session_token"]
+            .as_str()
+            .unwrap_or_else(|| panic!("session token should be present"))
+            .to_owned();
+        let csrf_token = csrf_token_from_body(&callback_body_json);
+        let session =
+            get_public_with_bearer(store.clone(), &session_token, "/auth/v1/session").await;
+        let session_status = session.status();
+        let session_body = response_json(session).await;
+        let session_text = session_body.to_string();
+
+        assert_eq!(callback_status, StatusCode::OK);
+        assert_eq!(replay_status, StatusCode::UNAUTHORIZED);
+        assert_eq!(session_status, StatusCode::OK);
+        assert!(session_token.starts_with(SESSION_TOKEN_PREFIX));
+        assert!(csrf_token.starts_with("sha256:"));
+        assert_eq!(callback_body_json["csrf"]["header"], CSRF_TOKEN_HEADER);
+        assert_eq!(
+            callback_body_json["auth_context"]["csrf"]["token"],
+            csrf_token
+        );
+        assert_eq!(callback_body_json["created_user"], true);
+        assert!(callback_body_json["user"]["id"]
+            .as_str()
+            .is_some_and(|user_id| user_id.starts_with("usr_")));
+        assert_eq!(
+            callback_body_json["user"]["default_organization_id"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            callback_body_json["external_identity"]["provider_kind"],
+            "github_oauth_app"
+        );
+        assert!(callback_body_json["external_identity"]["email_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:")));
+        assert_eq!(
+            session_body["organization_memberships"]
+                .as_array()
+                .map_or(usize::MAX, Vec::len),
+            0
+        );
+        assert!(!callback_text.contains("github_authorization_code"));
+        assert!(!callback_text.contains("Owner@Example.COM"));
+        assert!(!callback_text.contains("owner@example.com"));
+        assert!(!session_text.contains("Owner@Example.COM"));
+        assert!(!session_text.contains("owner@example.com"));
+        assert!(!session_text.contains(&session_token));
+        assert!(!session_text.contains("session_hash"));
+        assert!(store.audit_events().iter().any(|event| {
+            event.event_type == "gateway.auth.external_login"
+                && event.resource_kind == "User"
+                && event.redacted_diff["raw_tokens_included"] == false
+        }));
+    }
+
+    #[tokio::test]
+    async fn github_oauth_app_callback_exchanges_code_and_uses_verified_email() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let github_provider = spawn_local_github_oauth_app_provider().await;
+        let client_secret_ref = seed_secret_ref_for_test(
+            &store,
+            None,
+            None,
+            "github oauth app client secret",
+            "github-client-secret-value",
+        );
+        let login_provider_id = create_github_login_provider_for_endpoints_over_http(
+            store.clone(),
+            &raw_session,
+            &github_provider,
+            &client_secret_ref,
+        )
+        .await;
+        let start = get_public(
+            store.clone(),
+            &format!("/auth/v1/providers/{login_provider_id}/login"),
+        )
+        .await;
+        let start_body = response_json(start).await;
+        let state_token = login_start_state(&start_body);
+
+        let callback = post_public_json_with_config(
+            store.clone(),
+            GatewayConfig::default(),
+            &format!("/auth/v1/providers/{login_provider_id}/callback"),
+            json!({
+                "state": state_token,
+                "code": "github_authorization_code"
+            }),
+        )
+        .await;
+        let callback_status = callback.status();
+        let callback_body = response_json(callback).await;
+        github_provider.handle.abort();
+        let callback_text = callback_body.to_string();
+
+        assert_eq!(callback_status, StatusCode::OK, "{callback_body:?}");
+        assert_eq!(
+            callback_body["external_identity"]["provider_subject"],
+            "github-node-id-456"
+        );
+        assert_eq!(
+            callback_body["external_identity"]["provider_kind"],
+            "github_oauth_app"
+        );
+        assert!(callback_body["external_identity"]["email_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:")));
+        assert!(callback_body["session"]["session_token"]
+            .as_str()
+            .is_some_and(|token| token.starts_with(SESSION_TOKEN_PREFIX)));
+        assert!(!callback_text.contains("github_authorization_code"));
+        assert!(!callback_text.contains("github-access-token-value"));
+        assert!(!callback_text.contains("github-client-secret-value"));
+        assert!(!callback_text.contains("owner@example.com"));
+        assert!(store.audit_events().iter().any(|event| {
+            event.event_type == "gateway.auth.external_login"
+                && event.redacted_diff["raw_tokens_included"] == false
+                && event.redacted_diff["authorization_code_included"] == false
+        }));
+    }
+
+    #[tokio::test]
+    async fn oidc_external_login_callback_validates_issuer_audience_expiry_and_nonce() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let login_provider_id = create_oidc_callback_provider_over_http(
+            store.clone(),
+            &raw_session,
+            "idem_oidc_callback_provider",
+        )
+        .await;
+        let valid_start = get_public(
+            store.clone(),
+            &format!("/auth/v1/providers/{login_provider_id}/login"),
+        )
+        .await;
+        let valid_start_body = response_json(valid_start).await;
+        let valid_state = login_start_state(&valid_start_body);
+        let valid_nonce = login_start_nonce(&valid_start_body);
+        let valid = post_public_json_with_config(
+            store.clone(),
+            GatewayConfig::default(),
+            &format!("/auth/v1/providers/{login_provider_id}/callback"),
+            oidc_callback_body(
+                &valid_state,
+                &valid_nonce,
+                "https://login.example",
+                "oidc_client",
+                300,
+            ),
+        )
+        .await;
+        let valid_status = valid.status();
+        let valid_body = response_json(valid).await;
+
+        let wrong_issuer = post_oidc_callback_case(
+            store.clone(),
+            &login_provider_id,
+            "https://evil.example",
+            "oidc_client",
+            300,
+            None,
+        )
+        .await;
+        let wrong_audience = post_oidc_callback_case(
+            store.clone(),
+            &login_provider_id,
+            "https://login.example",
+            "wrong_client",
+            300,
+            None,
+        )
+        .await;
+        let expired = post_oidc_callback_case(
+            store.clone(),
+            &login_provider_id,
+            "https://login.example",
+            "oidc_client",
+            -30,
+            None,
+        )
+        .await;
+        let wrong_nonce = post_oidc_callback_case(
+            store,
+            &login_provider_id,
+            "https://login.example",
+            "oidc_client",
+            300,
+            Some("gwnc_wrong_nonce"),
+        )
+        .await;
+
+        assert_eq!(valid_status, StatusCode::OK, "{valid_body:?}");
+        assert_eq!(valid_body["external_identity"]["provider_kind"], "oidc");
+        assert_eq!(wrong_issuer.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(wrong_audience.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(expired.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(wrong_nonce.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn generic_oidc_callback_exchanges_code_and_validates_signed_id_token() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let oidc_provider = spawn_local_oidc_provider().await;
+        let client_secret_ref = seed_secret_ref_for_test(
+            &store,
+            None,
+            None,
+            "oidc client secret",
+            "oidc-client-secret-value",
+        );
+        let login_provider_id = create_oidc_login_provider_for_issuer_over_http(
+            store.clone(),
+            &raw_session,
+            &oidc_provider.issuer_url,
+            &client_secret_ref,
+        )
+        .await;
+        let start = get_public(
+            store.clone(),
+            &format!("/auth/v1/providers/{login_provider_id}/login"),
+        )
+        .await;
+        let start_body = response_json(start).await;
+        let state_token = login_start_state(&start_body);
+        let nonce = login_start_nonce(&start_body);
+        oidc_provider.set_nonce(&nonce);
+
+        let callback = post_public_json_with_config(
+            store.clone(),
+            GatewayConfig::default(),
+            &format!("/auth/v1/providers/{login_provider_id}/callback"),
+            json!({
+                "state": state_token,
+                "code": "oidc_authorization_code"
+            }),
+        )
+        .await;
+        let callback_status = callback.status();
+        let callback_body = response_json(callback).await;
+        oidc_provider.handle.abort();
+        let callback_text = callback_body.to_string();
+
+        assert_eq!(callback_status, StatusCode::OK, "{callback_body:?}");
+        assert_eq!(callback_body["external_identity"]["provider_kind"], "oidc");
+        assert_eq!(callback_body["created_user"], true);
+        assert!(callback_body["session"]["session_token"]
+            .as_str()
+            .is_some_and(|token| token.starts_with(SESSION_TOKEN_PREFIX)));
+        assert!(!callback_text.contains("oidc_authorization_code"));
+        assert!(!callback_text.contains("id_token"));
+        assert!(!callback_text.contains("access_token"));
+        assert!(!callback_text.contains("code_verifier"));
+        assert!(!callback_text.contains("oidc-client-secret-value"));
+        assert!(store.audit_events().iter().any(|event| {
+            event.event_type == "gateway.auth.external_login"
+                && event.redacted_diff["raw_tokens_included"] == false
+                && event.redacted_diff["authorization_code_included"] == false
+        }));
+    }
+
+    #[tokio::test]
+    async fn local_verified_claims_callback_adapter_is_fail_closed_outside_local_profiles() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let login_provider_id = create_github_callback_provider_over_http(
+            store.clone(),
+            &raw_session,
+            "idem_github_callback_profile",
+        )
+        .await;
+        let start = get_public(
+            store.clone(),
+            &format!("/auth/v1/providers/{login_provider_id}/login"),
+        )
+        .await;
+        let start_body = response_json(start).await;
+        let state_token = login_start_state(&start_body);
+        let staging_callback = post_public_json_with_config(
+            store.clone(),
+            GatewayConfig {
+                environment: "staging".to_owned(),
+                ..GatewayConfig::default()
+            },
+            &format!("/auth/v1/providers/{login_provider_id}/callback"),
+            github_callback_body(&state_token),
+        )
+        .await;
+        let staging_status = staging_callback.status();
+        let callback = post_public_json_with_config(
+            store,
+            GatewayConfig {
+                environment: "production".to_owned(),
+                ..GatewayConfig::default()
+            },
+            &format!("/auth/v1/providers/{login_provider_id}/callback"),
+            github_callback_body(&state_token),
+        )
+        .await;
+        let status = callback.status();
+        let body = response_json(callback).await;
+
+        assert_eq!(staging_status, StatusCode::BAD_REQUEST);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body["error"]["message"],
+            "bad request: local_verified_claims_callback_requires_local_or_test_profile"
+        );
+    }
+
+    #[tokio::test]
+    async fn github_callback_rejects_verified_claims_without_local_adapter() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let login_provider_id =
+            create_github_login_provider_over_http(store.clone(), &raw_session).await;
+        let start = get_public(
+            store.clone(),
+            &format!("/auth/v1/providers/{login_provider_id}/login"),
+        )
+        .await;
+        let start_body = response_json(start).await;
+        let state_token = login_start_state(&start_body);
+        let callback = post_public_json_with_config(
+            store,
+            GatewayConfig::default(),
+            &format!("/auth/v1/providers/{login_provider_id}/callback"),
+            github_callback_body(&state_token),
+        )
+        .await;
+        let status = callback.status();
+        let body = response_json(callback).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body["error"]["message"],
+            "bad request: verified_claims_not_accepted_for_github_callback"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_login_callback_rejects_unlinked_identity_without_reactivation() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let login_provider_id = create_github_callback_provider_over_http(
+            store.clone(),
+            &raw_session,
+            "idem_github_callback_unlink",
+        )
+        .await;
+        let first_start = get_public(
+            store.clone(),
+            &format!("/auth/v1/providers/{login_provider_id}/login"),
+        )
+        .await;
+        let first_start_body = response_json(first_start).await;
+        let first_callback = post_public_json_with_config(
+            store.clone(),
+            GatewayConfig::default(),
+            &format!("/auth/v1/providers/{login_provider_id}/callback"),
+            github_callback_body(&login_start_state(&first_start_body)),
+        )
+        .await;
+        let first_body = response_json(first_callback).await;
+        let user_id = first_body["user"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("callback user id should be present"))
+            .to_owned();
+        let external_identity_id = first_body["external_identity"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("external identity id should be present"))
+            .to_owned();
+        let unlinked = post_admin_json(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/users/{user_id}/external-identities/{external_identity_id}/unlink"),
+            json!({
+                "reason": "Explicit unlink before relink review"
+            }),
+        )
+        .await;
+        assert_eq!(unlinked.status(), StatusCode::OK);
+
+        let second_start = get_public(
+            store.clone(),
+            &format!("/auth/v1/providers/{login_provider_id}/login"),
+        )
+        .await;
+        let second_start_body = response_json(second_start).await;
+        let rejected = post_public_json_with_config(
+            store.clone(),
+            GatewayConfig::default(),
+            &format!("/auth/v1/providers/{login_provider_id}/callback"),
+            github_callback_body(&login_start_state(&second_start_body)),
+        )
+        .await;
+        let rejected_status = rejected.status();
+        let identity_after_reject = store
+            .external_identity_for_principal(TEST_TENANT_ID, &user_id, &external_identity_id)
+            .unwrap_or_else(|| panic!("external identity should remain present"));
+
+        assert_eq!(rejected_status, StatusCode::UNAUTHORIZED);
+        assert_eq!(identity_after_reject.status, ResourceStatus::Deleted);
+    }
+
+    #[tokio::test]
     async fn organization_invitation_create_preview_and_accept_are_redacted() {
         let (store, raw_session) = gateway_store_with_admin_session();
         let created_body = create_organization_invitation_over_http(
@@ -23315,16 +27475,26 @@ mod tests {
         )
         .await;
         let preview_body = response_json(preview).await;
-        let accepted = post_public_with_bearer(
+        let csrf_token = csrf_token_for_raw_session(&store, &raw_session);
+        let missing_csrf_accept = post_public_with_bearer(
             store.clone(),
             &raw_session,
             &format!("/auth/v1/invitations/{invitation_token}/accept"),
         )
         .await;
-        let accepted_body = response_json(accepted).await;
-        let accepted_again = post_public_with_bearer(
+        let missing_csrf_accept_status = missing_csrf_accept.status();
+        let accepted = post_public_with_bearer_and_csrf(
             store.clone(),
             &raw_session,
+            &csrf_token,
+            &format!("/auth/v1/invitations/{invitation_token}/accept"),
+        )
+        .await;
+        let accepted_body = response_json(accepted).await;
+        let accepted_again = post_public_with_bearer_and_csrf(
+            store.clone(),
+            &raw_session,
+            &csrf_token,
             &format!("/auth/v1/invitations/{invitation_token}/accept"),
         )
         .await;
@@ -23338,6 +27508,7 @@ mod tests {
         }))
         .unwrap_or_else(|error| panic!("response bodies should serialize: {error}"));
 
+        assert_eq!(missing_csrf_accept_status, StatusCode::UNAUTHORIZED);
         assert_eq!(accepted_again_status, StatusCode::BAD_REQUEST);
         assert!(invitation_token.starts_with("gwinv_"));
         assert_eq!(replay_body["idempotency_replayed"], true);
@@ -23692,6 +27863,7 @@ mod tests {
             .as_str()
             .unwrap_or_else(|| panic!("session token should be present"))
             .to_owned();
+        let csrf_token = csrf_token_from_body(&success_body);
         let admin_projects = get_admin_with_project(
             store.clone(),
             &session_token,
@@ -23720,9 +27892,12 @@ mod tests {
             "single_user_password"
         );
         assert!(session_token.starts_with(SESSION_TOKEN_PREFIX));
+        assert!(csrf_token.starts_with("sha256:"));
+        assert_eq!(success_body["csrf"]["header"], CSRF_TOKEN_HEADER);
         assert_eq!(success_body["tenant"]["id"], SINGLE_USER_TENANT_ID);
         assert_eq!(success_body["project"]["id"], SINGLE_USER_PROJECT_ID);
         assert!(!success_text.contains("correct horse battery staple"));
+        assert!(!success_text.contains("session_hash"));
         assert!(store
             .project_membership(SINGLE_USER_ID, SINGLE_USER_PROJECT_ID)
             .is_some());
@@ -23759,6 +27934,7 @@ mod tests {
             .as_str()
             .unwrap_or_else(|| panic!("session token should be present"))
             .to_owned();
+        let csrf_token = csrf_token_from_body(&login_body);
 
         let session =
             get_public_with_bearer(store.clone(), &session_token, "/auth/v1/session").await;
@@ -23766,8 +27942,24 @@ mod tests {
         let session_body = response_json(session).await;
         let session_text = serde_json::to_string(&session_body)
             .unwrap_or_else(|error| panic!("session response should serialize: {error}"));
-        let logout =
+        let missing_csrf_logout =
             post_public_with_bearer(store.clone(), &session_token, "/auth/v1/logout").await;
+        let missing_csrf_logout_status = missing_csrf_logout.status();
+        let wrong_csrf_logout = post_public_with_bearer_and_csrf(
+            store.clone(),
+            &session_token,
+            "sha256:wrong",
+            "/auth/v1/logout",
+        )
+        .await;
+        let wrong_csrf_logout_status = wrong_csrf_logout.status();
+        let logout = post_public_with_bearer_and_csrf(
+            store.clone(),
+            &session_token,
+            &csrf_token,
+            "/auth/v1/logout",
+        )
+        .await;
         let logout_status = logout.status();
         let logout_body = response_json(logout).await;
         let revoked_session =
@@ -23780,6 +27972,8 @@ mod tests {
         assert_eq!(login_status, StatusCode::OK);
         assert_eq!(session_status, StatusCode::OK);
         assert_eq!(session_body["schema"], "gateway.auth.session.v1");
+        assert_eq!(session_body["csrf"]["header"], CSRF_TOKEN_HEADER);
+        assert_eq!(session_body["csrf"]["token"], csrf_token);
         assert_eq!(session_body["session"]["kind"], "auth_session");
         assert_eq!(session_body["session"]["principal_id"], SINGLE_USER_ID);
         assert_eq!(
@@ -23810,6 +28004,8 @@ mod tests {
         );
         assert!(!session_text.contains(&session_token));
         assert!(!session_text.contains("session_hash"));
+        assert_eq!(missing_csrf_logout_status, StatusCode::UNAUTHORIZED);
+        assert_eq!(wrong_csrf_logout_status, StatusCode::UNAUTHORIZED);
         assert_eq!(logout_status, StatusCode::OK);
         assert_eq!(logout_body["schema"], "gateway.auth.logout.v1");
         assert_eq!(logout_body["session"]["status"], "revoked");
@@ -23820,24 +28016,9 @@ mod tests {
     #[tokio::test]
     async fn auth_session_context_update_endpoints_validate_memberships() {
         let store = InMemoryGatewayStore::default();
-        let config = gateway_config_with_single_user();
-        let login = post_public_json_with_config(
-            store.clone(),
-            config,
-            "/auth/v1/single-user/login",
-            json!({
-                "username": "admin",
-                "password": "correct horse battery staple"
-            }),
-        )
-        .await;
-        let login_body = response_json(login).await;
-        let session_token = login_body["session"]["session_token"]
-            .as_str()
-            .unwrap_or_else(|| panic!("session token should be present"))
-            .to_owned();
+        let (session_token, csrf_token) = single_user_login_session_and_csrf(store.clone()).await;
 
-        let active_project = post_public_json_with_bearer(
+        let missing_csrf_update = post_public_json_with_bearer(
             store.clone(),
             &session_token,
             "/auth/v1/session/active-project",
@@ -23846,11 +28027,23 @@ mod tests {
             }),
         )
         .await;
-        let active_project_status = active_project.status();
-        let active_project_body = response_json(active_project).await;
-        let active_organization = post_public_json_with_bearer(
+        let missing_csrf_update_status = missing_csrf_update.status();
+        let active_project = post_public_json_with_bearer_and_csrf(
             store.clone(),
             &session_token,
+            &csrf_token,
+            "/auth/v1/session/active-project",
+            json!({
+                "project_id": SINGLE_USER_PROJECT_ID
+            }),
+        )
+        .await;
+        let active_project_status = active_project.status();
+        let active_project_body = response_json(active_project).await;
+        let active_organization = post_public_json_with_bearer_and_csrf(
+            store.clone(),
+            &session_token,
+            &csrf_token,
             "/auth/v1/session/active-organization",
             json!({
                 "organization_id": SINGLE_USER_ORGANIZATION_ID
@@ -23859,9 +28052,10 @@ mod tests {
         .await;
         let active_organization_status = active_organization.status();
         let active_organization_body = response_json(active_organization).await;
-        let default_organization = post_public_json_with_bearer(
+        let default_organization = post_public_json_with_bearer_and_csrf(
             store.clone(),
             &session_token,
+            &csrf_token,
             "/auth/v1/session/default-organization",
             json!({
                 "organization_id": SINGLE_USER_ORGANIZATION_ID,
@@ -23871,9 +28065,10 @@ mod tests {
         .await;
         let default_organization_status = default_organization.status();
         let default_organization_body = response_json(default_organization).await;
-        let missing_project = post_public_json_with_bearer(
+        let missing_project = post_public_json_with_bearer_and_csrf(
             store,
             &session_token,
+            &csrf_token,
             "/auth/v1/session/active-project",
             json!({
                 "project_id": "prj_missing"
@@ -23882,6 +28077,7 @@ mod tests {
         .await;
         let missing_project_status = missing_project.status();
 
+        assert_eq!(missing_csrf_update_status, StatusCode::UNAUTHORIZED);
         assert_eq!(active_project_status, StatusCode::OK);
         assert_eq!(active_organization_status, StatusCode::OK);
         assert_eq!(default_organization_status, StatusCode::OK);
@@ -24023,7 +28219,8 @@ mod tests {
             TEST_TENANT_ID,
             chrono::Utc::now(),
             10,
-        );
+        )
+        .await;
 
         let delivered = store.notification_outbox_events_for_tenant(TEST_TENANT_ID);
         assert_eq!(attempts.len(), 1);
@@ -24142,7 +28339,7 @@ mod tests {
         let blocked = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
         assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
 
-        let first_attempt = deliver_first_due_notification(store.clone(), chrono::Utc::now());
+        let first_attempt = deliver_first_due_notification(store.clone(), chrono::Utc::now()).await;
         let events = store.notification_outbox_events_for_tenant(TEST_TENANT_ID);
         assert_retryable_webhook_attempt(&first_attempt, "notification_webhook_retryable_failure");
         assert_eq!(events[0].status, "retryable_failed");
@@ -24153,7 +28350,7 @@ mod tests {
         let second_due_at = events[0]
             .next_attempt_at
             .unwrap_or_else(|| panic!("retryable event should have next attempt"));
-        let second_attempt = deliver_first_due_notification(store.clone(), second_due_at);
+        let second_attempt = deliver_first_due_notification(store.clone(), second_due_at).await;
         let retried = store.notification_outbox_events_for_tenant(TEST_TENANT_ID);
         assert_retryable_webhook_attempt(&second_attempt, "notification_webhook_retryable_failure");
         assert_eq!(retried[0].status, "retryable_failed");
@@ -24162,7 +28359,7 @@ mod tests {
         let third_due_at = retried[0]
             .next_attempt_at
             .unwrap_or_else(|| panic!("second retryable event should have next attempt"));
-        let dead_letter_attempt = deliver_first_due_notification(store.clone(), third_due_at);
+        let dead_letter_attempt = deliver_first_due_notification(store.clone(), third_due_at).await;
         let dead_lettered = store.notification_outbox_events_for_tenant(TEST_TENANT_ID);
         assert_eq!(dead_letter_attempt.status, "dead_lettered");
         assert_eq!(
@@ -24172,12 +28369,14 @@ mod tests {
         assert_eq!(dead_lettered[0].status, "dead_lettered");
         assert_eq!(dead_lettered[0].attempt_count, 3);
         assert!(dead_lettered[0].next_attempt_at.is_none());
-        assert!(deliver_due_notifications(
+        assert!(deliver_due_notifications_with_transport(
             &AppState::new(GatewayConfig::default(), store.clone()),
             TEST_TENANT_ID,
             third_due_at + chrono::Duration::seconds(60),
             10,
+            NotificationDeliveryTransport::Synthetic,
         )
+        .await
         .is_empty());
     }
 
@@ -24193,7 +28392,7 @@ mod tests {
         )
         .await;
         let (event_id, first_attempt, second_attempt, third_attempt) =
-            append_and_dead_letter_retry_notification_event(&store, &notification_sink_id);
+            append_and_dead_letter_retry_notification_event(&store, &notification_sink_id).await;
         let replay_path = format!("/admin/v1/notification/outbox/{event_id}/replay");
         let replay_request = json!({
             "idempotency_key": "idem_notification_outbox_replay",
@@ -24230,7 +28429,8 @@ mod tests {
         let redelivery_due_at = replayed_event
             .next_attempt_at
             .unwrap_or_else(|| panic!("replayed event should be immediately due"));
-        let redelivery_attempt = deliver_first_due_notification(store.clone(), redelivery_due_at);
+        let redelivery_attempt =
+            deliver_first_due_notification(store.clone(), redelivery_due_at).await;
         let redelivered_event = store
             .notification_outbox_event(&event_id)
             .unwrap_or_else(|| panic!("redelivered event should remain stored"));
@@ -24363,7 +28563,8 @@ mod tests {
             TEST_TENANT_ID,
             base + Duration::seconds(3),
             2,
-        );
+        )
+        .await;
         let first_event = store
             .notification_outbox_event(&first_id)
             .unwrap_or_else(|| panic!("first notification event should remain stored"));
@@ -24387,7 +28588,8 @@ mod tests {
             TEST_TENANT_ID,
             base + Duration::seconds(4),
             10,
-        );
+        )
+        .await;
         let third_delivered = store
             .notification_outbox_event(&third_id)
             .unwrap_or_else(|| panic!("third notification event should remain stored"));
@@ -24413,7 +28615,7 @@ mod tests {
             "notification_webhook_delivery_first",
             "synthetic",
         );
-        let first_attempt = deliver_first_due_notification(store.clone(), chrono::Utc::now());
+        let first_attempt = deliver_first_due_notification(store.clone(), chrono::Utc::now()).await;
         let first_signature_sha256 = assert_signed_webhook_attempt(
             &first_attempt,
             &first_event_id,
@@ -24441,7 +28643,8 @@ mod tests {
         let rotated_attempt = deliver_first_due_notification(
             store.clone(),
             chrono::Utc::now() + Duration::seconds(1),
-        );
+        )
+        .await;
         let rotated_signature_sha256 = assert_signed_webhook_attempt(
             &rotated_attempt,
             &rotated_event_id,
@@ -24456,6 +28659,67 @@ mod tests {
             event.event_type == "gateway.notification_sink.update"
                 && event.redacted_diff["signing_secret_ref_id"]["after"] == "sec_***"
         }));
+    }
+
+    #[tokio::test]
+    async fn notification_webhook_delivery_posts_to_local_http_receiver() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let (webhook_url, captured_requests, server_handle) =
+            spawn_local_webhook_receiver(StatusCode::NO_CONTENT).await;
+        let signing_secret = "notification-webhook-local-secret-value";
+        let signing_secret_ref_id = seed_secret_ref_for_test(
+            &store,
+            Some(TEST_ORGANIZATION_ID),
+            Some(TEST_PROJECT_ID),
+            "notification webhook signing",
+            signing_secret,
+        );
+        let notification_sink_id = create_local_http_notification_sink_over_http(
+            store.clone(),
+            &raw_session,
+            &webhook_url,
+            &signing_secret_ref_id,
+        )
+        .await;
+        let event_id = append_synthetic_notification_event(
+            &store,
+            &notification_sink_id,
+            "notification_webhook_delivery_real_http",
+            "real_http",
+        );
+
+        let attempts = deliver_due_notifications(
+            &AppState::new(GatewayConfig::default(), store.clone()),
+            TEST_TENANT_ID,
+            chrono::Utc::now(),
+            10,
+        )
+        .await;
+        let captured = captured_requests
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap_or_else(|error| panic!("webhook receiver should capture request: {error}"));
+        server_handle.abort();
+        let delivered = store
+            .notification_outbox_event(&event_id)
+            .unwrap_or_else(|| panic!("delivered event should remain stored"));
+        let body = assert_captured_webhook_request(&captured, &event_id, signing_secret);
+        let delivery_headers = attempts[0].delivery_headers.to_string();
+
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].notification_outbox_event_id, event_id);
+        assert_eq!(attempts[0].status, "succeeded");
+        assert_eq!(attempts[0].response_status, Some(204));
+        assert_eq!(
+            attempts[0].signing_secret_ref_id.as_deref(),
+            Some(signing_secret_ref_id.as_str())
+        );
+        assert_eq!(delivered.status, "delivered");
+        assert_eq!(delivered.attempt_count, 1);
+        assert_eq!(body["event"]["kind"], "real_http");
+        assert!(delivery_headers.contains("\"transport_mode\":\"http\""));
+        assert!(delivery_headers.contains("\"response_status_class\":\"2xx\""));
+        assert!(!delivery_headers.contains(signing_secret));
+        assert!(!delivery_headers.contains("\"event\""));
     }
 
     #[tokio::test]
@@ -24512,12 +28776,14 @@ mod tests {
             chrono::Utc::now(),
         );
 
-        let attempts = deliver_due_notifications(
+        let attempts = deliver_due_notifications_with_transport(
             &AppState::new(GatewayConfig::default(), store.clone()),
             TEST_TENANT_ID,
             chrono::Utc::now(),
             10,
-        );
+            NotificationDeliveryTransport::Synthetic,
+        )
+        .await;
         let events = store.notification_outbox_events_for_tenant(TEST_TENANT_ID);
 
         assert_eq!(attempts.len(), 1);
@@ -24530,12 +28796,14 @@ mod tests {
         assert_eq!(events[0].status, "permanent_failed");
         assert_eq!(events[0].attempt_count, 1);
         assert!(events[0].next_attempt_at.is_none());
-        assert!(deliver_due_notifications(
+        assert!(deliver_due_notifications_with_transport(
             &AppState::new(GatewayConfig::default(), store.clone()),
             TEST_TENANT_ID,
             chrono::Utc::now() + Duration::seconds(60),
             10,
+            NotificationDeliveryTransport::Synthetic,
         )
+        .await
         .is_empty());
     }
 
@@ -25337,6 +29605,38 @@ mod tests {
         insert_admin_session_with_id(store).0
     }
 
+    fn csrf_token_from_body(body: &serde_json::Value) -> String {
+        body["csrf"]["token"]
+            .as_str()
+            .unwrap_or_else(|| panic!("csrf token should be present"))
+            .to_owned()
+    }
+
+    async fn single_user_login_session_and_csrf(store: InMemoryGatewayStore) -> (String, String) {
+        let login = post_public_json_with_config(
+            store,
+            gateway_config_with_single_user(),
+            "/auth/v1/single-user/login",
+            json!({
+                "username": "admin",
+                "password": "correct horse battery staple"
+            }),
+        )
+        .await;
+        let login_body = response_json(login).await;
+        let session_token = login_body["session"]["session_token"]
+            .as_str()
+            .unwrap_or_else(|| panic!("session token should be present"))
+            .to_owned();
+        (session_token, csrf_token_from_body(&login_body))
+    }
+
+    fn csrf_token_for_raw_session(store: &InMemoryGatewayStore, raw_session: &str) -> String {
+        let session = verify_session_token(store, raw_session, chrono::Utc::now())
+            .unwrap_or_else(|error| panic!("test session should verify: {error}"));
+        auth_session_csrf_token(&session)
+    }
+
     fn insert_admin_session_with_id(store: &InMemoryGatewayStore) -> (String, String) {
         let now = chrono::Utc::now();
         let session = create_auth_session(
@@ -25527,6 +29827,35 @@ mod tests {
         })
     }
 
+    fn valid_github_login_provider_request_for_endpoints(
+        idempotency_key: &str,
+        provider: &LocalGithubOauthAppProvider,
+        client_secret_ref: &str,
+    ) -> serde_json::Value {
+        json!({
+            "idempotency_key": idempotency_key,
+            "provider_kind": "github_oauth_app",
+            "display_name": "Local GitHub",
+            "config_document": {
+                "client_id": "github_client",
+                "client_secret_ref": client_secret_ref,
+                "redirect_uri": "https://app.example/auth/github/callback",
+                "authorization_url": provider.authorization_url,
+                "token_url": provider.token_url,
+                "user_api_url": provider.user_api_url,
+                "emails_api_url": provider.emails_api_url,
+                "scopes": ["read:user", "user:email"]
+            }
+        })
+    }
+
+    fn valid_github_callback_provider_request(idempotency_key: &str) -> serde_json::Value {
+        let mut request = valid_github_login_provider_request(idempotency_key);
+        request["config_document"]["callback_mode"] =
+            serde_json::Value::String("local_verified_claims".to_owned());
+        request
+    }
+
     fn valid_oidc_login_provider_request(idempotency_key: &str) -> serde_json::Value {
         json!({
             "idempotency_key": idempotency_key,
@@ -25541,6 +29870,81 @@ mod tests {
                 "redirect_uri": "https://app.example/auth/oidc/callback"
             }
         })
+    }
+
+    fn valid_oidc_login_provider_request_for_issuer(
+        idempotency_key: &str,
+        issuer: &str,
+        client_secret_ref: &str,
+    ) -> serde_json::Value {
+        json!({
+            "idempotency_key": idempotency_key,
+            "provider_kind": "oidc",
+            "display_name": "Generic OIDC",
+            "config_document": {
+                "issuer": issuer,
+                "client_id": "oidc_client",
+                "client_secret_ref": client_secret_ref,
+                "redirect_uri": "https://app.example/auth/oidc/callback"
+            }
+        })
+    }
+
+    fn valid_oidc_callback_provider_request(idempotency_key: &str) -> serde_json::Value {
+        let mut request = valid_oidc_login_provider_request(idempotency_key);
+        request["config_document"]["callback_mode"] =
+            serde_json::Value::String("local_verified_claims".to_owned());
+        request
+    }
+
+    fn github_callback_body(state_token: &str) -> serde_json::Value {
+        json!({
+            "state": state_token,
+            "code": "github_authorization_code",
+            "verified_claims": {
+                "subject": "github-user-456",
+                "email": "Owner@Example.COM",
+                "email_verified": true,
+                "display_name": "Owner"
+            }
+        })
+    }
+
+    fn oidc_callback_body(
+        state_token: &str,
+        nonce: &str,
+        issuer: &str,
+        audience: &str,
+        expires_in_seconds: i64,
+    ) -> serde_json::Value {
+        json!({
+            "state": state_token,
+            "code": "oidc_authorization_code",
+            "verified_claims": {
+                "subject": "oidc-user-456",
+                "email": "owner@example.com",
+                "email_verified": true,
+                "display_name": "OIDC Owner",
+                "nonce": nonce,
+                "issuer": issuer,
+                "audience": audience,
+                "expires_at": (chrono::Utc::now() + Duration::seconds(expires_in_seconds)).to_rfc3339()
+            }
+        })
+    }
+
+    fn login_start_state(body: &serde_json::Value) -> String {
+        body["authorization"]["state"]
+            .as_str()
+            .unwrap_or_else(|| panic!("login start state should be present"))
+            .to_owned()
+    }
+
+    fn login_start_nonce(body: &serde_json::Value) -> String {
+        body["authorization"]["nonce"]
+            .as_str()
+            .unwrap_or_else(|| panic!("login start nonce should be present"))
+            .to_owned()
     }
 
     fn valid_stdout_notification_sink_request(idempotency_key: &str) -> serde_json::Value {
@@ -25986,7 +30390,7 @@ mod tests {
     }
 
     async fn wait_for_quota_fixed_window_margin() {
-        const MIN_REMAINING_SECONDS: i64 = 10;
+        const MIN_REMAINING_SECONDS: i64 = 30;
         let elapsed_seconds = chrono::Utc::now().timestamp().rem_euclid(60);
         let remaining_seconds = 60 - elapsed_seconds;
         if remaining_seconds < MIN_REMAINING_SECONDS {
@@ -26049,6 +30453,31 @@ mod tests {
         body: serde_json::Value,
     ) -> Response<Body> {
         match router(AppState::new(GatewayConfig::default(), store))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {raw_session}"))
+                    .header(PROJECT_ID_HEADER, TEST_PROJECT_ID)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap_or_else(|error| panic!("request should build: {error}")),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => panic!("request should complete: {error}"),
+        }
+    }
+
+    async fn post_admin_json_with_config(
+        store: InMemoryGatewayStore,
+        config: GatewayConfig,
+        raw_session: &str,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> Response<Body> {
+        match router(AppState::new(config, store))
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -26232,6 +30661,29 @@ mod tests {
         }
     }
 
+    async fn post_public_with_bearer_and_csrf(
+        store: InMemoryGatewayStore,
+        bearer: &str,
+        csrf_token: &str,
+        uri: &str,
+    ) -> Response<Body> {
+        match router(AppState::new(GatewayConfig::default(), store))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                    .header(CSRF_TOKEN_HEADER, csrf_token)
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("request should build: {error}")),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => panic!("request should complete: {error}"),
+        }
+    }
+
     async fn post_public_json_with_bearer(
         store: InMemoryGatewayStore,
         bearer: &str,
@@ -26244,6 +30696,31 @@ mod tests {
                     .method("POST")
                     .uri(uri)
                     .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap_or_else(|error| panic!("request should build: {error}")),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => panic!("request should complete: {error}"),
+        }
+    }
+
+    async fn post_public_json_with_bearer_and_csrf(
+        store: InMemoryGatewayStore,
+        bearer: &str,
+        csrf_token: &str,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> Response<Body> {
+        match router(AppState::new(GatewayConfig::default(), store))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                    .header(CSRF_TOKEN_HEADER, csrf_token)
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap_or_else(|error| panic!("request should build: {error}")),
@@ -26281,6 +30758,20 @@ mod tests {
         store: InMemoryGatewayStore,
         raw_session: &str,
     ) -> String {
+        create_otel_export_config_with_endpoint_over_http(
+            store,
+            raw_session,
+            "https://otel.example/v1/metrics",
+        )
+        .await
+        .0
+    }
+
+    async fn create_otel_export_config_with_endpoint_over_http(
+        store: InMemoryGatewayStore,
+        raw_session: &str,
+        endpoint_url: &str,
+    ) -> (String, String) {
         let secret_ref_id = seed_secret_ref_for_test(
             &store,
             Some(TEST_ORGANIZATION_ID),
@@ -26288,20 +30779,24 @@ mod tests {
             "otel collector authorization",
             "otel-collector-token-value",
         );
+        let mut request =
+            valid_otel_export_config_request_with_secret(&new_prefixed_id("idem"), &secret_ref_id);
+        request["endpoint_url"] = json!(endpoint_url);
         let response = post_admin_json(
             store,
             raw_session,
             "/admin/v1/observability/otel-export/configs",
-            valid_otel_export_config_request_with_secret(&new_prefixed_id("idem"), &secret_ref_id),
+            request,
         )
         .await;
         let status = response.status();
         let body = response_json(response).await;
         assert_eq!(status, StatusCode::OK);
-        body["resource"]["id"]
+        let config_id = body["resource"]["id"]
             .as_str()
             .unwrap_or_else(|| panic!("otel export config id should be present"))
-            .to_owned()
+            .to_owned();
+        (config_id, "otel-collector-token-value".to_owned())
     }
 
     async fn create_secret_ref_over_http(
@@ -26421,6 +30916,43 @@ mod tests {
             .to_owned()
     }
 
+    async fn create_local_http_notification_sink_over_http(
+        store: InMemoryGatewayStore,
+        raw_session: &str,
+        webhook_url: &str,
+        signing_secret_ref_id: &str,
+    ) -> String {
+        let response = post_admin_json(
+            store,
+            raw_session,
+            "/admin/v1/notification/sinks",
+            json!({
+                "idempotency_key": "idem_local_http_notification_sink",
+                "project_id": TEST_PROJECT_ID,
+                "name": "local-http-webhook",
+                "sink_kind": "webhook",
+                "endpoint_config": {
+                    "url": webhook_url,
+                    "retry_policy": {
+                        "max_attempts": 3,
+                        "max_duration_seconds": 3600
+                    },
+                    "timeout_seconds": 5,
+                    "batching": false
+                },
+                "signing_secret_ref_id": signing_secret_ref_id
+            }),
+        )
+        .await;
+        let status = response.status();
+        let body = response_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("notification sink id should be present"))
+            .to_owned()
+    }
+
     async fn create_stdout_notification_sink_over_http(
         store: InMemoryGatewayStore,
         raw_session: &str,
@@ -26440,6 +30972,452 @@ mod tests {
             .as_str()
             .unwrap_or_else(|| panic!("notification sink id should be present"))
             .to_owned()
+    }
+
+    #[derive(Debug)]
+    struct CapturedWebhookRequest {
+        headers: HeaderMap,
+        body: Vec<u8>,
+    }
+
+    #[derive(Debug)]
+    struct CapturedObjectStoragePut {
+        path: String,
+        authorization: Option<String>,
+        content_type: Option<String>,
+        body: Vec<u8>,
+    }
+
+    fn assert_captured_webhook_request(
+        captured: &CapturedWebhookRequest,
+        event_id: &str,
+        signing_secret: &str,
+    ) -> Value {
+        let body: Value = serde_json::from_slice(&captured.body)
+            .unwrap_or_else(|error| panic!("captured webhook body should be json: {error}"));
+        let timestamp = captured
+            .headers
+            .get("x-gateway-timestamp")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_else(|| panic!("timestamp header should be present"));
+        let signature = captured
+            .headers
+            .get("x-gateway-signature")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_else(|| panic!("signature header should be present"));
+        let expected_signature =
+            notification_signature(signing_secret.as_bytes(), timestamp, &captured.body)
+                .unwrap_or_else(|error| panic!("expected signature should compute: {error}"));
+
+        assert_eq!(
+            captured
+                .headers
+                .get("x-gateway-delivery-id")
+                .and_then(|value| value.to_str().ok()),
+            Some(event_id)
+        );
+        assert_eq!(
+            captured
+                .headers
+                .get("x-gateway-event-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("gateway.delivery.synthetic")
+        );
+        assert_eq!(
+            captured
+                .headers
+                .get("x-gateway-schema")
+                .and_then(|value| value.to_str().ok()),
+            Some("gateway.notification.synthetic.v1")
+        );
+        assert_eq!(signature, expected_signature);
+        body
+    }
+
+    fn assert_captured_otel_export(captured: &CapturedWebhookRequest, collector_secret: &str) {
+        let body: Value = serde_json::from_slice(&captured.body)
+            .unwrap_or_else(|error| panic!("captured otel body should be json: {error}"));
+        let body_text = body.to_string();
+        assert_eq!(
+            captured
+                .headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
+        assert_eq!(
+            captured
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some(collector_secret)
+        );
+        assert!(body["resourceMetrics"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()));
+        assert!(body_text.contains("gateway.export.metric_count"));
+        assert!(body_text.contains("gateway.usage_event.count"));
+        assert!(body_text.contains("gateway.route_decision.count"));
+        assert!(body_text.contains("service.name"));
+        assert!(!body_text.contains("prompt text"));
+        assert!(!body_text.contains("sec_"));
+        assert!(!body_text.contains(collector_secret));
+    }
+
+    struct LocalGithubOauthAppProvider {
+        authorization_url: String,
+        token_url: String,
+        user_api_url: String,
+        emails_api_url: String,
+        handle: tokio::task::JoinHandle<()>,
+    }
+
+    async fn spawn_local_github_oauth_app_provider() -> LocalGithubOauthAppProvider {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("github oauth listener should bind: {error}"));
+        let address = listener.local_addr().unwrap_or_else(|error| {
+            panic!("github oauth listener address should resolve: {error}")
+        });
+        let base_url = format!("http://{address}");
+        let app = Router::new()
+            .route(
+                "/login/oauth/authorize",
+                get(|| async { StatusCode::NO_CONTENT }),
+            )
+            .route(
+                "/login/oauth/access_token",
+                post(|headers: HeaderMap, body: Bytes| async move {
+                    let body_text = String::from_utf8(body.to_vec()).unwrap_or_else(|error| {
+                        panic!("github token body should be utf8: {error}")
+                    });
+                    assert_eq!(
+                        headers
+                            .get(header::ACCEPT)
+                            .and_then(|value| value.to_str().ok()),
+                        Some("application/json")
+                    );
+                    assert!(body_text.contains("client_id=github_client"));
+                    assert!(body_text.contains("client_secret=github-client-secret-value"));
+                    assert!(body_text.contains("code=github_authorization_code"));
+                    assert!(body_text.contains("code_verifier="));
+                    Json(json!({
+                        "access_token": "github-access-token-value",
+                        "token_type": "bearer",
+                        "scope": "read:user,user:email"
+                    }))
+                }),
+            )
+            .route(
+                "/api/user",
+                get(|headers: HeaderMap| async move {
+                    assert_github_bearer_header(&headers);
+                    Json(json!({
+                        "id": 123_456,
+                        "node_id": "github-node-id-456",
+                        "login": "octo-owner",
+                        "name": "GitHub Owner",
+                        "email": null
+                    }))
+                }),
+            )
+            .route(
+                "/api/user/emails",
+                get(|headers: HeaderMap| async move {
+                    assert_github_bearer_header(&headers);
+                    Json(json!([
+                        {
+                            "email": "secondary@example.com",
+                            "primary": false,
+                            "verified": true
+                        },
+                        {
+                            "email": "Owner@Example.COM",
+                            "primary": true,
+                            "verified": true
+                        }
+                    ]))
+                }),
+            );
+        let handle = tokio::spawn(async move {
+            if let Err(error) = axum::serve(listener, app).await {
+                panic!("github oauth provider should serve requests: {error}");
+            }
+        });
+        LocalGithubOauthAppProvider {
+            authorization_url: format!("{base_url}/login/oauth/authorize"),
+            token_url: format!("{base_url}/login/oauth/access_token"),
+            user_api_url: format!("{base_url}/api/user"),
+            emails_api_url: format!("{base_url}/api/user/emails"),
+            handle,
+        }
+    }
+
+    fn assert_github_bearer_header(headers: &HeaderMap) {
+        assert_eq!(
+            headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer github-access-token-value")
+        );
+        assert_eq!(
+            headers
+                .get(header::ACCEPT)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/vnd.github+json")
+        );
+    }
+
+    struct LocalOidcProvider {
+        issuer_url: String,
+        nonce: Arc<Mutex<Option<String>>>,
+        handle: tokio::task::JoinHandle<()>,
+    }
+
+    impl LocalOidcProvider {
+        fn set_nonce(&self, nonce: &str) {
+            let mut current = self
+                .nonce
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *current = Some(nonce.to_owned());
+        }
+    }
+
+    async fn spawn_local_oidc_provider() -> LocalOidcProvider {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("oidc listener should bind: {error}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("oidc listener address should resolve: {error}"));
+        let issuer_url = format!("http://{address}");
+        let nonce = Arc::new(Mutex::new(None::<String>));
+        let signing_key = Arc::new(
+            EncodingKey::from_rsa_pem(TEST_RSA_PRIVATE_KEY_PEM.as_bytes())
+                .unwrap_or_else(|error| panic!("oidc rsa key should parse: {error}")),
+        );
+        let mut jwk = Jwk::from_encoding_key(&signing_key, Algorithm::RS256)
+            .unwrap_or_else(|error| panic!("oidc jwk should derive from key: {error}"));
+        jwk.common.key_id = Some("test-oidc-key".to_owned());
+        jwk.common.public_key_use = Some(PublicKeyUse::Signature);
+        let jwks = json!({ "keys": [serde_json::to_value(jwk).unwrap_or_else(|error| panic!("oidc jwk should serialize: {error}"))] });
+        let discovery_issuer = issuer_url.clone();
+        let discovery = json!({
+            "issuer": discovery_issuer,
+            "authorization_endpoint": format!("{issuer_url}/authorize"),
+            "token_endpoint": format!("{issuer_url}/token"),
+            "jwks_uri": format!("{issuer_url}/jwks"),
+            "id_token_signing_alg_values_supported": ["RS256"]
+        });
+        let token_nonce = Arc::clone(&nonce);
+        let token_signing_key = Arc::clone(&signing_key);
+        let token_issuer = issuer_url.clone();
+        let app = Router::new()
+            .route(
+                "/.well-known/openid-configuration",
+                get(move || {
+                    let response = discovery.clone();
+                    async move { Json(response) }
+                }),
+            )
+            .route(
+                "/jwks",
+                get(move || {
+                    let response = jwks.clone();
+                    async move { Json(response) }
+                }),
+            )
+            .route(
+                "/token",
+                post(move |headers: HeaderMap, body: Bytes| {
+                    let token_nonce = Arc::clone(&token_nonce);
+                    let token_signing_key = Arc::clone(&token_signing_key);
+                    let token_issuer = token_issuer.clone();
+                    async move {
+                        let body_text = String::from_utf8(body.to_vec())
+                            .unwrap_or_else(|error| panic!("token body should be utf8: {error}"));
+                        assert!(headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .is_some_and(|value| value.starts_with("Basic ")));
+                        assert!(body_text.contains("grant_type=authorization_code"));
+                        assert!(body_text.contains("code=oidc_authorization_code"));
+                        assert!(body_text.contains("code_verifier="));
+                        assert!(!body_text.contains("oidc-client-secret-value"));
+                        let nonce = token_nonce
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone()
+                            .unwrap_or_else(|| panic!("oidc nonce should be set before callback"));
+                        let id_token =
+                            signed_oidc_id_token(&token_signing_key, &token_issuer, &nonce);
+                        Json(json!({
+                            "token_type": "Bearer",
+                            "id_token": id_token
+                        }))
+                    }
+                }),
+            );
+        let handle = tokio::spawn(async move {
+            if let Err(error) = axum::serve(listener, app).await {
+                panic!("oidc provider should serve requests: {error}");
+            }
+        });
+        LocalOidcProvider {
+            issuer_url,
+            nonce,
+            handle,
+        }
+    }
+
+    fn signed_oidc_id_token(signing_key: &EncodingKey, issuer: &str, nonce: &str) -> String {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("test-oidc-key".to_owned());
+        encode(
+            &header,
+            &json!({
+                "iss": issuer,
+                "sub": "oidc-user-456",
+                "aud": "oidc_client",
+                "exp": (chrono::Utc::now() + Duration::seconds(300)).timestamp(),
+                "iat": chrono::Utc::now().timestamp(),
+                "nonce": nonce,
+                "email": "owner@example.com",
+                "email_verified": true,
+                "name": "OIDC Owner"
+            }),
+            signing_key,
+        )
+        .unwrap_or_else(|error| panic!("oidc id token should sign: {error}"))
+    }
+
+    const TEST_RSA_PRIVATE_KEY_PEM: &str = r"-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEAyRE6rHuNR0QbHO3H3Kt2pOKGVhQqGZXInOduQNxXzuKlvQTL
+UTv4l4sggh5/CYYi/cvI+SXVT9kPWSKXxJXBXd/4LkvcPuUakBoAkfh+eiFVMh2V
+rUyWyj3MFl0HTVF9KwRXLAcwkREiS3npThHRyIxuy0ZMeZfxVL5arMhw1SRELB8H
+oGfG/AtH89BIE9jDBHZ9dLelK9a184zAf8LwoPLxvJb3Il5nncqPcSfKDDodMFBI
+Mc4lQzDKL5gvmiXLXB1AGLm8KBjfE8s3L5xqi+yUod+j8MtvIj812dkS4QMiRVN/
+by2h3ZY8LYVGrqZXZTcgn2ujn8uKjXLZVD5TdQIDAQABAoIBAHREk0I0O9DvECKd
+WUpAmF3mY7oY9PNQiu44Yaf+AoSuyRpRUGTMIgc3u3eivOE8ALX0BmYUO5JtuRNZ
+Dpvt4SAwqCnVUinIf6C+eH/wSurCpapSM0BAHp4aOA7igptyOMgMPYBHNA1e9A7j
+E0dCxKWMl3DSWNyjQTk4zeRGEAEfbNjHrq6YCtjHSZSLmWiG80hnfnYos9hOr5Jn
+LnyS7ZmFE/5P3XVrxLc/tQ5zum0R4cbrgzHiQP5RgfxGJaEi7XcgherCCOgurJSS
+bYH29Gz8u5fFbS+Yg8s+OiCss3cs1rSgJ9/eHZuzGEdUZVARH6hVMjSuwvqVTFaE
+8AgtleECgYEA+uLMn4kNqHlJS2A5uAnCkj90ZxEtNm3E8hAxUrhssktY5XSOAPBl
+xyf5RuRGIImGtUVIr4HuJSa5TX48n3Vdt9MYCprO/iYl6moNRSPt5qowIIOJmIjY
+2mqPDfDt/zw+fcDD3lmCJrFlzcnh0uea1CohxEbQnL3cypeLt+WbU6kCgYEAzSp1
+9m1ajieFkqgoB0YTpt/OroDx38vvI5unInJlEeOjQ+oIAQdN2wpxBvTrRorMU6P0
+7mFUbt1j+Co6CbNiw+X8HcCaqYLR5clbJOOWNR36PuzOpQLkfK8woupBxzW9B8gZ
+mY8rB1mbJ+/WTPrEJy6YGmIEBkWylQ2VpW8O4O0CgYEApdbvvfFBlwD9YxbrcGz7
+MeNCFbMz+MucqQntIKoKJ91ImPxvtc0y6e/Rhnv0oyNlaUOwJVu0yNgNG117w0g4
+t/+Q38mvVC5xV7/cn7x9UMFk6MkqVir3dYGEqIl/OP1grY2Tq9HtB5iyG9L8NIam
+QOLMyUqqMUILxdthHyFmiGkCgYEAn9+PjpjGMPHxL0gj8Q8VbzsFtou6b1deIRRA
+2CHmSltltR1gYVTMwXxQeUhPMmgkMqUXzs4/WijgpthY44hK1TaZEKIuoxrS70nJ
+4WQLf5a9k1065fDsFZD6yGjdGxvwEmlGMZgTwqV7t1I4X0Ilqhav5hcs5apYL7gn
+PYPeRz0CgYALHCj/Ji8XSsDoF/MhVhnGdIs2P99NNdmo3R2Pv0CuZbDKMU559LJH
+UvrKS8WkuWRDuKrz1W/EQKApFjDGpdqToZqriUFQzwy7mR3ayIiogzNtHcvbDHx8
+oFnGY0OFksX/ye0/XGpy2SFxYRwGU98HPYeBvAQQrVjdkzfy7BmXQQ==
+-----END RSA PRIVATE KEY-----";
+
+    async fn spawn_local_webhook_receiver(
+        status: StatusCode,
+    ) -> (
+        String,
+        mpsc::Receiver<CapturedWebhookRequest>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (sender, receiver) = mpsc::channel();
+        let sender = Arc::new(Mutex::new(Some(sender)));
+        let app = Router::new().route(
+            "/gateway",
+            post({
+                let sender = Arc::clone(&sender);
+                move |headers: HeaderMap, body: Bytes| {
+                    let sender = Arc::clone(&sender);
+                    async move {
+                        let mut sender = sender
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let Some(sender) = sender.take() {
+                            let _ = sender.send(CapturedWebhookRequest {
+                                headers,
+                                body: body.to_vec(),
+                            });
+                        }
+                        drop(sender);
+                        status
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("webhook listener should bind: {error}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("webhook listener address should resolve: {error}"));
+        let handle = tokio::spawn(async move {
+            if let Err(error) = axum::serve(listener, app).await {
+                panic!("webhook receiver should serve requests: {error}");
+            }
+        });
+        (format!("http://{address}/gateway"), receiver, handle)
+    }
+
+    async fn spawn_local_export_object_storage_receiver() -> (
+        String,
+        mpsc::Receiver<CapturedObjectStoragePut>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (sender, receiver) = mpsc::channel();
+        let sender = Arc::new(Mutex::new(Some(sender)));
+        let app = Router::new().route(
+            "/{*object_path}",
+            put({
+                let sender = Arc::clone(&sender);
+                move |uri: Uri, headers: HeaderMap, body: Bytes| {
+                    let sender = Arc::clone(&sender);
+                    async move {
+                        let mut sender = sender
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let Some(sender) = sender.take() {
+                            let _ = sender.send(CapturedObjectStoragePut {
+                                path: uri.path().to_owned(),
+                                authorization: headers
+                                    .get(header::AUTHORIZATION)
+                                    .and_then(|value| value.to_str().ok())
+                                    .map(ToOwned::to_owned),
+                                content_type: headers
+                                    .get(header::CONTENT_TYPE)
+                                    .and_then(|value| value.to_str().ok())
+                                    .map(ToOwned::to_owned),
+                                body: body.to_vec(),
+                            });
+                        }
+                        drop(sender);
+                        StatusCode::NO_CONTENT
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("object storage listener should bind: {error}"));
+        let address = listener.local_addr().unwrap_or_else(|error| {
+            panic!("object storage listener address should resolve: {error}")
+        });
+        let handle = tokio::spawn(async move {
+            if let Err(error) = axum::serve(listener, app).await {
+                panic!("object storage receiver should serve requests: {error}");
+            }
+        });
+        (
+            format!("http://{address}/gateway-exports"),
+            receiver,
+            handle,
+        )
     }
 
     async fn create_runtime_request_rate_quota_policy(
@@ -26532,7 +31510,7 @@ mod tests {
         event.notification_outbox_event_id
     }
 
-    fn append_and_dead_letter_retry_notification_event(
+    async fn append_and_dead_letter_retry_notification_event(
         store: &InMemoryGatewayStore,
         notification_sink_id: &str,
     ) -> (
@@ -26547,30 +31525,32 @@ mod tests {
             "notification_outbox_replay_dead_letter",
             "replay-secret-marker",
         );
-        let first_attempt = deliver_first_due_notification(store.clone(), chrono::Utc::now());
+        let first_attempt = deliver_first_due_notification(store.clone(), chrono::Utc::now()).await;
         let second_due_at = store
             .notification_outbox_event(&event_id)
             .and_then(|event| event.next_attempt_at)
             .unwrap_or_else(|| panic!("first retryable event should have next attempt"));
-        let second_attempt = deliver_first_due_notification(store.clone(), second_due_at);
+        let second_attempt = deliver_first_due_notification(store.clone(), second_due_at).await;
         let third_due_at = store
             .notification_outbox_event(&event_id)
             .and_then(|event| event.next_attempt_at)
             .unwrap_or_else(|| panic!("second retryable event should have next attempt"));
-        let third_attempt = deliver_first_due_notification(store.clone(), third_due_at);
+        let third_attempt = deliver_first_due_notification(store.clone(), third_due_at).await;
         (event_id, first_attempt, second_attempt, third_attempt)
     }
 
-    fn deliver_first_due_notification(
+    async fn deliver_first_due_notification(
         store: InMemoryGatewayStore,
         now: chrono::DateTime<chrono::Utc>,
     ) -> NotificationDeliveryAttemptRecord {
-        let attempts = deliver_due_notifications(
+        let attempts = deliver_due_notifications_with_transport(
             &AppState::new(GatewayConfig::default(), store),
             TEST_TENANT_ID,
             now,
             10,
-        );
+            NotificationDeliveryTransport::Synthetic,
+        )
+        .await;
         assert_eq!(attempts.len(), 1);
         attempts
             .into_iter()
@@ -26633,7 +31613,7 @@ mod tests {
         assert!(delivery_headers.contains("hmac-sha256:***"));
         assert!(delivery_headers.contains("sec_***"));
         assert!(!delivery_headers.contains(expected_signing_secret_ref_id));
-        assert!(!delivery_headers.contains("synthetic"));
+        assert!(!delivery_headers.contains("\"event\""));
         signature_sha256
     }
 
@@ -26662,6 +31642,119 @@ mod tests {
         assert!(!response_text.contains(signing_secret_ref_id));
     }
 
+    async fn create_github_callback_provider_over_http(
+        store: InMemoryGatewayStore,
+        raw_session: &str,
+        idempotency_key: &str,
+    ) -> String {
+        let response = post_admin_json(
+            store,
+            raw_session,
+            "/admin/v1/identity-providers",
+            valid_github_callback_provider_request(idempotency_key),
+        )
+        .await;
+        let status = response.status();
+        let body = response_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("login provider id should be present"))
+            .to_owned()
+    }
+
+    async fn create_github_login_provider_over_http(
+        store: InMemoryGatewayStore,
+        raw_session: &str,
+    ) -> String {
+        let response = post_admin_json(
+            store,
+            raw_session,
+            "/admin/v1/identity-providers",
+            valid_github_login_provider_request(&new_prefixed_id("idem")),
+        )
+        .await;
+        let status = response.status();
+        let body = response_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("login provider id should be present"))
+            .to_owned()
+    }
+
+    async fn create_github_login_provider_for_endpoints_over_http(
+        store: InMemoryGatewayStore,
+        raw_session: &str,
+        provider: &LocalGithubOauthAppProvider,
+        client_secret_ref: &str,
+    ) -> String {
+        let response = post_admin_json(
+            store,
+            raw_session,
+            "/admin/v1/identity-providers",
+            valid_github_login_provider_request_for_endpoints(
+                &new_prefixed_id("idem"),
+                provider,
+                client_secret_ref,
+            ),
+        )
+        .await;
+        let status = response.status();
+        let body = response_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("login provider id should be present"))
+            .to_owned()
+    }
+
+    async fn create_oidc_callback_provider_over_http(
+        store: InMemoryGatewayStore,
+        raw_session: &str,
+        idempotency_key: &str,
+    ) -> String {
+        let response = post_admin_json(
+            store,
+            raw_session,
+            "/admin/v1/identity-providers",
+            valid_oidc_callback_provider_request(idempotency_key),
+        )
+        .await;
+        let status = response.status();
+        let body = response_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("login provider id should be present"))
+            .to_owned()
+    }
+
+    async fn post_oidc_callback_case(
+        store: InMemoryGatewayStore,
+        login_provider_id: &str,
+        issuer: &str,
+        audience: &str,
+        expires_in_seconds: i64,
+        nonce_override: Option<&str>,
+    ) -> Response<Body> {
+        let start = get_public(
+            store.clone(),
+            &format!("/auth/v1/providers/{login_provider_id}/login"),
+        )
+        .await;
+        let start_body = response_json(start).await;
+        let state = login_start_state(&start_body);
+        let nonce = nonce_override.map_or_else(|| login_start_nonce(&start_body), str::to_owned);
+        post_public_json_with_config(
+            store,
+            GatewayConfig::default(),
+            &format!("/auth/v1/providers/{login_provider_id}/callback"),
+            oidc_callback_body(&state, &nonce, issuer, audience, expires_in_seconds),
+        )
+        .await
+    }
+
     async fn create_oidc_login_provider_over_http(
         store: InMemoryGatewayStore,
         raw_session: &str,
@@ -26676,6 +31769,32 @@ mod tests {
         let status = response.status();
         let body = response_json(response).await;
         assert_eq!(status, StatusCode::OK);
+        body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("login provider id should be present"))
+            .to_owned()
+    }
+
+    async fn create_oidc_login_provider_for_issuer_over_http(
+        store: InMemoryGatewayStore,
+        raw_session: &str,
+        issuer: &str,
+        client_secret_ref: &str,
+    ) -> String {
+        let response = post_admin_json(
+            store,
+            raw_session,
+            "/admin/v1/identity-providers",
+            valid_oidc_login_provider_request_for_issuer(
+                &new_prefixed_id("idem"),
+                issuer,
+                client_secret_ref,
+            ),
+        )
+        .await;
+        let status = response.status();
+        let body = response_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
         body["resource"]["id"]
             .as_str()
             .unwrap_or_else(|| panic!("login provider id should be present"))
@@ -26773,6 +31892,155 @@ mod tests {
             .as_str()
             .unwrap_or_else(|| panic!("provider endpoint id should be present"))
             .to_owned()
+    }
+
+    async fn create_codex_provider_endpoint_over_http(
+        store: InMemoryGatewayStore,
+        raw_session: &str,
+    ) -> String {
+        let response = post_admin_json(
+            store,
+            raw_session,
+            "/admin/v1/provider-endpoints",
+            json!({
+                "idempotency_key": new_prefixed_id("idem"),
+                "organization_id": TEST_ORGANIZATION_ID,
+                "provider_kind": "codex",
+                "display_name": "Codex",
+                "protocol_families": ["openai_responses"],
+                "upstream_base_url": CODEX_API_BASE_URL
+            }),
+        )
+        .await;
+        let status = response.status();
+        let body = response_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("codex provider endpoint id should be present"))
+            .to_owned()
+    }
+
+    async fn create_codex_oauth_connection_over_http(
+        store: InMemoryGatewayStore,
+        raw_session: &str,
+        provider_endpoint_id: &str,
+    ) -> (StatusCode, serde_json::Value, serde_json::Value, String) {
+        let connection_request = json!({
+            "idempotency_key": "idem_codex_oauth_connection",
+            "organization_id": TEST_ORGANIZATION_ID,
+            "provider_endpoint_id": provider_endpoint_id,
+            "display_name": "Codex OAuth"
+        });
+        let connection = post_admin_json(
+            store.clone(),
+            raw_session,
+            "/admin/v1/codex/oauth/connections",
+            connection_request.clone(),
+        )
+        .await;
+        let connection_status = connection.status();
+        let connection_body = response_json(connection).await;
+        let connection_replay = post_admin_json(
+            store,
+            raw_session,
+            "/admin/v1/codex/oauth/connections",
+            connection_request,
+        )
+        .await;
+        let connection_replay_body = response_json(connection_replay).await;
+        let connection_id = connection_body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("connection id should be present"))
+            .to_owned();
+        (
+            connection_status,
+            connection_body,
+            connection_replay_body,
+            connection_id,
+        )
+    }
+
+    async fn start_codex_oauth_session_over_http(
+        store: InMemoryGatewayStore,
+        raw_session: &str,
+        connection_id: &str,
+        token_secret_ref_id: &str,
+    ) -> (StatusCode, serde_json::Value, String, String) {
+        let session = post_admin_json(
+            store,
+            raw_session,
+            &format!("/admin/v1/codex/oauth/connections/{connection_id}/sessions"),
+            json!({
+                "idempotency_key": "idem_codex_oauth_session",
+                "token_secret_ref_id": token_secret_ref_id,
+                "token_expires_at": chrono::Utc::now() + chrono::Duration::hours(1)
+            }),
+        )
+        .await;
+        let session_status = session.status();
+        let session_body = response_json(session).await;
+        let session_id = session_body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("session id should be present"))
+            .to_owned();
+        let credential_id = session_body["resource"]["upstream_credential_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("credential id should be present"))
+            .to_owned();
+        (session_status, session_body, session_id, credential_id)
+    }
+
+    fn codex_oauth_lifecycle_text(
+        store: &InMemoryGatewayStore,
+        connection_body: &serde_json::Value,
+        connection_replay_body: &serde_json::Value,
+        session_body: &serde_json::Value,
+        refresh_body: &serde_json::Value,
+        revoke_body: &serde_json::Value,
+    ) -> String {
+        serde_json::to_string(&json!({
+            "connection": connection_body,
+            "replay": connection_replay_body,
+            "session": session_body,
+            "refresh": refresh_body,
+            "revoke": revoke_body,
+            "audit": store.audit_events()
+        }))
+        .unwrap_or_else(|error| panic!("codex oauth responses should serialize: {error}"))
+    }
+
+    fn assert_codex_oauth_secret_and_credential_state(
+        store: &InMemoryGatewayStore,
+        credential_id: &str,
+        token_secret_ref_id: &str,
+        session_body: &serde_json::Value,
+    ) {
+        assert_eq!(
+            store
+                .upstream_credential(credential_id)
+                .map(|credential| credential.credential_kind),
+            Some("codex_oauth".to_owned())
+        );
+        assert_eq!(
+            store
+                .upstream_credential(credential_id)
+                .map(|credential| credential.status),
+            Some(UpstreamCredentialStatus::Disabled)
+        );
+        assert_eq!(session_body["resource"]["token_secret_ref_id"], "sec_***");
+        assert_eq!(
+            session_body["resource"]["token_secret_fingerprint"],
+            store.secret_ref(token_secret_ref_id).map_or_else(
+                || panic!("token secret should exist"),
+                |secret_ref| { secret_ref.fingerprint }
+            )
+        );
+        assert!(store.audit_events().iter().any(|event| {
+            event.event_type == "gateway.codex_oauth_session.start"
+                && event.redacted_diff["token_secret_ref_id"] == "sec_***"
+                && event.redacted_diff["token_material_included"] == false
+        }));
     }
 
     async fn create_upstream_credential_over_http(

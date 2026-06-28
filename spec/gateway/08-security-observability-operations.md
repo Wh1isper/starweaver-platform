@@ -320,13 +320,21 @@ error class, and region.
 
 Metric export requirements:
 
-- support OTLP/gRPC or OTLP/HTTP depending on the deployment profile
+- support OTLP/HTTP first, with `otlp_grpc` requiring a real gRPC transport
+  before it is reported as delivered
 - support periodic export interval, timeout, and retry configuration
 - tolerate collector outages without blocking model requests
 - expose exporter failure count and dropped metric count
 - redact secret-like labels and resource attributes before export
 - support exemplars only when prompt, response, and secret data cannot leak
 - keep metric schema names and units versioned in docs and OpenAPI examples
+
+OTLP/HTTP requests use bounded JSON payloads and secret-backed headers from
+`OpenTelemetryExportConfig`. Export evidence records response status class,
+failure counts, dropped metric counts, and last successful export timestamp. It
+must not store collector auth header values, raw prompts, raw responses, or raw
+provider payloads. Local and test profiles may use loopback HTTP collectors for
+deterministic integration tests; production collector endpoints must use HTTPS.
 
 `OpenTelemetryExportConfig` is the admin-managed resource for exporting
 telemetry to an operator-owned collector/backend.

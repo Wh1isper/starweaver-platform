@@ -571,6 +571,39 @@ pub struct LoginProviderRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Durable one-time external login attempt metadata.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LoginAttemptRecord {
+    /// Stable login attempt id.
+    pub login_attempt_id: String,
+    /// Owning tenant.
+    pub tenant_id: TenantId,
+    /// Login provider used to start the attempt.
+    pub login_provider_id: String,
+    /// Provider adapter kind.
+    pub provider_kind: String,
+    /// Hash of the raw OAuth/OIDC state value.
+    pub state_hash: String,
+    /// Hash of the raw OIDC nonce when the provider requires one.
+    pub nonce_hash: Option<String>,
+    /// Hash of the raw PKCE code verifier.
+    pub code_verifier_hash: String,
+    /// Public PKCE S256 challenge sent to the provider.
+    pub code_challenge: String,
+    /// Redirect URI used for the authorization request.
+    pub redirect_uri: String,
+    /// Attempt lifecycle status.
+    pub status: String,
+    /// Expiry timestamp.
+    pub expires_at: DateTime<Utc>,
+    /// Consumption timestamp when the callback succeeds.
+    pub consumed_at: Option<DateTime<Utc>>,
+    /// Creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Update timestamp.
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Durable organization membership metadata.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct OrganizationMembershipRecord {
@@ -1030,6 +1063,156 @@ pub struct UpstreamCredentialRecord {
     pub created_by: PrincipalId,
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
+    /// Update timestamp.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Codex upstream OAuth connection state.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexOAuthConnectionStatus {
+    /// Connection exists but has no usable OAuth token.
+    Unauthenticated,
+    /// A login/device session is active.
+    LoginPending,
+    /// Token material is usable or refreshable.
+    Active,
+    /// Token material cannot be refreshed without reconnecting.
+    Expired,
+    /// A transient or unknown auth problem occurred.
+    Error,
+    /// Admin disabled runtime use.
+    Disabled,
+}
+
+impl CodexOAuthConnectionStatus {
+    /// Returns the stable status label.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unauthenticated => "unauthenticated",
+            Self::LoginPending => "login_pending",
+            Self::Active => "active",
+            Self::Expired => "expired",
+            Self::Error => "error",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+/// Codex upstream OAuth session state.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexOAuthSessionStatus {
+    /// Device login is pending.
+    LoginPending,
+    /// Session completed and token material is active.
+    Active,
+    /// Session was revoked.
+    Revoked,
+    /// Session expired.
+    Expired,
+    /// Session encountered an auth error.
+    Error,
+}
+
+impl CodexOAuthSessionStatus {
+    /// Returns the stable status label.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::LoginPending => "login_pending",
+            Self::Active => "active",
+            Self::Revoked => "revoked",
+            Self::Expired => "expired",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// Durable Codex upstream OAuth connection metadata. Token material is never
+/// stored on this record.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CodexOAuthConnectionRecord {
+    /// Stable Codex OAuth connection id.
+    pub codex_oauth_connection_id: String,
+    /// Owning tenant.
+    pub tenant_id: TenantId,
+    /// Optional organization boundary.
+    pub organization_id: Option<OrganizationId>,
+    /// Compatible Codex provider endpoint.
+    pub provider_endpoint_id: String,
+    /// Current upstream credential produced by the active session.
+    pub upstream_credential_id: Option<String>,
+    /// Admin-visible display name.
+    pub display_name: String,
+    /// Connection lifecycle status.
+    pub status: CodexOAuthConnectionStatus,
+    /// Resource version for optimistic concurrency.
+    pub resource_version: i64,
+    /// Schema version that wrote this record.
+    pub schema_version: u16,
+    /// Creating actor.
+    pub created_by: PrincipalId,
+    /// Creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Update timestamp.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Durable Codex upstream OAuth session metadata. Token material is referenced
+/// through a secret ref only.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CodexOAuthSessionRecord {
+    /// Stable Codex OAuth session id.
+    pub codex_oauth_session_id: String,
+    /// Owning tenant.
+    pub tenant_id: TenantId,
+    /// Parent Codex OAuth connection.
+    pub codex_oauth_connection_id: String,
+    /// Upstream credential created for the token secret ref.
+    pub upstream_credential_id: String,
+    /// Secret ref holding the encrypted token bundle.
+    pub token_secret_ref_id: String,
+    /// Token expiry when known.
+    pub token_expires_at: Option<DateTime<Utc>>,
+    /// Session lifecycle status.
+    pub status: CodexOAuthSessionStatus,
+    /// Resource version for optimistic concurrency.
+    pub resource_version: i64,
+    /// Schema version that wrote this record.
+    pub schema_version: u16,
+    /// Creating actor.
+    pub created_by: PrincipalId,
+    /// Revocation timestamp.
+    pub revoked_at: Option<DateTime<Utc>>,
+    /// Creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Update timestamp.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Safe Codex OAuth refresh status metadata.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CodexOAuthRefreshStatusRecord {
+    /// Stable refresh status id.
+    pub codex_oauth_refresh_status_id: String,
+    /// Owning tenant.
+    pub tenant_id: TenantId,
+    /// Parent Codex OAuth connection.
+    pub codex_oauth_connection_id: String,
+    /// Current upstream credential when active.
+    pub upstream_credential_id: Option<String>,
+    /// Current connection status.
+    pub status: CodexOAuthConnectionStatus,
+    /// Last refresh timestamp when a refresh worker has run.
+    pub last_refresh_at: Option<DateTime<Utc>>,
+    /// Next scheduled refresh timestamp when known.
+    pub next_refresh_at: Option<DateTime<Utc>>,
+    /// Token expiry when known.
+    pub token_expires_at: Option<DateTime<Utc>>,
+    /// Safe error class, never raw provider payload.
+    pub last_error: Option<String>,
     /// Update timestamp.
     pub updated_at: DateTime<Utc>,
 }

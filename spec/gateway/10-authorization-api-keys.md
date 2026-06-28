@@ -364,7 +364,8 @@ REST endpoints require action checks before accessing storage.
 | `/admin/v1/upstream-credentials/*`                                                     | `gateway.upstream_credential.read`, `gateway.upstream_credential.write`, `gateway.upstream_credential.rotate`          |
 | `/admin/v1/secret-refs/*`                                                              | `gateway.secret_ref.read`, `gateway.secret_ref.write`, `gateway.secret_ref.locator.read` for strong-auth locator reads |
 | `/admin/v1/codex/oauth/connections/*`                                                  | `gateway.codex_oauth_connection.read`, `gateway.codex_oauth_connection.write`                                          |
-| `/admin/v1/codex/oauth/sessions/*`                                                     | `gateway.codex_oauth_session.read`, `gateway.codex_oauth_session.start`, `gateway.codex_oauth_session.revoke`          |
+| `/admin/v1/codex/oauth/connections/{id}/sessions/*`                                    | `gateway.codex_oauth_session.read`, `gateway.codex_oauth_session.start`                                                |
+| `/admin/v1/codex/oauth/sessions/*`                                                     | `gateway.codex_oauth_session.read`, `gateway.codex_oauth_session.revoke`                                               |
 | `/admin/v1/codex/oauth/refresh-status/*`                                               | `gateway.codex_oauth_refresh.read`                                                                                     |
 | `/admin/v1/provider-grants/*`                                                          | `gateway.provider_grant.read`, `gateway.provider_grant.write`                                                          |
 | `/admin/v1/model-targets/*`                                                            | `gateway.model_target.read`, `gateway.model_target.write`                                                              |
