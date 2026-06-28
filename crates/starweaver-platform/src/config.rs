@@ -9,6 +9,11 @@ pub const DEFAULT_PLATFORM_LISTEN_ADDR: &str = "127.0.0.1:8090";
 
 /// Default platform environment profile.
 pub const DEFAULT_PLATFORM_ENVIRONMENT: &str = "local";
+const DEFAULT_PLATFORM_MAX_BODY_BYTES: usize = 1024 * 1024;
+const MAX_PLATFORM_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_PLATFORM_REQUEST_TIMEOUT_MS: u64 = 30_000;
+const MIN_PLATFORM_REQUEST_TIMEOUT_MS: u64 = 100;
+const MAX_PLATFORM_REQUEST_TIMEOUT_MS: u64 = 300_000;
 
 /// Platform service startup configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,6 +26,10 @@ pub struct PlatformConfig {
     pub database_url: Option<String>,
     /// Repository backend selected for request handling.
     pub repository_backend: PlatformRepositoryBackendKind,
+    /// Maximum accepted request body bytes.
+    pub max_body_bytes: usize,
+    /// Maximum inbound request handling time in milliseconds.
+    pub request_timeout_ms: u64,
     /// Optional local single-user password login configuration.
     pub single_user_auth: Option<PlatformSingleUserConfig>,
 }
@@ -32,6 +41,8 @@ impl Default for PlatformConfig {
             environment: DEFAULT_PLATFORM_ENVIRONMENT.to_owned(),
             database_url: None,
             repository_backend: PlatformRepositoryBackendKind::InMemory,
+            max_body_bytes: DEFAULT_PLATFORM_MAX_BODY_BYTES,
+            request_timeout_ms: DEFAULT_PLATFORM_REQUEST_TIMEOUT_MS,
             single_user_auth: None,
         }
     }
@@ -58,6 +69,20 @@ impl PlatformConfig {
         if let Ok(value) = std::env::var("STARWEAVER_PLATFORM_REPOSITORY_BACKEND") {
             if let Some(backend) = parse_platform_repository_backend(&value) {
                 config.repository_backend = backend;
+            }
+        }
+        if let Ok(value) = std::env::var("STARWEAVER_PLATFORM_MAX_BODY_BYTES") {
+            if let Ok(parsed) = value.parse::<usize>() {
+                config.max_body_bytes = parsed;
+            }
+        }
+        if let Ok(value) = std::env::var("STARWEAVER_PLATFORM_REQUEST_TIMEOUT_MS") {
+            if let Ok(parsed) = value.parse::<u64>() {
+                if (MIN_PLATFORM_REQUEST_TIMEOUT_MS..=MAX_PLATFORM_REQUEST_TIMEOUT_MS)
+                    .contains(&parsed)
+                {
+                    config.request_timeout_ms = parsed;
+                }
             }
         }
         config.single_user_auth = single_user_auth_from_env();
@@ -327,6 +352,20 @@ fn push_production_diagnostics(
             "production requires STARWEAVER_PLATFORM_DATABASE_URL",
         ));
     }
+    if config.max_body_bytes == 0 || config.max_body_bytes > MAX_PLATFORM_MAX_BODY_BYTES {
+        diagnostics.push(PlatformStartupDiagnostic::new(
+            "body_limit_invalid",
+            "production requires a positive request body limit no larger than 16 MiB",
+        ));
+    }
+    if !(MIN_PLATFORM_REQUEST_TIMEOUT_MS..=MAX_PLATFORM_REQUEST_TIMEOUT_MS)
+        .contains(&config.request_timeout_ms)
+    {
+        diagnostics.push(PlatformStartupDiagnostic::new(
+            "request_timeout_invalid",
+            "production requires an inbound request timeout between 100 ms and 300000 ms",
+        ));
+    }
 }
 
 fn non_empty_env(value: &str) -> Option<String> {
@@ -348,11 +387,13 @@ mod tests {
     };
     use crate::service::PlatformRepositoryBackendKind;
 
-    const ENV_KEYS: [&str; 8] = [
+    const ENV_KEYS: [&str; 10] = [
         "STARWEAVER_PLATFORM_LISTEN_ADDR",
         "STARWEAVER_PLATFORM_ENV",
         "STARWEAVER_PLATFORM_DATABASE_URL",
         "STARWEAVER_PLATFORM_REPOSITORY_BACKEND",
+        "STARWEAVER_PLATFORM_MAX_BODY_BYTES",
+        "STARWEAVER_PLATFORM_REQUEST_TIMEOUT_MS",
         "STARWEAVER_PLATFORM_SINGLE_USER_USERNAME",
         "STARWEAVER_PLATFORM_SINGLE_USER_PASSWORD",
         "STARWEAVER_PLATFORM_SINGLE_USER_EMAIL",
@@ -388,6 +429,8 @@ mod tests {
             config.repository_backend,
             PlatformRepositoryBackendKind::InMemory
         );
+        assert_eq!(config.max_body_bytes, 1024 * 1024);
+        assert_eq!(config.request_timeout_ms, 30_000);
         assert!(config.single_user_auth.is_none());
         assert!(validate_platform_config(&config).is_ok());
     }
@@ -405,6 +448,8 @@ mod tests {
             " postgres://platform@example/platform ",
         );
         std::env::set_var("STARWEAVER_PLATFORM_REPOSITORY_BACKEND", "PostgreSQL");
+        std::env::set_var("STARWEAVER_PLATFORM_MAX_BODY_BYTES", "2048");
+        std::env::set_var("STARWEAVER_PLATFORM_REQUEST_TIMEOUT_MS", "2500");
 
         let config = PlatformConfig::from_env();
         clear_platform_env();
@@ -419,6 +464,8 @@ mod tests {
             config.repository_backend,
             PlatformRepositoryBackendKind::Postgres
         );
+        assert_eq!(config.max_body_bytes, 2048);
+        assert_eq!(config.request_timeout_ms, 2500);
         assert!(validate_platform_config(&config).is_ok());
     }
 
@@ -432,6 +479,7 @@ mod tests {
         std::env::set_var("STARWEAVER_PLATFORM_ENV", " ");
         std::env::set_var("STARWEAVER_PLATFORM_DATABASE_URL", " ");
         std::env::set_var("STARWEAVER_PLATFORM_REPOSITORY_BACKEND", "unknown");
+        std::env::set_var("STARWEAVER_PLATFORM_REQUEST_TIMEOUT_MS", "99");
 
         let config = PlatformConfig::from_env();
         clear_platform_env();
@@ -548,6 +596,24 @@ mod tests {
         };
 
         assert_eq!(diagnostic_codes(&config), vec!["database_url_required"]);
+        assert!(validate_platform_config(&config).is_err());
+    }
+
+    #[test]
+    fn production_rejects_invalid_request_controls() {
+        let config = PlatformConfig {
+            environment: "prod".to_owned(),
+            database_url: Some("postgres://platform@example/platform".to_owned()),
+            repository_backend: PlatformRepositoryBackendKind::Postgres,
+            max_body_bytes: 0,
+            request_timeout_ms: 99,
+            ..PlatformConfig::default()
+        };
+
+        assert_eq!(
+            diagnostic_codes(&config),
+            vec!["body_limit_invalid", "request_timeout_invalid"]
+        );
         assert!(validate_platform_config(&config).is_err());
     }
 

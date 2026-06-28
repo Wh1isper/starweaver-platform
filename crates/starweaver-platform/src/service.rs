@@ -5,10 +5,11 @@ use std::fmt::{Display, Formatter};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::body::{to_bytes, Body};
+use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
-use axum::http::{HeaderMap, Method, Request, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -94,9 +95,12 @@ const OIDC_CALLBACK_SESSION_TOKEN_PREFIX: &str = "swp_sess_";
 const OIDC_HTTP_TIMEOUT_SECONDS: u64 = 10;
 const OIDC_LOGIN_ATTEMPT_TTL_SECONDS: i64 = 600;
 const ORGANIZATION_INVITATION_TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
+const REQUEST_ID_HEADER: &str = "x-starweaver-platform-request-id";
+const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024;
+const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
 
 /// HTTP foundation service state.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct PlatformServiceState {
     owners: InMemoryResourceOwnerStore,
     auth_sessions: InMemoryPlatformAuthSessionStore,
@@ -115,7 +119,18 @@ pub struct PlatformServiceState {
     repository_backend: PlatformRepositoryBackendKind,
     postgres_repository: Option<PostgresPlatformRepository>,
     single_user_auth: Option<PlatformSingleUserConfig>,
+    max_body_bytes: usize,
+    request_timeout_ms: u64,
     authorization: FoundationAuthorizationEngine,
+}
+
+impl Default for PlatformServiceState {
+    fn default() -> Self {
+        Self::new(
+            InMemoryResourceOwnerStore::new(),
+            FoundationAuthorizationEngine::new(Vec::new()),
+        )
+    }
 }
 
 /// Platform service repository backend selected for HTTP request handling.
@@ -505,6 +520,8 @@ impl PlatformServiceState {
             repository_backend: PlatformRepositoryBackendKind::InMemory,
             postgres_repository: None,
             single_user_auth: None,
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             authorization,
         }
     }
@@ -533,6 +550,8 @@ impl PlatformServiceState {
             repository_backend: PlatformRepositoryBackendKind::Postgres,
             postgres_repository: Some(postgres_repository),
             single_user_auth: None,
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             authorization,
         }
     }
@@ -544,6 +563,18 @@ impl PlatformServiceState {
         single_user_auth: Option<PlatformSingleUserConfig>,
     ) -> Self {
         self.single_user_auth = single_user_auth;
+        self
+    }
+
+    /// Returns a copy of this state with HTTP request controls configured.
+    #[must_use]
+    pub const fn with_request_controls(
+        mut self,
+        max_body_bytes: usize,
+        request_timeout_ms: u64,
+    ) -> Self {
+        self.max_body_bytes = max_body_bytes;
+        self.request_timeout_ms = request_timeout_ms;
         self
     }
 
@@ -614,6 +645,18 @@ impl PlatformServiceState {
     #[must_use]
     pub const fn single_user_auth(&self) -> Option<&PlatformSingleUserConfig> {
         self.single_user_auth.as_ref()
+    }
+
+    /// Returns the configured maximum request body size.
+    #[must_use]
+    pub const fn max_body_bytes(&self) -> usize {
+        self.max_body_bytes
+    }
+
+    /// Returns the configured inbound request timeout.
+    #[must_use]
+    pub const fn request_timeout_ms(&self) -> u64 {
+        self.request_timeout_ms
     }
 
     /// Returns the resource owner store.
@@ -789,7 +832,8 @@ pub async fn build_platform_service_state(
             InMemoryResourceOwnerStore::new(),
             authorization,
         )
-        .with_single_user_auth(config.single_user_auth.clone())),
+        .with_single_user_auth(config.single_user_auth.clone())
+        .with_request_controls(config.max_body_bytes, config.request_timeout_ms)),
         PlatformRepositoryBackendKind::Postgres => {
             let database_url = config
                 .database_url
@@ -812,7 +856,8 @@ pub async fn build_platform_service_state(
             }
             Ok(
                 PlatformServiceState::with_postgres_repository(repository, authorization)
-                    .with_single_user_auth(config.single_user_auth.clone()),
+                    .with_single_user_auth(config.single_user_auth.clone())
+                    .with_request_controls(config.max_body_bytes, config.request_timeout_ms),
             )
         }
     }
@@ -892,11 +937,92 @@ async fn shutdown_signal() {
 /// platform-local stores. Production entrypoints can replace the in-memory
 /// stores with durable resolvers without changing route ownership authorization.
 pub fn router(state: PlatformServiceState) -> Router {
+    let max_body_bytes = state.max_body_bytes();
     health_routes()
         .merge(admin_routes())
         .merge(auth_routes())
         .fallback(dispatch_foundation_request)
+        .layer(DefaultBodyLimit::max(max_body_bytes))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            request_timeout_middleware,
+        ))
+        .layer(middleware::from_fn(request_id_middleware))
         .with_state(state)
+}
+
+async fn request_id_middleware(mut request: Request<Body>, next: Next) -> Response {
+    let request_id = request
+        .headers()
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| is_safe_request_id(value))
+        .map_or_else(new_request_id, ToOwned::to_owned);
+    if let Ok(value) = HeaderValue::from_str(&request_id) {
+        request.headers_mut().insert(REQUEST_ID_HEADER, value);
+    }
+    let response = next.run(request).await;
+    let mut response = inject_request_id_into_error_envelope(response, &request_id).await;
+    if let Ok(value) = HeaderValue::from_str(&request_id) {
+        response.headers_mut().insert(REQUEST_ID_HEADER, value);
+    }
+    response
+}
+
+async fn request_timeout_middleware(
+    State(state): State<PlatformServiceState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let timeout = Duration::from_millis(state.request_timeout_ms());
+    tokio::time::timeout(timeout, next.run(request))
+        .await
+        .unwrap_or_else(|_| ServiceError::RequestTimeout.into_response())
+}
+
+async fn inject_request_id_into_error_envelope(response: Response, request_id: &str) -> Response {
+    if !response.status().is_client_error() && !response.status().is_server_error() {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = to_bytes(body, DEFAULT_MAX_BODY_BYTES).await else {
+        return Response::from_parts(parts, Body::empty());
+    };
+    let Ok(mut value) = serde_json::from_slice::<Value>(&bytes) else {
+        return Response::from_parts(parts, Body::from(bytes));
+    };
+    if value.get("schema").and_then(Value::as_str) != Some("platform.error.v1") {
+        return Response::from_parts(parts, Body::from(bytes));
+    }
+    if let Some(error) = value.get_mut("error").and_then(Value::as_object_mut) {
+        error.insert("request_id".to_owned(), json!(request_id));
+    }
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    Response::from_parts(parts, Body::from(value.to_string()))
+}
+
+fn new_request_id() -> String {
+    let mut bytes = [0_u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    let mut value = String::with_capacity(36);
+    value.push_str("req_");
+    for byte in bytes {
+        value.push(char::from(b"0123456789abcdef"[usize::from(byte >> 4)]));
+        value.push(char::from(b"0123456789abcdef"[usize::from(byte & 0x0f)]));
+    }
+    value
+}
+
+fn is_safe_request_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
 fn health_routes() -> Router<PlatformServiceState> {
@@ -5785,6 +5911,7 @@ enum ServiceError {
     BadRequest(&'static str),
     Forbidden(&'static str),
     Internal(&'static str),
+    RequestTimeout,
     ResourceNotFound,
     RouteNotFound,
 }
@@ -5797,6 +5924,7 @@ impl IntoResponse for ServiceError {
             Self::BadRequest(code) => (StatusCode::BAD_REQUEST, code),
             Self::Forbidden(code) => (StatusCode::FORBIDDEN, code),
             Self::Internal(code) => (StatusCode::INTERNAL_SERVER_ERROR, code),
+            Self::RequestTimeout => (StatusCode::REQUEST_TIMEOUT, "platform.request.timeout"),
             Self::ResourceNotFound => (StatusCode::NOT_FOUND, "resource_not_found"),
             Self::RouteNotFound => (StatusCode::NOT_FOUND, "route_not_found"),
         };
@@ -5953,6 +6081,8 @@ mod tests {
     use axum::body::{to_bytes, Body};
     use axum::http::header::AUTHORIZATION;
     use axum::http::{Method, Request, StatusCode};
+    use axum::routing::get;
+    use axum::Router;
     use jsonwebtoken::jwk::{Jwk, JwkSet, PublicKeyUse};
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
     use serde_json::{json, Value};
@@ -6115,6 +6245,114 @@ mod tests {
         assert_eq!(version.body["schema"], "platform.version.v1");
         assert_eq!(version.body["service"], crate::SERVICE_NAME);
         assert_eq!(version.body["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[tokio::test]
+    async fn request_id_header_is_preserved_when_safe() {
+        let response = router(PlatformServiceState::default())
+            .oneshot(
+                Request::builder()
+                    .uri("/version")
+                    .header(super::REQUEST_ID_HEADER, "req_platform_test")
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("request should build: {error}")),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("request should complete: {error}"));
+
+        let header = response
+            .headers()
+            .get(super::REQUEST_ID_HEADER)
+            .and_then(|value| value.to_str().ok());
+        assert_eq!(header, Some("req_platform_test"));
+    }
+
+    #[tokio::test]
+    async fn unsafe_request_id_header_is_replaced_in_error_envelope() {
+        let response = router(PlatformServiceState::default())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/conversations/conv_missing")
+                    .header(super::REQUEST_ID_HEADER, "bad request id")
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("request should build: {error}")),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("request should complete: {error}"));
+        let request_id_header = response
+            .headers()
+            .get(super::REQUEST_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map_or_else(
+                || panic!("request id header should be present"),
+                str::to_owned,
+            );
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap_or_else(|error| panic!("response body should read: {error}"));
+        let body = serde_json::from_slice::<Value>(&body).unwrap_or_else(|error| {
+            panic!(
+                "response body should be json: status={status}, body={:?}, error={error}",
+                String::from_utf8_lossy(&body)
+            )
+        });
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(request_id_header.starts_with("req_"));
+        assert_ne!(request_id_header, "bad request id");
+        assert_eq!(body["schema"], "platform.error.v1");
+        assert_eq!(body["error"]["code"], "authentication_required");
+        assert_eq!(body["error"]["request_id"], request_id_header);
+    }
+
+    #[tokio::test]
+    async fn request_timeout_returns_error_envelope_with_request_id() {
+        async fn slow_handler() -> &'static str {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            "late"
+        }
+
+        let state = PlatformServiceState::default().with_request_controls(1024 * 1024, 1);
+        let response = Router::new()
+            .route("/slow", get(slow_handler))
+            .layer(axum::extract::DefaultBodyLimit::max(state.max_body_bytes()))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                super::request_timeout_middleware,
+            ))
+            .layer(axum::middleware::from_fn(super::request_id_middleware))
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/slow")
+                    .header(super::REQUEST_ID_HEADER, "req_platform_timeout")
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("request should build: {error}")),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("request should complete: {error}"));
+        let request_id_header = response
+            .headers()
+            .get(super::REQUEST_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap_or_else(|error| panic!("response body should read: {error}"));
+        let body = serde_json::from_slice::<Value>(&body).unwrap_or_else(|error| {
+            panic!(
+                "response body should be json: status={status}, body={:?}, error={error}",
+                String::from_utf8_lossy(&body)
+            )
+        });
+
+        assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(request_id_header.as_deref(), Some("req_platform_timeout"));
+        assert_eq!(body["schema"], "platform.error.v1");
+        assert_eq!(body["error"]["code"], "platform.request.timeout");
+        assert_eq!(body["error"]["request_id"], "req_platform_timeout");
     }
 
     #[tokio::test]
@@ -9416,8 +9654,12 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap_or_else(|error| panic!("response body should read: {error}"));
-        let body = serde_json::from_slice::<Value>(&body)
-            .unwrap_or_else(|error| panic!("response body should be json: {error}"));
+        let body = serde_json::from_slice::<Value>(&body).unwrap_or_else(|error| {
+            panic!(
+                "response body should be json: status={status}, body={:?}, error={error}",
+                String::from_utf8_lossy(&body)
+            )
+        });
         JsonResponse { status, body }
     }
 
@@ -9444,8 +9686,12 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap_or_else(|error| panic!("response body should read: {error}"));
-        let body = serde_json::from_slice::<Value>(&body)
-            .unwrap_or_else(|error| panic!("response body should be json: {error}"));
+        let body = serde_json::from_slice::<Value>(&body).unwrap_or_else(|error| {
+            panic!(
+                "response body should be json: status={status}, body={:?}, error={error}",
+                String::from_utf8_lossy(&body)
+            )
+        });
         JsonResponse { status, body }
     }
 

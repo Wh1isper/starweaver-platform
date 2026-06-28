@@ -592,6 +592,65 @@
         "x-starweaver-protocol-family": null
       }
     },
+    "/admin/v1/route-simulations": {
+      "post": {
+        "operationId": "gateway_post_admin_v1_route_simulations_gateway_route_simulation_run",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "POST /admin/v1/route-simulations",
+        "parameters": [],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "gateway.route_simulation.run",
+        "x-starweaver-resource-kind": "RouteSimulation",
+        "x-starweaver-scope-params": [
+          "tenant_id",
+          "alias_name",
+          "protocol_family"
+        ],
+        "x-starweaver-allow-api-key": true,
+        "x-starweaver-strong-auth-required": false,
+        "x-starweaver-audit-event-type": "gateway.route_simulation.run",
+        "x-starweaver-protocol-family": null
+      }
+    },
     "/admin/v1/audit/events": {
       "get": {
         "operationId": "gateway_get_admin_v1_audit_events_gateway_audit_read",

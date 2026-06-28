@@ -236,6 +236,8 @@ The first startup configuration gate is also platform-local. It reads:
 - `STARWEAVER_PLATFORM_ENV`
 - `STARWEAVER_PLATFORM_DATABASE_URL`
 - `STARWEAVER_PLATFORM_REPOSITORY_BACKEND`
+- `STARWEAVER_PLATFORM_MAX_BODY_BYTES`
+- `STARWEAVER_PLATFORM_REQUEST_TIMEOUT_MS`
 
 The default profile is local and uses the `in_memory` backend for deterministic
 contract tests. Production profiles (`prod` or `production`) must select the
@@ -244,6 +246,9 @@ Selecting `postgres` in any environment requires a database URL so a future
 binary entrypoint cannot silently build a durable backend without a durable
 connection. The startup diagnostic model reports all unsafe settings together
 instead of failing at the first missing value.
+Platform HTTP requests are bounded by a configurable body limit and inbound
+request timeout. Production validation rejects a zero or oversized body limit
+and request timeouts outside the supported 100 ms to 300000 ms range.
 
 The first binary entrypoint follows the same boundary:
 

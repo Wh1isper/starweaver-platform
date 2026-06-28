@@ -199,6 +199,17 @@ const FOUNDATION_ROUTES: &[RouteMetadata] = &[
         audit_event_type: "gateway.config.validation_diagnostic.read",
     },
     RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/route-simulations",
+        protocol_family: None,
+        action: GatewayAction::RouteSimulationRun,
+        resource_kind: "RouteSimulation",
+        scope_params: &["tenant_id", "alias_name", "protocol_family"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.route_simulation.run",
+    },
+    RouteMetadata {
         method: Method::GET,
         path_pattern: "/admin/v1/audit/events",
         protocol_family: None,

@@ -174,6 +174,10 @@ migrations are applied, and checks that the Redis-compatible hot-state endpoint
 accepts TCP connections. Secret backend and telemetry readiness remain
 profile-level checks until backend-specific clients are wired in.
 
+Inbound request handling is bounded by
+`STARWEAVER_GATEWAY_REQUEST_TIMEOUT_MS`, which defaults to 30000 ms and accepts
+values from 100 ms to 300000 ms.
+
 ## Gateway Export Objects
 
 Export jobs support three v1 storage choices:

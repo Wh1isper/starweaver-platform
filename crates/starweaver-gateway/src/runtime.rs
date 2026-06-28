@@ -53,6 +53,67 @@ pub struct FakeProviderReplayEvidence {
     pub occurred_at: DateTime<Utc>,
 }
 
+/// Deterministic fake-provider outcome used by replay and harness tests.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FakeProviderReplayOutcome {
+    /// Provider returned a protocol-compatible success response.
+    Success,
+    /// Provider returned a non-retryable upstream error.
+    ProviderError,
+    /// Provider rejected the request with a retryable throttle signal.
+    Throttled,
+    /// Gateway timed out waiting for the provider.
+    Timeout,
+    /// Provider returned malformed streaming bytes before completion.
+    MalformedStream,
+    /// Client disconnected before the fake provider completed.
+    ClientDisconnected,
+}
+
+impl FakeProviderReplayOutcome {
+    /// Stable outcome id.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::ProviderError => "provider_error",
+            Self::Throttled => "throttled",
+            Self::Timeout => "timeout",
+            Self::MalformedStream => "malformed_stream",
+            Self::ClientDisconnected => "client_disconnected",
+        }
+    }
+
+    /// Whether this outcome represents a retryable provider-side failure.
+    #[must_use]
+    pub const fn retryable(self) -> bool {
+        matches!(
+            self,
+            Self::Throttled | Self::Timeout | Self::MalformedStream
+        )
+    }
+}
+
+/// Request for running a deterministic fake-provider replay with an outcome.
+pub struct FakeProviderReplayOutcomeRequest<'a> {
+    /// Replay case metadata.
+    pub replay_case: &'a GatewayReplayCase,
+    /// Authorization engine used by the route.
+    pub engine: &'a dyn AuthorizationEngine,
+    /// Evidence sink used to record authorization decisions.
+    pub sink: &'a dyn AuthorizationEvidenceSink,
+    /// Authenticated actor.
+    pub actor: AuthenticatedActor,
+    /// Selected fake-provider target.
+    pub target: &'a FakeProviderReplayTarget,
+    /// Request body.
+    pub body: &'a Value,
+    /// Authorization evidence context.
+    pub evidence: FakeProviderReplayEvidence,
+    /// Provider outcome to apply after authorization.
+    pub outcome: FakeProviderReplayOutcome,
+}
+
 /// Authorization result for a replay target before the provider is invoked.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FakeProviderAuthorization {
@@ -103,12 +164,35 @@ pub fn run_fake_provider_replay_for_target(
     body: &Value,
     evidence: FakeProviderReplayEvidence,
 ) -> Result<RuntimeIngressResponse> {
-    let authorization =
-        authorize_fake_provider_replay_target(replay_case, engine, sink, actor, target, evidence)?;
-    Ok(fake_provider_response_for_authorization(
-        &authorization,
+    run_fake_provider_replay_for_target_with_outcome(FakeProviderReplayOutcomeRequest {
+        replay_case,
+        engine,
+        sink,
+        actor,
         target,
         body,
+        evidence,
+        outcome: FakeProviderReplayOutcome::Success,
+    })
+}
+
+/// Runs a deterministic fake-provider request with an explicit provider outcome.
+pub fn run_fake_provider_replay_for_target_with_outcome(
+    request: FakeProviderReplayOutcomeRequest<'_>,
+) -> Result<RuntimeIngressResponse> {
+    let authorization = authorize_fake_provider_replay_target(
+        request.replay_case,
+        request.engine,
+        request.sink,
+        request.actor,
+        request.target,
+        request.evidence,
+    )?;
+    Ok(fake_provider_response_for_authorization_with_outcome(
+        &authorization,
+        request.target,
+        request.body,
+        request.outcome,
     ))
 }
 
@@ -149,6 +233,22 @@ pub fn fake_provider_response_for_authorization(
     target: &FakeProviderReplayTarget,
     body: &Value,
 ) -> RuntimeIngressResponse {
+    fake_provider_response_for_authorization_with_outcome(
+        authorization,
+        target,
+        body,
+        FakeProviderReplayOutcome::Success,
+    )
+}
+
+/// Builds the fake provider response for an explicit deterministic outcome.
+#[must_use]
+pub fn fake_provider_response_for_authorization_with_outcome(
+    authorization: &FakeProviderAuthorization,
+    target: &FakeProviderReplayTarget,
+    body: &Value,
+    outcome: FakeProviderReplayOutcome,
+) -> RuntimeIngressResponse {
     if !authorization.authorization.allowed {
         let reason = authorization.authorization.reason;
         return RuntimeIngressResponse {
@@ -164,6 +264,15 @@ pub fn fake_provider_response_for_authorization(
         };
     }
 
+    if outcome != FakeProviderReplayOutcome::Success {
+        return RuntimeIngressResponse {
+            protocol_family: authorization.protocol_family,
+            authorization: authorization.authorization.clone(),
+            body: fake_provider_error_body(outcome, authorization.streaming),
+            streaming: authorization.streaming,
+        };
+    }
+
     RuntimeIngressResponse {
         protocol_family: authorization.protocol_family,
         authorization: authorization.authorization.clone(),
@@ -175,6 +284,17 @@ pub fn fake_provider_response_for_authorization(
         ),
         streaming: authorization.streaming,
     }
+}
+
+fn fake_provider_error_body(outcome: FakeProviderReplayOutcome, streaming: bool) -> Value {
+    json!({
+        "error": {
+            "code": format!("gateway.fake_provider.{}", outcome.as_str()),
+            "outcome": outcome.as_str(),
+            "retryable": outcome.retryable(),
+            "streaming": streaming
+        }
+    })
 }
 
 fn route_for_replay(
@@ -303,7 +423,11 @@ mod tests {
     use crate::domain::{ActorKind, AuthenticatedActor, CredentialKind};
     use crate::replay::foundation_route_replay_cases;
     use crate::route::foundation_routes;
-    use crate::runtime::run_fake_provider_replay;
+    use crate::runtime::{
+        run_fake_provider_replay, run_fake_provider_replay_for_target_with_outcome,
+        FakeProviderReplayEvidence, FakeProviderReplayOutcome, FakeProviderReplayOutcomeRequest,
+        FakeProviderReplayTarget,
+    };
     use crate::storage::InMemoryGatewayStore;
     use crate::ProtocolFamily;
 
@@ -398,6 +522,56 @@ mod tests {
             "gateway.auth.authorization_denied"
         );
         assert_eq!(store.authorization_decisions().len(), 1);
+    }
+
+    #[test]
+    fn fake_provider_negative_outcomes_are_protocol_authorized_errors() {
+        let case = foundation_route_replay_cases()
+            .iter()
+            .find(|case| case.protocol_family == ProtocolFamily::OpenAiChat)
+            .unwrap_or_else(|| panic!("openai chat replay case should exist"));
+        for outcome in [
+            FakeProviderReplayOutcome::ProviderError,
+            FakeProviderReplayOutcome::Throttled,
+            FakeProviderReplayOutcome::Timeout,
+            FakeProviderReplayOutcome::MalformedStream,
+            FakeProviderReplayOutcome::ClientDisconnected,
+        ] {
+            let store = InMemoryGatewayStore::default();
+            let target = FakeProviderReplayTarget {
+                alias_resource_id: "ma_test".to_owned(),
+                upstream_model_id: "upstream_test".to_owned(),
+            };
+            let body = json!({"model": "ma_test", "stream": true});
+            let response = match run_fake_provider_replay_for_target_with_outcome(
+                FakeProviderReplayOutcomeRequest {
+                    replay_case: case,
+                    engine: &engine_for_case(case),
+                    sink: &store,
+                    actor: api_key_actor(),
+                    target: &target,
+                    body: &body,
+                    evidence: FakeProviderReplayEvidence {
+                        policy_snapshot_id: Some("cfg_test".to_owned()),
+                        occurred_at: chrono::Utc::now(),
+                    },
+                    outcome,
+                },
+            ) {
+                Ok(response) => response,
+                Err(error) => panic!("negative replay should return an error body: {error}"),
+            };
+
+            assert!(response.authorization.allowed);
+            assert_eq!(response.protocol_family, ProtocolFamily::OpenAiChat);
+            assert_eq!(response.body["error"]["outcome"], outcome.as_str());
+            assert_eq!(response.body["error"]["retryable"], outcome.retryable());
+            assert_eq!(response.body["error"]["streaming"], true);
+            assert_eq!(store.authorization_decisions().len(), 1);
+            assert!(store.authorization_decisions()[0]
+                .policy_snapshot_id
+                .is_some());
+        }
     }
 
     fn assert_provider_shape(protocol_family: ProtocolFamily, body: &serde_json::Value) {

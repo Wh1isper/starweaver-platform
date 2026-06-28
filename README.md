@@ -87,6 +87,11 @@ Generic OIDC login can be configured later through the admin identity-provider
 APIs. Non-OIDC OAuth providers such as GitHub OAuth App need an OIDC broker or
 a separate OAuth adapter before they can be used directly.
 
+Platform request handling uses bounded request controls. Override the defaults
+with `STARWEAVER_PLATFORM_MAX_BODY_BYTES` and
+`STARWEAVER_PLATFORM_REQUEST_TIMEOUT_MS` when a deployment needs tighter or
+looser HTTP limits.
+
 For local file-backed usage or audit exports, configure an absolute export
 object directory and request `storage_backend: file_object_storage`:
 

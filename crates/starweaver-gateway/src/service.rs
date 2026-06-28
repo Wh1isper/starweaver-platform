@@ -8,7 +8,7 @@ use axum::body::{to_bytes, Body};
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{header, Extensions, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use chrono::Datelike;
@@ -33,7 +33,7 @@ use crate::auth::{
     create_auth_session, resolve_user_session_actor, verify_api_key, verify_session_token,
     CreateAuthSessionRequest, ResolveUserSessionRequest,
 };
-use crate::catalog::{GatewayCatalogSnapshot, RoutePlanOutcome, RoutePlanRequest};
+use crate::catalog::{GatewayCatalogSnapshot, RoutePlanOutcome, RoutePlanRequest, RouteSelection};
 use crate::config::{
     publish_config_snapshot as publish_config_snapshot_document,
     rollback_config_snapshot as rollback_config_snapshot_document,
@@ -98,6 +98,7 @@ const PERCENT_HEX: &[u8; 16] = b"0123456789ABCDEF";
 const ADMIN_CONFIG_SNAPSHOT_GET_PATH: &str =
     concat!("/admin/v1/config/snapshots/", "{snapshot_id}");
 const ADMIN_CONFIG_VALIDATION_DIAGNOSTICS_PATH: &str = "/admin/v1/config/validation-diagnostics";
+const ADMIN_ROUTE_SIMULATION_LIST_PATH: &str = "/admin/v1/route-simulations";
 const ADMIN_AUDIT_EVENT_LIST_PATH: &str = "/admin/v1/audit/events";
 const ADMIN_EXPORT_JOB_LIST_PATH: &str = "/admin/v1/exports/jobs";
 const ADMIN_EXPORT_JOB_GET_PATH: &str = concat!("/admin/v1/exports/jobs/", "{export_job_id}");
@@ -371,6 +372,9 @@ const DEFAULT_BACKGROUND_WORKER_TICK_SECONDS: u64 = 30;
 const DEFAULT_NOTIFICATION_WORKER_BATCH_LIMIT: usize = 100;
 const DEFAULT_EXPORT_OBJECT_STORAGE_TIMEOUT_SECONDS: u64 = 10;
 const MAX_EXPORT_OBJECT_STORAGE_TIMEOUT_SECONDS: u64 = 60;
+const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
+const MIN_REQUEST_TIMEOUT_MS: u64 = 100;
+const MAX_REQUEST_TIMEOUT_MS: u64 = 300_000;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Gateway service configuration.
@@ -402,6 +406,8 @@ pub struct GatewayConfig {
     pub session_cookie_same_site: String,
     /// Maximum accepted request body bytes.
     pub max_body_bytes: usize,
+    /// Maximum inbound request handling time in milliseconds.
+    pub request_timeout_ms: u64,
     /// Dependency probe mode used by `/readyz`.
     pub dependency_probe_mode: DependencyProbeMode,
     /// Per-dependency readiness probe timeout in milliseconds.
@@ -580,6 +586,7 @@ impl Default for GatewayConfig {
             session_cookie_http_only: true,
             session_cookie_same_site: "lax".to_owned(),
             max_body_bytes: 1024 * 1024,
+            request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             dependency_probe_mode: DependencyProbeMode::Configured,
             readiness_probe_timeout_ms: 750,
             require_published_snapshot: false,
@@ -650,6 +657,13 @@ impl GatewayConfig {
         if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_MAX_BODY_BYTES") {
             if let Ok(parsed) = value.parse::<usize>() {
                 config.max_body_bytes = parsed;
+            }
+        }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_REQUEST_TIMEOUT_MS") {
+            if let Ok(parsed) = value.parse::<u64>() {
+                if (MIN_REQUEST_TIMEOUT_MS..=MAX_REQUEST_TIMEOUT_MS).contains(&parsed) {
+                    config.request_timeout_ms = parsed;
+                }
             }
         }
         if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_REQUIRE_SNAPSHOT") {
@@ -826,6 +840,12 @@ fn push_production_dependency_diagnostics(
         diagnostics.push(StartupDiagnostic {
             code: "body_limit_invalid",
             message: "production requires a positive request body limit no larger than 16 MiB",
+        });
+    }
+    if !(MIN_REQUEST_TIMEOUT_MS..=MAX_REQUEST_TIMEOUT_MS).contains(&config.request_timeout_ms) {
+        diagnostics.push(StartupDiagnostic {
+            code: "request_timeout_invalid",
+            message: "production requires an inbound request timeout between 100 ms and 300000 ms",
         });
     }
     if config
@@ -1053,6 +1073,10 @@ pub fn router(state: AppState) -> Router {
         .merge(auth_routes())
         .merge(admin_routes(&state))
         .layer(DefaultBodyLimit::max(max_body_bytes))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            request_timeout_middleware,
+        ))
         .layer(middleware::from_fn(request_id_middleware))
         .with_state(state)
 }
@@ -1097,6 +1121,7 @@ fn admin_routes(state: &AppState) -> Router<AppState> {
             ADMIN_CONFIG_VALIDATION_DIAGNOSTICS_PATH,
             get(list_validation_diagnostics),
         )
+        .route(ADMIN_ROUTE_SIMULATION_LIST_PATH, post(run_route_simulation))
         .route(ADMIN_AUDIT_EVENT_LIST_PATH, get(list_audit_events))
         .merge(dashboard_admin_routes())
         .merge(user_admin_routes())
@@ -1804,11 +1829,66 @@ async fn request_id_middleware(mut request: Request<Body>, next: Next) -> Respon
     if let Ok(value) = HeaderValue::from_str(&request_id) {
         request.headers_mut().insert(REQUEST_ID_HEADER, value);
     }
-    let mut response = next.run(request).await;
+    let response = next.run(request).await;
+    let mut response = inject_request_id_into_error_envelope(response, &request_id).await;
     if let Ok(value) = HeaderValue::from_str(&request_id) {
         response.headers_mut().insert(REQUEST_ID_HEADER, value);
     }
     response
+}
+
+async fn request_timeout_middleware(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let timeout = Duration::from_millis(state.config.request_timeout_ms);
+    tokio::time::timeout(timeout, next.run(request))
+        .await
+        .unwrap_or_else(|_| GatewayError::RequestTimeout.into_response())
+}
+
+async fn inject_request_id_into_error_envelope(response: Response, request_id: &str) -> Response {
+    if !response.status().is_client_error() && !response.status().is_server_error() {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let bytes = match to_bytes(body, 1024 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            parts.headers.remove(header::CONTENT_LENGTH);
+            return Response::from_parts(
+                parts,
+                Body::from(
+                    json!({
+                        "schema": "gateway.error.v1",
+                        "error": {
+                            "code": "gateway.internal",
+                            "message": format!("internal error: failed to read error body: {error}"),
+                            "retryable": true,
+                            "request_id": request_id
+                        }
+                    })
+                    .to_string(),
+                ),
+            );
+        }
+    };
+    let Ok(mut value) = serde_json::from_slice::<Value>(&bytes) else {
+        return Response::from_parts(parts, Body::from(bytes));
+    };
+    if value.get("schema").and_then(Value::as_str) != Some("gateway.error.v1") {
+        return Response::from_parts(parts, Body::from(bytes));
+    }
+    if let Some(error) = value.get_mut("error").and_then(Value::as_object_mut) {
+        error.insert("request_id".to_owned(), json!(request_id));
+    }
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    Response::from_parts(parts, Body::from(value.to_string()))
 }
 
 async fn auth_context_middleware(
@@ -2649,6 +2729,14 @@ struct DashboardScopeInput {
     principal_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct AdminRouteSimulationRequest {
+    alias_name: String,
+    protocol_family: ProtocolFamily,
+    #[serde(default)]
+    streaming: bool,
+}
+
 struct ValidationResponseInput {
     schema: &'static str,
     resource_kind: &'static str,
@@ -2979,6 +3067,90 @@ async fn list_validation_diagnostics(
         "diagnostics": diagnostics,
         "next_cursor": null
     })))
+}
+
+async fn run_route_simulation(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Json(request): Json<AdminRouteSimulationRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::POST,
+        ADMIN_ROUTE_SIMULATION_LIST_PATH,
+        &actor.tenant_id,
+        now,
+    )?;
+    let alias_name = request.alias_name.trim();
+    if alias_name.is_empty() {
+        return Err(GatewayError::BadRequest {
+            message: "alias_name is required".to_owned(),
+        });
+    }
+    let loaded_catalog = latest_catalog_for_actor(&state, &actor)?.ok_or(GatewayError::NotReady)?;
+    let plan = loaded_catalog
+        .catalog
+        .plan_runtime_route_with_hot_state(&RoutePlanRequest {
+            actor: &actor,
+            protocol_family: request.protocol_family,
+            alias_name,
+            streaming: request.streaming,
+            hot_state: state.store(),
+            config_version: Some(loaded_catalog.version),
+            now,
+        })?;
+    let (status, reason, selected) = match plan.outcome {
+        RoutePlanOutcome::Selected(selection) => (
+            RouteDecisionStatus::Selected.as_str(),
+            "selected",
+            Some(route_simulation_selected_body(&selection)),
+        ),
+        RoutePlanOutcome::ProviderGrantDenied => (
+            RouteDecisionStatus::Blocked.as_str(),
+            "provider_grant_denied",
+            None,
+        ),
+        RoutePlanOutcome::NoRoute => (
+            RouteDecisionStatus::NoRoute.as_str(),
+            "no_eligible_model_target",
+            None,
+        ),
+    };
+    Ok(Json(json!({
+        "schema": "gateway.admin.route_simulation.v1",
+        "simulation_id": new_prefixed_id("rsim"),
+        "tenant_id": &actor.tenant_id,
+        "organization_id": &actor.organization_id,
+        "project_id": &actor.project_id,
+        "config_snapshot_id": loaded_catalog.snapshot_id,
+        "config_version": loaded_catalog.version,
+        "alias_name": alias_name,
+        "protocol_family": request.protocol_family.as_str(),
+        "streaming": request.streaming,
+        "status": status,
+        "reason": reason,
+        "selected": selected,
+        "filtered_summary": plan.filtered_summary,
+        "upstream_call": false,
+        "occurred_at": now
+    })))
+}
+
+fn route_simulation_selected_body(selection: &RouteSelection) -> Value {
+    json!({
+        "model_alias_id": &selection.model_alias_id,
+        "alias_name": &selection.alias_name,
+        "route_policy_id": &selection.route_policy_id,
+        "routing_group_id": &selection.routing_group_id,
+        "model_target_id": &selection.model_target_id,
+        "upstream_model_id": &selection.upstream_model_id,
+        "provider_endpoint_id": &selection.provider_endpoint.provider_endpoint_id,
+        "provider_kind": &selection.provider_endpoint.provider_kind,
+        "upstream_credential_id": &selection.upstream_credential_id,
+        "filtered_summary": &selection.filtered_summary
+    })
 }
 
 async fn list_audit_events(
@@ -20476,8 +20648,8 @@ mod tests {
         runtime_quota_loss_allowance_key, runtime_route_target, validate_gateway_config, AppState,
         BackgroundWorkerMode, DependencyProbeMode, ExportObjectStorageHttpConfig, GatewayConfig,
         NotificationDeliveryTransport, OtelExporterTransport, SingleUserAuthConfig,
-        CODEX_API_BASE_URL, CSRF_TOKEN_HEADER, PROJECT_ID_HEADER, REQUEST_ID_HEADER,
-        RUNTIME_BUDGET_LEASE_TTL_SECONDS, SESSION_TOKEN_PREFIX, SINGLE_USER_ID,
+        ADMIN_ROUTE_SIMULATION_LIST_PATH, CODEX_API_BASE_URL, CSRF_TOKEN_HEADER, PROJECT_ID_HEADER,
+        REQUEST_ID_HEADER, RUNTIME_BUDGET_LEASE_TTL_SECONDS, SESSION_TOKEN_PREFIX, SINGLE_USER_ID,
         SINGLE_USER_ORGANIZATION_ID, SINGLE_USER_PROJECT_ID, SINGLE_USER_PROVIDER_ID,
         SINGLE_USER_TENANT_ID,
     };
@@ -20503,13 +20675,14 @@ mod tests {
         RouteEvidenceSink, RouteFilterReason,
     };
     use crate::storage::{
-        CatalogAdminRepository, CodexOAuthRepository, CompleteExportJobRequest,
-        ConfigPublicationRepository, ConfigSnapshotStore, CreateExportJobRequest,
-        CreateNotificationOutboxEventRequest, CreateNotificationSinkRequest,
-        CreateSecretRefRequest, ExportRepository, ExternalIdentityRepository, InMemoryGatewayStore,
-        NotificationOutboxRepository, ProviderAdminRepository, RuntimePolicyRepository,
-        SecretRefAdminRepository, ServiceAccountAdminRepository, TenancyBootstrapRepository,
-        TenancyRepository, UsageAccountingRepository, ValidationDiagnosticRepository,
+        AuthSessionRepository, CatalogAdminRepository, CodexOAuthRepository,
+        CompleteExportJobRequest, ConfigPublicationRepository, ConfigSnapshotStore,
+        CreateExportJobRequest, CreateNotificationOutboxEventRequest,
+        CreateNotificationSinkRequest, CreateSecretRefRequest, ExportRepository,
+        ExternalIdentityRepository, InMemoryGatewayStore, NotificationOutboxRepository,
+        ProviderAdminRepository, RuntimePolicyRepository, SecretRefAdminRepository,
+        ServiceAccountAdminRepository, TenancyBootstrapRepository, TenancyRepository,
+        UsageAccountingRepository, ValidationDiagnosticRepository,
     };
     use crate::ProtocolFamily;
 
@@ -20647,6 +20820,30 @@ mod tests {
             config.export_object_storage_dir.as_deref(),
             Some(export_dir_text.as_str())
         );
+    }
+
+    #[test]
+    fn gateway_config_from_env_reads_request_timeout_controls() {
+        const KEYS: &[&str] = &["STARWEAVER_GATEWAY_REQUEST_TIMEOUT_MS"];
+
+        let _lock = ENV_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = EnvRestore::capture(KEYS);
+        for key in KEYS {
+            std::env::remove_var(key);
+        }
+
+        assert_eq!(GatewayConfig::from_env().request_timeout_ms, 30_000);
+
+        std::env::set_var("STARWEAVER_GATEWAY_REQUEST_TIMEOUT_MS", "2500");
+        assert_eq!(GatewayConfig::from_env().request_timeout_ms, 2500);
+
+        std::env::set_var("STARWEAVER_GATEWAY_REQUEST_TIMEOUT_MS", "99");
+        assert_eq!(GatewayConfig::from_env().request_timeout_ms, 30_000);
+
+        std::env::set_var("STARWEAVER_GATEWAY_REQUEST_TIMEOUT_MS", "300001");
+        assert_eq!(GatewayConfig::from_env().request_timeout_ms, 30_000);
     }
 
     #[test]
@@ -21465,6 +21662,125 @@ mod tests {
         assert_eq!(header, Some("req_test"));
     }
 
+    #[tokio::test]
+    async fn error_envelope_includes_safe_request_id() {
+        let response = match router(AppState::default())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(REQUEST_ID_HEADER, "req_error_body")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({"model": "ma_test"}).to_string()))
+                    .unwrap_or_else(|error| panic!("request should build: {error}")),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => panic!("request should complete: {error}"),
+        };
+        let request_id_header = response
+            .headers()
+            .get(REQUEST_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let status = response.status();
+        let body = response_json(response).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(request_id_header.as_deref(), Some("req_error_body"));
+        assert_eq!(body["schema"], "gateway.error.v1");
+        assert_eq!(body["error"]["code"], "gateway.auth.authentication_failed");
+        assert_eq!(body["error"]["request_id"], "req_error_body");
+    }
+
+    #[tokio::test]
+    async fn unsafe_request_id_header_is_replaced_in_error_envelope() {
+        let response = match router(AppState::default())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(REQUEST_ID_HEADER, "bad request id")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({"model": "ma_test"}).to_string()))
+                    .unwrap_or_else(|error| panic!("request should build: {error}")),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => panic!("request should complete: {error}"),
+        };
+        let request_id_header = response
+            .headers()
+            .get(REQUEST_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map_or_else(
+                || panic!("request id header should be present"),
+                str::to_owned,
+            );
+        let status = response.status();
+        let body = response_json(response).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(request_id_header.starts_with("req_"));
+        assert_ne!(request_id_header, "bad request id");
+        assert_eq!(body["error"]["request_id"], request_id_header);
+    }
+
+    #[tokio::test]
+    async fn request_timeout_returns_error_envelope_with_request_id() {
+        async fn slow_handler() -> &'static str {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            "late"
+        }
+
+        let state = AppState::new(
+            GatewayConfig {
+                request_timeout_ms: 1,
+                ..GatewayConfig::default()
+            },
+            InMemoryGatewayStore::default(),
+        );
+        let response = match Router::new()
+            .route("/slow", get(slow_handler))
+            .layer(axum::extract::DefaultBodyLimit::max(
+                state.config.max_body_bytes,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                super::request_timeout_middleware,
+            ))
+            .layer(axum::middleware::from_fn(super::request_id_middleware))
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/slow")
+                    .header(REQUEST_ID_HEADER, "req_timeout")
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("request should build: {error}")),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => panic!("request should complete: {error}"),
+        };
+        let request_id_header = response
+            .headers()
+            .get(REQUEST_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let status = response.status();
+        let body = response_json(response).await;
+
+        assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(request_id_header.as_deref(), Some("req_timeout"));
+        assert_eq!(body["schema"], "gateway.error.v1");
+        assert_eq!(body["error"]["code"], "gateway.request.timeout");
+        assert_eq!(body["error"]["retryable"], true);
+        assert_eq!(body["error"]["request_id"], "req_timeout");
+    }
+
     #[test]
     fn authenticate_request_preserves_request_id_and_records_last_used() {
         let (store, raw_key) = gateway_store_with_runtime_access(true);
@@ -21596,6 +21912,113 @@ mod tests {
                 assert_catalog_replay_success(case, status, &body, &store);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn admin_route_simulation_explains_selected_catalog_route_without_upstream_call() {
+        let (store, raw_session, _) = gateway_store_with_admin_session_and_runtime_access();
+        publish_catalog_snapshot(&store, catalog_payload());
+        let response = post_admin_json(
+            store.clone(),
+            &raw_session,
+            ADMIN_ROUTE_SIMULATION_LIST_PATH,
+            json!({
+                "alias_name": "gpt-test",
+                "protocol_family": "openai_responses"
+            }),
+        )
+        .await;
+
+        let status = response.status();
+        let body = response_json(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["schema"], "gateway.admin.route_simulation.v1");
+        assert_eq!(body["status"], RouteDecisionStatus::Selected.as_str());
+        assert_eq!(body["reason"], "selected");
+        assert_eq!(body["selected"]["model_alias_id"], "ma_test");
+        assert_eq!(body["selected"]["model_target_id"], "mt_openai");
+        assert_eq!(body["selected"]["provider_endpoint_id"], "pep_openai");
+        assert_eq!(body["upstream_call"], false);
+        assert!(body["filtered_summary"]
+            .as_array()
+            .is_some_and(Vec::is_empty));
+        assert!(store.route_decisions().is_empty());
+        assert!(store.route_attempts().is_empty());
+        assert!(store.usage_events_for_tenant(TEST_TENANT_ID).is_empty());
+    }
+
+    #[tokio::test]
+    async fn admin_route_simulation_explains_provider_grant_denial() {
+        let (store, raw_session, _) = gateway_store_with_admin_session_and_runtime_access();
+        let mut payload = catalog_payload();
+        payload["provider_grants"] = json!([]);
+        publish_catalog_snapshot(&store, payload);
+        let response = post_admin_json(
+            store.clone(),
+            &raw_session,
+            ADMIN_ROUTE_SIMULATION_LIST_PATH,
+            json!({
+                "alias_name": "gpt-test",
+                "protocol_family": "openai_responses"
+            }),
+        )
+        .await;
+
+        let status = response.status();
+        let body = response_json(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], RouteDecisionStatus::Blocked.as_str());
+        assert_eq!(body["reason"], "provider_grant_denied");
+        assert!(body["selected"].is_null());
+        assert_eq!(
+            body["filtered_summary"][0]["reason"],
+            RouteFilterReason::ProviderGrantDenied.as_str()
+        );
+        assert_eq!(body["upstream_call"], false);
+        assert!(store.authorization_decisions().len() == 1);
+        assert!(store.route_attempts().is_empty());
+        assert!(store.usage_events_for_tenant(TEST_TENANT_ID).is_empty());
+    }
+
+    #[tokio::test]
+    async fn admin_route_simulation_explains_hot_state_filtered_targets() {
+        let (store, raw_session, _) = gateway_store_with_admin_session_and_runtime_access();
+        publish_catalog_snapshot(&store, catalog_payload());
+        let now = chrono::Utc::now();
+        store.set_endpoint_health(EndpointHealthRecord {
+            tenant_id: TEST_TENANT_ID.to_owned(),
+            provider_endpoint_id: "pep_openai".to_owned(),
+            config_version: 1,
+            state: EndpointHealthState::Blocked,
+            observed_at: now,
+            expires_at: now + Duration::seconds(60),
+        });
+
+        let response = post_admin_json(
+            store.clone(),
+            &raw_session,
+            ADMIN_ROUTE_SIMULATION_LIST_PATH,
+            json!({
+                "alias_name": "gpt-test",
+                "protocol_family": "openai_responses"
+            }),
+        )
+        .await;
+
+        let status = response.status();
+        let body = response_json(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], RouteDecisionStatus::NoRoute.as_str());
+        assert_eq!(body["reason"], "no_eligible_model_target");
+        assert!(body["selected"].is_null());
+        assert_eq!(
+            body["filtered_summary"][0]["reason"],
+            RouteFilterReason::EndpointHealthBlocked.as_str()
+        );
+        assert_eq!(body["upstream_call"], false);
+        assert!(store.route_decisions().is_empty());
+        assert!(store.route_attempts().is_empty());
+        assert!(store.usage_events_for_tenant(TEST_TENANT_ID).is_empty());
     }
 
     #[tokio::test]
@@ -26999,6 +27422,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generic_oidc_callback_rejects_unknown_jwks_signing_key() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let oidc_provider = spawn_local_oidc_provider_with_token_kid("unknown-oidc-key").await;
+        let client_secret_ref = seed_secret_ref_for_test(
+            &store,
+            None,
+            None,
+            "oidc client secret",
+            "oidc-client-secret-value",
+        );
+        let login_provider_id = create_oidc_login_provider_for_issuer_over_http(
+            store.clone(),
+            &raw_session,
+            &oidc_provider.issuer_url,
+            &client_secret_ref,
+        )
+        .await;
+        let start = get_public(
+            store.clone(),
+            &format!("/auth/v1/providers/{login_provider_id}/login"),
+        )
+        .await;
+        let start_body = response_json(start).await;
+        let state_token = login_start_state(&start_body);
+        let nonce = login_start_nonce(&start_body);
+        oidc_provider.set_nonce(&nonce);
+        let session_count_before = store
+            .sessions_for_principal(TEST_TENANT_ID, TEST_USER_ID)
+            .len();
+        let audit_count_before = store.audit_events().len();
+
+        let callback = post_public_json_with_config(
+            store.clone(),
+            GatewayConfig::default(),
+            &format!("/auth/v1/providers/{login_provider_id}/callback"),
+            json!({
+                "state": state_token,
+                "code": "oidc_authorization_code"
+            }),
+        )
+        .await;
+        let callback_status = callback.status();
+        let callback_body = response_json(callback).await;
+        oidc_provider.handle.abort();
+
+        assert_eq!(callback_status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            callback_body["error"]["code"],
+            "gateway.auth.authentication_failed"
+        );
+        assert_eq!(
+            store
+                .sessions_for_principal(TEST_TENANT_ID, TEST_USER_ID)
+                .len(),
+            session_count_before
+        );
+        assert!(store
+            .external_identities_for_principal(TEST_TENANT_ID, TEST_USER_ID)
+            .is_empty());
+        assert_eq!(store.audit_events().len(), audit_count_before);
+        assert!(!store
+            .audit_events()
+            .iter()
+            .any(|event| event.event_type == "gateway.auth.external_login"));
+    }
+
+    #[tokio::test]
     async fn local_verified_claims_callback_adapter_is_fail_closed_outside_local_profiles() {
         let (store, raw_session) = gateway_store_with_admin_session();
         let login_provider_id = create_oidc_callback_provider_over_http(
@@ -30769,6 +31259,10 @@ mod tests {
     }
 
     async fn spawn_local_oidc_provider() -> LocalOidcProvider {
+        spawn_local_oidc_provider_with_token_kid("test-oidc-key").await
+    }
+
+    async fn spawn_local_oidc_provider_with_token_kid(token_key_id: &str) -> LocalOidcProvider {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .unwrap_or_else(|error| panic!("oidc listener should bind: {error}"));
@@ -30797,6 +31291,7 @@ mod tests {
         let token_nonce = Arc::clone(&nonce);
         let token_signing_key = Arc::clone(&signing_key);
         let token_issuer = issuer_url.clone();
+        let token_key_id = token_key_id.to_owned();
         let app = Router::new()
             .route(
                 "/.well-known/openid-configuration",
@@ -30818,6 +31313,7 @@ mod tests {
                     let token_nonce = Arc::clone(&token_nonce);
                     let token_signing_key = Arc::clone(&token_signing_key);
                     let token_issuer = token_issuer.clone();
+                    let token_key_id = token_key_id.clone();
                     async move {
                         let body_text = String::from_utf8(body.to_vec())
                             .unwrap_or_else(|error| panic!("token body should be utf8: {error}"));
@@ -30834,8 +31330,12 @@ mod tests {
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .clone()
                             .unwrap_or_else(|| panic!("oidc nonce should be set before callback"));
-                        let id_token =
-                            signed_oidc_id_token(&token_signing_key, &token_issuer, &nonce);
+                        let id_token = signed_oidc_id_token(
+                            &token_signing_key,
+                            &token_issuer,
+                            &nonce,
+                            &token_key_id,
+                        );
                         Json(json!({
                             "token_type": "Bearer",
                             "id_token": id_token
@@ -30855,9 +31355,14 @@ mod tests {
         }
     }
 
-    fn signed_oidc_id_token(signing_key: &EncodingKey, issuer: &str, nonce: &str) -> String {
+    fn signed_oidc_id_token(
+        signing_key: &EncodingKey,
+        issuer: &str,
+        nonce: &str,
+        key_id: &str,
+    ) -> String {
         let mut header = Header::new(Algorithm::RS256);
-        header.kid = Some("test-oidc-key".to_owned());
+        header.kid = Some(key_id.to_owned());
         encode(
             &header,
             &json!({

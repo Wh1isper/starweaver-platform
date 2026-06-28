@@ -45,6 +45,9 @@ pub enum GatewayError {
         /// Safe quota denial reason.
         reason: &'static str,
     },
+    /// Request handling exceeded the configured inbound timeout.
+    #[error("request timed out")]
+    RequestTimeout,
     /// Service is not ready.
     #[error("service not ready")]
     NotReady,
@@ -68,6 +71,7 @@ impl GatewayError {
             Self::NoRoute { .. } => "gateway.route.no_route",
             Self::BudgetExceeded { .. } => "gateway.budget.exceeded",
             Self::QuotaExceeded { .. } => "gateway.quota.exceeded",
+            Self::RequestTimeout => "gateway.request.timeout",
             Self::NotReady => "gateway.runtime.not_ready",
             Self::Internal { .. } => "gateway.internal",
         }
@@ -81,6 +85,7 @@ impl GatewayError {
             Self::Authorization { .. } => StatusCode::FORBIDDEN,
             Self::BadRequest { .. } => StatusCode::BAD_REQUEST,
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
+            Self::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
             Self::NoRoute { .. } | Self::NotReady => StatusCode::SERVICE_UNAVAILABLE,
             Self::BudgetExceeded { .. } | Self::QuotaExceeded { .. } => {
                 StatusCode::TOO_MANY_REQUESTS
@@ -124,6 +129,7 @@ impl ErrorEnvelope {
                 retryable: matches!(
                     error,
                     GatewayError::NoRoute { .. }
+                        | GatewayError::RequestTimeout
                         | GatewayError::NotReady
                         | GatewayError::QuotaExceeded { .. }
                         | GatewayError::Internal { .. }

@@ -333,6 +333,65 @@ impl RouteAttemptRecord {
             ended_at: Some(ended_at),
         }
     }
+
+    /// Builds a failed attempt event.
+    #[must_use]
+    pub fn failed(
+        route_decision_id: impl Into<String>,
+        attempt_index: u32,
+        selected: &SelectedRouteEvidence,
+        started_at: DateTime<Utc>,
+        ended_at: DateTime<Utc>,
+    ) -> Self {
+        Self::terminal(
+            route_decision_id,
+            attempt_index,
+            selected,
+            RouteAttemptStatus::Failed,
+            started_at,
+            ended_at,
+        )
+    }
+
+    /// Builds a client-disconnected attempt event.
+    #[must_use]
+    pub fn client_disconnected(
+        route_decision_id: impl Into<String>,
+        attempt_index: u32,
+        selected: &SelectedRouteEvidence,
+        started_at: DateTime<Utc>,
+        ended_at: DateTime<Utc>,
+    ) -> Self {
+        Self::terminal(
+            route_decision_id,
+            attempt_index,
+            selected,
+            RouteAttemptStatus::ClientDisconnected,
+            started_at,
+            ended_at,
+        )
+    }
+
+    fn terminal(
+        route_decision_id: impl Into<String>,
+        attempt_index: u32,
+        selected: &SelectedRouteEvidence,
+        status: RouteAttemptStatus,
+        started_at: DateTime<Utc>,
+        ended_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            route_attempt_event_id: new_prefixed_id("rae"),
+            route_decision_id: route_decision_id.into(),
+            attempt_index,
+            routing_group_id: selected.routing_group_id.clone(),
+            model_target_id: selected.model_target_id.clone(),
+            provider_endpoint_id: selected.provider_endpoint_id.clone(),
+            status,
+            started_at,
+            ended_at: Some(ended_at),
+        }
+    }
 }
 
 /// Repository boundary for route evidence.
@@ -355,7 +414,10 @@ pub fn add_filter_reason(summary: &mut Vec<RouteFilterSummary>, reason: RouteFil
 
 #[cfg(test)]
 mod tests {
-    use crate::routing::{add_filter_reason, RouteFilterReason};
+    use crate::routing::{
+        add_filter_reason, RouteAttemptRecord, RouteAttemptStatus, RouteFilterReason,
+        SelectedRouteEvidence,
+    };
 
     #[test]
     fn filter_summary_accumulates_by_reason() {
@@ -369,5 +431,31 @@ mod tests {
         assert_eq!(summary[0].count, 2);
         assert_eq!(summary[1].reason, RouteFilterReason::EndpointInactive);
         assert_eq!(summary[1].count, 1);
+    }
+
+    #[test]
+    fn attempt_terminal_builders_distinguish_failed_and_client_disconnect() {
+        let selected = SelectedRouteEvidence {
+            model_alias_id: "ma_test".to_owned(),
+            route_policy_id: "rp_test".to_owned(),
+            routing_group_id: "rg_test".to_owned(),
+            model_target_id: "mt_test".to_owned(),
+            provider_endpoint_id: "pep_test".to_owned(),
+            upstream_credential_id: Some("upc_test".to_owned()),
+            filtered_summary: Vec::new(),
+        };
+        let started_at = chrono::Utc::now();
+        let ended_at = started_at + chrono::Duration::milliseconds(10);
+        let failed = RouteAttemptRecord::failed("rd_test", 1, &selected, started_at, ended_at);
+        let disconnected =
+            RouteAttemptRecord::client_disconnected("rd_test", 2, &selected, started_at, ended_at);
+
+        assert_eq!(failed.status, RouteAttemptStatus::Failed);
+        assert_eq!(failed.attempt_index, 1);
+        assert_eq!(disconnected.status, RouteAttemptStatus::ClientDisconnected);
+        assert_eq!(disconnected.attempt_index, 2);
+        assert_eq!(failed.route_decision_id, disconnected.route_decision_id);
+        assert_eq!(failed.provider_endpoint_id, "pep_test");
+        assert_eq!(disconnected.ended_at, Some(ended_at));
     }
 }

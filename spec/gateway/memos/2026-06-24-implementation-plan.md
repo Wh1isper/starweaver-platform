@@ -50,6 +50,12 @@ Completed foundation slices:
 
 - Gateway service shell with health, readiness, version, request id, error
   envelope, typed configuration, and fake local dependencies.
+- Gateway request-id middleware now preserves safe client request ids, replaces
+  unsafe request ids, and injects the effective id into structured error
+  envelopes as well as response headers.
+- Gateway request handling now enforces a configurable inbound timeout through
+  the shared middleware chain and returns the stable gateway error envelope with
+  the effective request id.
 - Durable schema and in-memory repository boundaries for tenants,
   organizations, projects, users, API keys, role bindings, action grants,
   provider grants, catalog resources, config snapshots, usage, audit, sessions,
@@ -59,12 +65,20 @@ Completed foundation slices:
 - Runtime ingress foundation for the supported protocol families, fake provider
   replay, route planning, route evidence, and catalog-backed model alias
   resolution.
+- Fake provider replay now has explicit deterministic negative outcomes for
+  provider errors, throttling, timeouts, malformed streams, and client
+  disconnects, with authorization evidence still recorded before the provider
+  outcome is applied.
 - Authorization foundations with canonical gateway actions, built-in role
   grants, API key owner narrowing, item-level helpers, Cedar policy validation,
   and Cedar policy evaluation from the latest published config snapshot.
 - Route metadata now records action id, resource kind, scope parameters, API key
   allowance, strong-auth requirement, and audit event type for each foundation
   route.
+- Route simulation now exposes a read-only admin API over the same published
+  catalog, provider grant closure, hot-state health filters, and route planner
+  used by runtime ingress. Simulation responses explain selected, blocked, and
+  no-route outcomes and explicitly report that no upstream call was made.
 - Provider grants support organization and project scopes, allow and deny
   effects, closure modes, descendant traversal over alias, route policy,
   routing group, model target, provider endpoint, and pricing SKU resources,
@@ -377,7 +391,8 @@ Completed foundation slices:
   login provider. Non-OIDC OAuth providers require an OIDC broker or a
   separately reviewed OAuth adapter before direct login support is exposed.
   OIDC remains separate from upstream provider OAuth credentials and validates
-  issuer, audience, nonce, PKCE, expiry, and JWKS-backed ID token signatures.
+  issuer, audience, nonce, PKCE, expiry, JWKS-backed ID token signatures, and
+  unknown signing-key rejection.
 - Gateway human-login runtime now accepts only generic OIDC identity providers.
   Direct non-OIDC OAuth adapter paths, callback exchange paths, test mocks, and
   schema allowances were removed; deployments that want non-OIDC identity
@@ -409,6 +424,9 @@ Completed foundation slices:
   mTLS identity, resource-owner, and safe business-resource reads through the
   durable PostgreSQL adapter without changing route metadata, action ids,
   policy evaluation, or response envelopes.
+- Agent platform HTTP request handling now matches the gateway foundation with
+  configurable body limits, inbound request timeouts, generated or preserved
+  request ids, and request-id injection into structured error envelopes.
 - Agent platform startup configuration now reads `STARWEAVER_PLATFORM_*`
   settings for listen address, environment, database URL, and repository
   backend. Production profiles reject accidental in-memory repository exposure,
@@ -986,7 +1004,8 @@ Work items:
   - generic OIDC callbacks now exchange authorization codes with PKCE verifiers,
     resolve issuer discovery when endpoints are not configured explicitly, fetch
     JWKS, validate asymmetric signed ID tokens, enforce issuer, audience, nonce,
-    and expiry checks, and avoid returning or auditing raw tokens;
+    expiry, and unknown signing-key checks, and avoid returning or auditing raw
+    tokens;
   - local deterministic generic OIDC callback tests create or link local users
     and external identities, issue opaque sessions without granting
     organization or project access by email alone, reject reused state, validate
