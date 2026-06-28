@@ -16,9 +16,11 @@ workspace = true
 
 [dependencies]
 argon2 = "0.5"
+async-trait = "0.1"
 axum = { version = "0.8", features = ["json", "macros"] }
 cedar-policy = "4.11.2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+fred = { version = "10.1.0", default-features = false, features = ["subscriber-client", "i-keys", "i-hashes", "i-scripts", "i-pubsub", "enable-rustls-ring"] }
 hmac = "0.12"
 http = "1"
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["rust_crypto"] }

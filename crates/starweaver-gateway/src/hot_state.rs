@@ -3,6 +3,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use async_trait::async_trait;
+
 /// Provider endpoint health state derived from hot routing windows.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -120,9 +122,10 @@ impl StickyRouteRecord {
 }
 
 /// Hot-state boundary used by route selection.
+#[async_trait]
 pub trait RouteHotState: Send + Sync {
     /// Returns endpoint health, or `Unknown` when hot state is missing or stale.
-    fn endpoint_health_state(
+    async fn endpoint_health_state(
         &self,
         tenant_id: &str,
         provider_endpoint_id: &str,
@@ -131,7 +134,7 @@ pub trait RouteHotState: Send + Sync {
     ) -> EndpointHealthState;
 
     /// Returns whether a fresh endpoint drain lock exists.
-    fn endpoint_is_drained(
+    async fn endpoint_is_drained(
         &self,
         tenant_id: &str,
         provider_endpoint_id: &str,
@@ -140,7 +143,7 @@ pub trait RouteHotState: Send + Sync {
     ) -> bool;
 
     /// Returns a fresh sticky route mapping when one exists.
-    fn sticky_route(
+    async fn sticky_route(
         &self,
         tenant_id: &str,
         project_id: Option<&str>,
@@ -150,16 +153,23 @@ pub trait RouteHotState: Send + Sync {
         now: DateTime<Utc>,
     ) -> Option<StickyRouteRecord>;
 
+    /// Writes or replaces endpoint health state.
+    async fn set_endpoint_health(&self, record: EndpointHealthRecord);
+
+    /// Writes or replaces an endpoint drain lock.
+    async fn set_endpoint_drain(&self, record: EndpointDrainRecord);
+
     /// Writes or replaces a sticky route mapping.
-    fn set_sticky_route(&self, record: StickyRouteRecord);
+    async fn set_sticky_route(&self, record: StickyRouteRecord);
 }
 
 /// Null hot-state implementation used when the backend is unavailable.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NullRouteHotState;
 
+#[async_trait]
 impl RouteHotState for NullRouteHotState {
-    fn endpoint_health_state(
+    async fn endpoint_health_state(
         &self,
         _tenant_id: &str,
         _provider_endpoint_id: &str,
@@ -169,7 +179,7 @@ impl RouteHotState for NullRouteHotState {
         EndpointHealthState::Unknown
     }
 
-    fn endpoint_is_drained(
+    async fn endpoint_is_drained(
         &self,
         _tenant_id: &str,
         _provider_endpoint_id: &str,
@@ -179,7 +189,7 @@ impl RouteHotState for NullRouteHotState {
         false
     }
 
-    fn sticky_route(
+    async fn sticky_route(
         &self,
         _tenant_id: &str,
         _project_id: Option<&str>,
@@ -191,7 +201,11 @@ impl RouteHotState for NullRouteHotState {
         None
     }
 
-    fn set_sticky_route(&self, _record: StickyRouteRecord) {}
+    async fn set_endpoint_health(&self, _record: EndpointHealthRecord) {}
+
+    async fn set_endpoint_drain(&self, _record: EndpointDrainRecord) {}
+
+    async fn set_sticky_route(&self, _record: StickyRouteRecord) {}
 }
 
 /// Returns the Redis-compatible endpoint health key shape.

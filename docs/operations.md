@@ -58,14 +58,26 @@ STARWEAVER_GATEWAY_SESSION_COOKIE_SAME_SITE=lax
 ```
 
 The HTTP service supports the `memory` runtime store for local replay and the
-`postgres` runtime store for durable service profiles. In `prod` or
-`production`, startup rejects `memory` instead of silently serving non-durable
-state. Set both values before enabling production traffic:
+`postgres` runtime store for durable service profiles. Runtime hot state is a
+separate profile because routing health, sticky routes, budget reservations,
+quota windows, and realtime dashboards cannot use process-local memory in
+production. In `prod` or `production`, startup rejects `memory` instead of
+silently serving non-durable state. Set these values before enabling production
+traffic:
 
 ```bash
 STARWEAVER_GATEWAY_RUNTIME_STORE=postgres
 STARWEAVER_GATEWAY_DATABASE_URL=postgres://gateway:gateway@postgres:5432/starweaver_gateway
+STARWEAVER_GATEWAY_HOT_STATE_BACKEND=redis
+STARWEAVER_GATEWAY_REDIS_URL=redis://redis:6379/0
 ```
+
+`STARWEAVER_GATEWAY_REDIS_URL` is used by readiness probes and the
+Redis-compatible hot-state adapter. The production profile also requires
+`STARWEAVER_GATEWAY_HOT_STATE_BACKEND=redis`; route health, drain locks, sticky
+routes, runtime policy counters, budget leases, and the built-in realtime
+dashboard all read through that hot-state backend. Long-lived metrics and
+custom dashboards remain the responsibility of the configured OTel pipeline.
 
 Self-hosted deployments can use the local file secret backend for provider
 credentials, webhook signing secrets, OTel collector headers, and OIDC client

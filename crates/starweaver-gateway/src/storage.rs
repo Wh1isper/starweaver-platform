@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+use async_trait::async_trait;
 use chrono::Datelike;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
@@ -275,12 +276,13 @@ pub trait UsageAccountingRepository: Send + Sync {
 }
 
 /// Runtime policy hot-state repository boundary.
+#[async_trait]
 pub trait RuntimePolicyRepository: Send + Sync {
     /// Returns whether runtime policy hot state is currently available.
-    fn runtime_policy_hot_state_available(&self) -> bool;
+    async fn runtime_policy_hot_state_available(&self) -> bool;
 
     /// Atomically increments one quota counter and returns the post-increment decision.
-    fn increment_runtime_quota_counter(
+    async fn increment_runtime_quota_counter(
         &self,
         key: String,
         increment: i64,
@@ -288,13 +290,13 @@ pub trait RuntimePolicyRepository: Send + Sync {
     ) -> RuntimeQuotaCounterDecision;
 
     /// Returns the current hot-state policy counter value.
-    fn runtime_policy_counter(&self, key: &str) -> i64;
+    async fn runtime_policy_counter(&self, key: &str) -> i64;
 
     /// Adjusts one hot-state policy counter and returns the post-adjustment value.
-    fn adjust_runtime_policy_counter(&self, key: String, delta: i64) -> i64;
+    async fn adjust_runtime_policy_counter(&self, key: String, delta: i64) -> i64;
 
     /// Atomically consumes a local fail-limited allowance when hot state is unavailable.
-    fn increment_runtime_policy_loss_allowance_counter(
+    async fn increment_runtime_policy_loss_allowance_counter(
         &self,
         key: String,
         increment: i64,
@@ -302,30 +304,33 @@ pub trait RuntimePolicyRepository: Send + Sync {
     ) -> RuntimeQuotaCounterDecision;
 
     /// Adjusts a fail-limited allowance counter and returns the post-adjustment value.
-    fn adjust_runtime_policy_loss_allowance_counter(&self, key: String, delta: i64) -> i64;
+    async fn adjust_runtime_policy_loss_allowance_counter(&self, key: String, delta: i64) -> i64;
 
     /// Returns the current fail-limited allowance counter value.
-    fn runtime_policy_loss_allowance_counter(&self, key: &str) -> i64;
+    async fn runtime_policy_loss_allowance_counter(&self, key: &str) -> i64;
 
     /// Records a runtime budget reservation lease.
-    fn record_runtime_budget_lease(&self, record: RuntimeBudgetLeaseRecord);
+    async fn record_runtime_budget_lease(&self, record: RuntimeBudgetLeaseRecord);
 
     /// Marks a runtime budget reservation lease as released.
-    fn release_runtime_budget_lease(
+    async fn release_runtime_budget_lease(
         &self,
         lease_id: &str,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Option<RuntimeBudgetLeaseRecord>;
 
     /// Expires reserved runtime budget leases for one tenant.
-    fn expire_runtime_budget_leases(
+    async fn expire_runtime_budget_leases(
         &self,
         tenant_id: &str,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Vec<RuntimeBudgetLeaseRecord>;
 
     /// Lists runtime budget leases for one tenant.
-    fn runtime_budget_leases_for_tenant(&self, tenant_id: &str) -> Vec<RuntimeBudgetLeaseRecord>;
+    async fn runtime_budget_leases_for_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Vec<RuntimeBudgetLeaseRecord>;
 }
 
 /// Runtime quota counter decision.
@@ -2854,12 +2859,13 @@ impl UsageAccountingRepository for InMemoryGatewayStore {
     }
 }
 
+#[async_trait]
 impl RuntimePolicyRepository for InMemoryGatewayStore {
-    fn runtime_policy_hot_state_available(&self) -> bool {
+    async fn runtime_policy_hot_state_available(&self) -> bool {
         !*read_lock(&self.runtime_policy_hot_state_unavailable)
     }
 
-    fn increment_runtime_quota_counter(
+    async fn increment_runtime_quota_counter(
         &self,
         key: String,
         increment: i64,
@@ -2878,14 +2884,14 @@ impl RuntimePolicyRepository for InMemoryGatewayStore {
         }
     }
 
-    fn runtime_policy_counter(&self, key: &str) -> i64 {
+    async fn runtime_policy_counter(&self, key: &str) -> i64 {
         read_lock(&self.runtime_quota_counters)
             .get(key)
             .copied()
             .unwrap_or_default()
     }
 
-    fn adjust_runtime_policy_counter(&self, key: String, delta: i64) -> i64 {
+    async fn adjust_runtime_policy_counter(&self, key: String, delta: i64) -> i64 {
         let mut counters = write_lock(&self.runtime_quota_counters);
         let next = counters
             .get(&key)
@@ -2901,7 +2907,7 @@ impl RuntimePolicyRepository for InMemoryGatewayStore {
         next
     }
 
-    fn increment_runtime_policy_loss_allowance_counter(
+    async fn increment_runtime_policy_loss_allowance_counter(
         &self,
         key: String,
         increment: i64,
@@ -2920,7 +2926,7 @@ impl RuntimePolicyRepository for InMemoryGatewayStore {
         }
     }
 
-    fn adjust_runtime_policy_loss_allowance_counter(&self, key: String, delta: i64) -> i64 {
+    async fn adjust_runtime_policy_loss_allowance_counter(&self, key: String, delta: i64) -> i64 {
         let mut counters = write_lock(&self.runtime_policy_loss_allowances);
         let next = counters
             .get(&key)
@@ -2936,18 +2942,18 @@ impl RuntimePolicyRepository for InMemoryGatewayStore {
         next
     }
 
-    fn runtime_policy_loss_allowance_counter(&self, key: &str) -> i64 {
+    async fn runtime_policy_loss_allowance_counter(&self, key: &str) -> i64 {
         read_lock(&self.runtime_policy_loss_allowances)
             .get(key)
             .copied()
             .unwrap_or_default()
     }
 
-    fn record_runtime_budget_lease(&self, record: RuntimeBudgetLeaseRecord) {
+    async fn record_runtime_budget_lease(&self, record: RuntimeBudgetLeaseRecord) {
         write_lock(&self.runtime_budget_leases).insert(record.lease_id.clone(), record);
     }
 
-    fn release_runtime_budget_lease(
+    async fn release_runtime_budget_lease(
         &self,
         lease_id: &str,
         now: chrono::DateTime<chrono::Utc>,
@@ -2965,7 +2971,7 @@ impl RuntimePolicyRepository for InMemoryGatewayStore {
         released
     }
 
-    fn expire_runtime_budget_leases(
+    async fn expire_runtime_budget_leases(
         &self,
         tenant_id: &str,
         now: chrono::DateTime<chrono::Utc>,
@@ -2985,7 +2991,10 @@ impl RuntimePolicyRepository for InMemoryGatewayStore {
         expired
     }
 
-    fn runtime_budget_leases_for_tenant(&self, tenant_id: &str) -> Vec<RuntimeBudgetLeaseRecord> {
+    async fn runtime_budget_leases_for_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Vec<RuntimeBudgetLeaseRecord> {
         let mut leases = read_lock(&self.runtime_budget_leases)
             .values()
             .filter(|record| record.tenant_id == tenant_id)
@@ -5911,8 +5920,9 @@ impl RouteEvidenceSink for InMemoryGatewayStore {
     }
 }
 
+#[async_trait]
 impl RouteHotState for InMemoryGatewayStore {
-    fn endpoint_health_state(
+    async fn endpoint_health_state(
         &self,
         tenant_id: &str,
         provider_endpoint_id: &str,
@@ -5929,7 +5939,7 @@ impl RouteHotState for InMemoryGatewayStore {
             .map_or(EndpointHealthState::Unknown, |record| record.state)
     }
 
-    fn endpoint_is_drained(
+    async fn endpoint_is_drained(
         &self,
         tenant_id: &str,
         provider_endpoint_id: &str,
@@ -5945,7 +5955,7 @@ impl RouteHotState for InMemoryGatewayStore {
             .is_some_and(|record| record.is_fresh_for(config_version, now))
     }
 
-    fn sticky_route(
+    async fn sticky_route(
         &self,
         tenant_id: &str,
         project_id: Option<&str>,
@@ -5969,7 +5979,15 @@ impl RouteHotState for InMemoryGatewayStore {
             .cloned()
     }
 
-    fn set_sticky_route(&self, record: StickyRouteRecord) {
+    async fn set_endpoint_health(&self, record: EndpointHealthRecord) {
+        self.set_endpoint_health(record);
+    }
+
+    async fn set_endpoint_drain(&self, record: EndpointDrainRecord) {
+        self.set_endpoint_drain(record);
+    }
+
+    async fn set_sticky_route(&self, record: StickyRouteRecord) {
         let mut sticky_routes = match self.sticky_routes.write() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),

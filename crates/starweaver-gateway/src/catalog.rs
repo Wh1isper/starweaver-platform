@@ -83,7 +83,7 @@ impl GatewayCatalogSnapshot {
     }
 
     /// Selects a runtime route for an authenticated model request.
-    pub fn select_runtime_route(
+    pub async fn select_runtime_route(
         &self,
         actor: &AuthenticatedActor,
         protocol_family: ProtocolFamily,
@@ -91,7 +91,8 @@ impl GatewayCatalogSnapshot {
         streaming: bool,
     ) -> Result<RouteSelection> {
         match self
-            .plan_runtime_route(actor, protocol_family, alias_name, streaming)?
+            .plan_runtime_route(actor, protocol_family, alias_name, streaming)
+            .await?
             .outcome
         {
             RoutePlanOutcome::Selected(selection) => Ok(*selection),
@@ -105,7 +106,7 @@ impl GatewayCatalogSnapshot {
     }
 
     /// Plans a runtime route and returns filtered candidate evidence.
-    pub fn plan_runtime_route(
+    pub async fn plan_runtime_route(
         &self,
         actor: &AuthenticatedActor,
         protocol_family: ProtocolFamily,
@@ -122,13 +123,102 @@ impl GatewayCatalogSnapshot {
             now: Utc::now(),
             route_affinity_hash: None,
         })
+        .await
     }
 
     /// Plans a runtime route using Redis-compatible hot-state hints.
-    pub fn plan_runtime_route_with_hot_state(
+    pub async fn plan_runtime_route_with_hot_state(
         &self,
         request: &RoutePlanRequest<'_>,
     ) -> Result<RoutePlan> {
+        let (alias, policy, group) = self.resolve_route_binding(request)?;
+
+        let endpoints = index_endpoints(&self.provider_endpoints)?;
+        let credentials = index_credentials(&self.upstream_credentials)?;
+        let targets = index_targets(&self.model_targets)?;
+        let mut candidates = self
+            .routing_group_targets
+            .iter()
+            .filter(|candidate| candidate.routing_group_id == group.routing_group_id)
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            left.priority
+                .cmp(&right.priority)
+                .then_with(|| right.weight.cmp(&left.weight))
+                .then_with(|| left.model_target_id.cmp(&right.model_target_id))
+        });
+
+        let context = RouteCandidateContext {
+            actor: request.actor,
+            protocol_family: request.protocol_family,
+            streaming: request.streaming,
+            alias,
+            policy,
+            group,
+            endpoints: &endpoints,
+            credentials: &credentials,
+            targets: &targets,
+            hot_state: request.hot_state,
+            config_version: request.config_version,
+            now: request.now,
+        };
+        let mut filtered_summary = Vec::new();
+        let mut provider_grant_denied = false;
+        let sticky_miss_reason = match self
+            .try_sticky_route_selection(
+                request,
+                &context,
+                &candidates,
+                &mut filtered_summary,
+                &mut provider_grant_denied,
+            )
+            .await
+        {
+            StickyRouteSelection::Selected(selection) => {
+                return Ok(RoutePlan {
+                    outcome: RoutePlanOutcome::Selected(selection),
+                    filtered_summary,
+                });
+            }
+            StickyRouteSelection::Miss(reason) => reason,
+            StickyRouteSelection::Unavailable => None,
+        };
+        if let Some(selection) = self
+            .first_eligible_route_selection(
+                &context,
+                &candidates,
+                &mut filtered_summary,
+                &mut provider_grant_denied,
+                sticky_miss_reason,
+            )
+            .await
+        {
+            return Ok(RoutePlan {
+                outcome: RoutePlanOutcome::Selected(Box::new(selection)),
+                filtered_summary,
+            });
+        }
+
+        if provider_grant_denied {
+            return Ok(RoutePlan {
+                outcome: RoutePlanOutcome::ProviderGrantDenied,
+                filtered_summary,
+            });
+        }
+        Ok(RoutePlan {
+            outcome: RoutePlanOutcome::NoRoute,
+            filtered_summary,
+        })
+    }
+
+    fn resolve_route_binding<'a>(
+        &'a self,
+        request: &RoutePlanRequest<'_>,
+    ) -> Result<(
+        &'a ModelAliasConfig,
+        &'a RoutePolicyConfig,
+        &'a RoutingGroupConfig,
+    )> {
         let alias = self.resolve_alias(request.actor, request.alias_name)?;
         if alias.protocol_family != request.protocol_family {
             return Err(GatewayError::BadRequest {
@@ -163,80 +253,10 @@ impl GatewayCatalogSnapshot {
         if !group.status.is_active() {
             return Err(GatewayError::NotReady);
         }
-
-        let endpoints = index_endpoints(&self.provider_endpoints)?;
-        let credentials = index_credentials(&self.upstream_credentials)?;
-        let targets = index_targets(&self.model_targets)?;
-        let mut candidates = self
-            .routing_group_targets
-            .iter()
-            .filter(|candidate| candidate.routing_group_id == group.routing_group_id)
-            .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| {
-            left.priority
-                .cmp(&right.priority)
-                .then_with(|| right.weight.cmp(&left.weight))
-                .then_with(|| left.model_target_id.cmp(&right.model_target_id))
-        });
-
-        let context = RouteCandidateContext {
-            actor: request.actor,
-            protocol_family: request.protocol_family,
-            streaming: request.streaming,
-            alias,
-            policy,
-            group,
-            endpoints: &endpoints,
-            credentials: &credentials,
-            targets: &targets,
-            hot_state: request.hot_state,
-            config_version: request.config_version,
-            now: request.now,
-        };
-        let mut filtered_summary = Vec::new();
-        let mut provider_grant_denied = false;
-        let sticky_miss_reason = match self.try_sticky_route_selection(
-            request,
-            &context,
-            &candidates,
-            &mut filtered_summary,
-            &mut provider_grant_denied,
-        ) {
-            StickyRouteSelection::Selected(selection) => {
-                return Ok(RoutePlan {
-                    outcome: RoutePlanOutcome::Selected(selection),
-                    filtered_summary,
-                });
-            }
-            StickyRouteSelection::Miss(reason) => reason,
-            StickyRouteSelection::Unavailable => None,
-        };
-        if let Some(selection) = self.first_eligible_route_selection(
-            &context,
-            &candidates,
-            &mut filtered_summary,
-            &mut provider_grant_denied,
-            sticky_miss_reason,
-        ) {
-            return Ok(RoutePlan {
-                outcome: RoutePlanOutcome::Selected(Box::new(selection)),
-                filtered_summary,
-            });
-        }
-
-        if provider_grant_denied {
-            return Ok(RoutePlan {
-                outcome: RoutePlanOutcome::ProviderGrantDenied,
-                filtered_summary,
-            });
-        }
-        Ok(RoutePlan {
-            outcome: RoutePlanOutcome::NoRoute,
-            filtered_summary,
-        })
+        Ok((alias, policy, group))
     }
 
-    fn try_sticky_route_selection<'a>(
+    async fn try_sticky_route_selection<'a>(
         &self,
         request: &RoutePlanRequest<'a>,
         context: &RouteCandidateContext<'a>,
@@ -248,7 +268,7 @@ impl GatewayCatalogSnapshot {
             return StickyRouteSelection::Unavailable;
         };
         let Some(sticky) =
-            sticky_route_for_policy(context.policy, request, context.alias, affinity_hash)
+            sticky_route_for_policy(context.policy, request, context.alias, affinity_hash).await
         else {
             return StickyRouteSelection::Unavailable;
         };
@@ -262,7 +282,7 @@ impl GatewayCatalogSnapshot {
         else {
             return StickyRouteSelection::Miss(Some("model_target_missing".to_owned()));
         };
-        match self.evaluate_candidate(candidate, context) {
+        match self.evaluate_candidate(candidate, context).await {
             CandidateEvaluation::Selected { target, endpoint }
                 if endpoint.provider_endpoint_id == sticky.provider_endpoint_id =>
             {
@@ -288,7 +308,7 @@ impl GatewayCatalogSnapshot {
         }
     }
 
-    fn first_eligible_route_selection<'a>(
+    async fn first_eligible_route_selection<'a>(
         &self,
         context: &RouteCandidateContext<'a>,
         candidates: &[&'a RoutingGroupTargetConfig],
@@ -297,7 +317,7 @@ impl GatewayCatalogSnapshot {
         sticky_miss_reason: Option<String>,
     ) -> Option<RouteSelection> {
         for candidate in candidates {
-            match self.evaluate_candidate(candidate, context) {
+            match self.evaluate_candidate(candidate, context).await {
                 CandidateEvaluation::Selected { target, endpoint } => {
                     return Some(route_selection(RouteSelectionInput {
                         context,
@@ -507,7 +527,7 @@ impl GatewayCatalogSnapshot {
         })
     }
 
-    fn evaluate_candidate<'a>(
+    async fn evaluate_candidate<'a>(
         &self,
         candidate: &'a RoutingGroupTargetConfig,
         context: &'a RouteCandidateContext<'a>,
@@ -539,20 +559,28 @@ impl GatewayCatalogSnapshot {
         {
             return CandidateEvaluation::Filtered(RouteFilterReason::EndpointProtocolMismatch);
         }
-        if context.hot_state.endpoint_is_drained(
-            &endpoint.tenant_id,
-            &endpoint.provider_endpoint_id,
-            context.config_version,
-            context.now,
-        ) {
+        if context
+            .hot_state
+            .endpoint_is_drained(
+                &endpoint.tenant_id,
+                &endpoint.provider_endpoint_id,
+                context.config_version,
+                context.now,
+            )
+            .await
+        {
             return CandidateEvaluation::Filtered(RouteFilterReason::EndpointDrained);
         }
-        match context.hot_state.endpoint_health_state(
-            &endpoint.tenant_id,
-            &endpoint.provider_endpoint_id,
-            context.config_version,
-            context.now,
-        ) {
+        match context
+            .hot_state
+            .endpoint_health_state(
+                &endpoint.tenant_id,
+                &endpoint.provider_endpoint_id,
+                context.config_version,
+                context.now,
+            )
+            .await
+        {
             EndpointHealthState::Blocked => {
                 return CandidateEvaluation::Filtered(RouteFilterReason::EndpointHealthBlocked);
             }
@@ -928,21 +956,24 @@ struct RouteSelectionInput<'a> {
     sticky_miss_reason: Option<String>,
 }
 
-fn sticky_route_for_policy(
+async fn sticky_route_for_policy(
     policy: &RoutePolicyConfig,
     request: &RoutePlanRequest<'_>,
     alias: &ModelAliasConfig,
     affinity_hash: &str,
 ) -> Option<crate::hot_state::StickyRouteRecord> {
     policy.sticky_ttl_seconds?;
-    request.hot_state.sticky_route(
-        &request.actor.tenant_id,
-        request.actor.project_id.as_deref(),
-        &alias.model_alias_id,
-        affinity_hash,
-        request.config_version,
-        request.now,
-    )
+    request
+        .hot_state
+        .sticky_route(
+            &request.actor.tenant_id,
+            request.actor.project_id.as_deref(),
+            &alias.model_alias_id,
+            affinity_hash,
+            request.config_version,
+            request.now,
+        )
+        .await
 }
 
 fn route_selection(input: RouteSelectionInput<'_>) -> RouteSelection {
@@ -1729,9 +1760,10 @@ mod tests {
         }
     }
 
-    fn select_test_route(catalog: &GatewayCatalogSnapshot) -> crate::error::Result<()> {
+    async fn select_test_route(catalog: &GatewayCatalogSnapshot) -> crate::error::Result<()> {
         catalog
             .select_runtime_route(&actor(), ProtocolFamily::OpenAiResponses, "gpt-test", false)
+            .await
             .map(|_| ())
     }
 
@@ -1758,19 +1790,17 @@ mod tests {
         assert!(parsed.is_none());
     }
 
-    #[test]
-    fn catalog_selects_project_scoped_alias_target_and_endpoint() {
+    #[tokio::test]
+    async fn catalog_selects_project_scoped_alias_target_and_endpoint() {
         let catalog = match GatewayCatalogSnapshot::from_payload(&catalog_payload()) {
             Ok(Some(catalog)) => catalog,
             Ok(None) => panic!("catalog should be present"),
             Err(error) => panic!("catalog should parse: {error}"),
         };
-        let selection = match catalog.select_runtime_route(
-            &actor(),
-            ProtocolFamily::OpenAiResponses,
-            "gpt-test",
-            false,
-        ) {
+        let selection = match catalog
+            .select_runtime_route(&actor(), ProtocolFamily::OpenAiResponses, "gpt-test", false)
+            .await
+        {
             Ok(selection) => selection,
             Err(error) => panic!("route should select: {error}"),
         };
@@ -1788,19 +1818,22 @@ mod tests {
         );
     }
 
-    #[test]
-    fn catalog_rejects_protocol_mismatch_before_route_selection() {
+    #[tokio::test]
+    async fn catalog_rejects_protocol_mismatch_before_route_selection() {
         let catalog = match GatewayCatalogSnapshot::from_payload(&catalog_payload()) {
             Ok(Some(catalog)) => catalog,
             Ok(None) => panic!("catalog should be present"),
             Err(error) => panic!("catalog should parse: {error}"),
         };
-        let Err(error) = catalog.select_runtime_route(
-            &actor(),
-            ProtocolFamily::AnthropicMessages,
-            "gpt-test",
-            false,
-        ) else {
+        let Err(error) = catalog
+            .select_runtime_route(
+                &actor(),
+                ProtocolFamily::AnthropicMessages,
+                "gpt-test",
+                false,
+            )
+            .await
+        else {
             panic!("protocol mismatch should fail");
         };
 
@@ -1833,8 +1866,8 @@ mod tests {
         assert!(error.to_string().contains("is not supported"));
     }
 
-    #[test]
-    fn catalog_denies_missing_provider_grant() {
+    #[tokio::test]
+    async fn catalog_denies_missing_provider_grant() {
         let mut payload = catalog_payload();
         payload["provider_grants"] = json!([]);
         let catalog = match GatewayCatalogSnapshot::from_payload(&payload) {
@@ -1842,29 +1875,27 @@ mod tests {
             Ok(None) => panic!("catalog should be present"),
             Err(error) => panic!("catalog should parse: {error}"),
         };
-        let Err(error) = catalog.select_runtime_route(
-            &actor(),
-            ProtocolFamily::OpenAiResponses,
-            "gpt-test",
-            false,
-        ) else {
+        let Err(error) = catalog
+            .select_runtime_route(&actor(), ProtocolFamily::OpenAiResponses, "gpt-test", false)
+            .await
+        else {
             panic!("missing provider grant should fail");
         };
 
         assert_eq!(error.code(), "gateway.auth.authorization_denied");
     }
 
-    #[test]
-    fn catalog_allows_org_alias_grant_with_descendant_closure() {
+    #[tokio::test]
+    async fn catalog_allows_org_alias_grant_with_descendant_closure() {
         let catalog = catalog_with_spec_provider_grants(json!([org_alias_allow_grant()]));
 
-        if let Err(error) = select_test_route(&catalog) {
+        if let Err(error) = select_test_route(&catalog).await {
             panic!("org alias closure grant should select route: {error}");
         }
     }
 
-    #[test]
-    fn catalog_provider_grant_deny_has_precedence_over_org_allow() {
+    #[tokio::test]
+    async fn catalog_provider_grant_deny_has_precedence_over_org_allow() {
         let catalog = catalog_with_spec_provider_grants(json!([
             org_alias_allow_grant(),
             {
@@ -1880,15 +1911,15 @@ mod tests {
             }
         ]));
 
-        let Err(error) = select_test_route(&catalog) else {
+        let Err(error) = select_test_route(&catalog).await else {
             panic!("project deny closure should block route");
         };
 
         assert_eq!(error.code(), "gateway.auth.authorization_denied");
     }
 
-    #[test]
-    fn catalog_project_provider_endpoint_allowlist_narrows_org_grant() {
+    #[tokio::test]
+    async fn catalog_project_provider_endpoint_allowlist_narrows_org_grant() {
         let mut payload = catalog_payload();
         payload["provider_endpoints"]
             .as_array_mut()
@@ -1922,7 +1953,7 @@ mod tests {
             Err(error) => panic!("catalog should parse: {error}"),
         };
 
-        let Err(error) = select_test_route(&catalog) else {
+        let Err(error) = select_test_route(&catalog).await else {
             panic!("project endpoint allowlist should block unlisted endpoint");
         };
 

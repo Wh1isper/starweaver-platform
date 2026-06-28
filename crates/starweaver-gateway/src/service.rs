@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
@@ -63,6 +64,7 @@ use crate::hot_state::{
 };
 use crate::migrations;
 use crate::policy::CedarAuthorizationEngine;
+use crate::redis_hot_state::RedisRuntimePolicyRepository;
 use crate::replay::{foundation_route_replay_cases, GatewayReplayCase};
 use crate::route::{authorize_route_with_evidence, foundation_routes, RouteMetadata};
 use crate::routing::{
@@ -448,6 +450,8 @@ pub struct GatewayConfig {
     pub database_url: Option<String>,
     /// Optional Redis-compatible hot-state connection string.
     pub redis_url: Option<String>,
+    /// Runtime hot-state backend profile used by routing, policy, and realtime views.
+    pub hot_state_backend_profile: String,
     /// Runtime store profile used by the HTTP service.
     pub runtime_store_profile: String,
     /// Public browser-facing base URL.
@@ -650,6 +654,7 @@ impl Default for GatewayConfig {
             environment: "local".to_owned(),
             database_url: None,
             redis_url: None,
+            hot_state_backend_profile: "memory".to_owned(),
             runtime_store_profile: "memory".to_owned(),
             public_base_url: None,
             cors_allowed_origins: Vec::new(),
@@ -692,6 +697,11 @@ impl GatewayConfig {
         }
         if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_REDIS_URL") {
             config.redis_url = non_empty_env(&value);
+        }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_HOT_STATE_BACKEND") {
+            if let Some(value) = non_empty_env(&value) {
+                config.hot_state_backend_profile = value.to_ascii_lowercase();
+            }
         }
         if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_RUNTIME_STORE") {
             if let Some(value) = non_empty_env(&value) {
@@ -852,6 +862,7 @@ struct StartupDiagnostic {
 fn production_profile_diagnostics(config: &GatewayConfig) -> Vec<StartupDiagnostic> {
     let mut diagnostics = Vec::new();
     push_runtime_store_diagnostics(config, &mut diagnostics);
+    push_hot_state_backend_profile_diagnostics(config, &mut diagnostics);
     push_secret_backend_profile_diagnostics(config, &mut diagnostics);
     if !is_production_environment(&config.environment) {
         return diagnostics;
@@ -878,6 +889,21 @@ fn push_runtime_store_diagnostics(
             diagnostics.push(StartupDiagnostic {
                 code: "runtime_store_profile_unsupported",
                 message: "HTTP runtime store profile must be memory or postgres",
+            });
+        }
+    }
+}
+
+fn push_hot_state_backend_profile_diagnostics(
+    config: &GatewayConfig,
+    diagnostics: &mut Vec<StartupDiagnostic>,
+) {
+    match config.hot_state_backend_profile.as_str() {
+        "memory" | "redis" => {}
+        _ => {
+            diagnostics.push(StartupDiagnostic {
+                code: "hot_state_backend_profile_unsupported",
+                message: "hot-state backend profile must be memory or redis",
             });
         }
     }
@@ -918,6 +944,12 @@ fn push_production_dependency_diagnostics(
         diagnostics.push(StartupDiagnostic {
             code: "durable_runtime_store_required",
             message: "production must not use the in-memory HTTP runtime store",
+        });
+    }
+    if config.hot_state_backend_profile == "memory" {
+        diagnostics.push(StartupDiagnostic {
+            code: "durable_hot_state_backend_required",
+            message: "production must not use the in-memory runtime hot-state backend",
         });
     }
     if config.secret_backend_profile == "memory" {
@@ -1152,34 +1184,130 @@ fn single_user_auth_from_env() -> Option<SingleUserAuthConfig> {
 }
 
 /// Gateway app state.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AppState {
     config: GatewayConfig,
     store: InMemoryGatewayStore,
+    route_hot_state: Arc<dyn RouteHotState>,
+    runtime_policy_store: Arc<dyn RuntimePolicyRepository>,
     postgres_store: Option<PostgresGatewayStore>,
+}
+
+impl std::fmt::Debug for AppState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AppState")
+            .field("config", &self.config)
+            .field("store", &self.store)
+            .field("route_hot_state", &self.config.hot_state_backend_profile)
+            .field(
+                "runtime_policy_store",
+                &self.config.hot_state_backend_profile,
+            )
+            .field("postgres_store", &self.postgres_store)
+            .finish()
+    }
 }
 
 impl AppState {
     /// Creates app state from config and in-memory foundation store.
     #[must_use]
-    pub const fn new(config: GatewayConfig, store: InMemoryGatewayStore) -> Self {
+    pub fn new(config: GatewayConfig, store: InMemoryGatewayStore) -> Self {
+        let route_hot_state = Arc::new(store.clone());
+        let runtime_policy_store = Arc::new(store.clone());
         Self {
             config,
             store,
+            route_hot_state,
+            runtime_policy_store,
+            postgres_store: None,
+        }
+    }
+
+    /// Creates app state with an explicit runtime policy hot-state backend.
+    #[must_use]
+    pub fn new_with_runtime_policy_store(
+        config: GatewayConfig,
+        store: InMemoryGatewayStore,
+        runtime_policy_store: Arc<dyn RuntimePolicyRepository>,
+    ) -> Self {
+        let route_hot_state = Arc::new(store.clone());
+        Self {
+            config,
+            store,
+            route_hot_state,
+            runtime_policy_store,
+            postgres_store: None,
+        }
+    }
+
+    /// Creates app state with explicit route and runtime policy hot-state backends.
+    #[must_use]
+    pub fn new_with_hot_state_backends(
+        config: GatewayConfig,
+        store: InMemoryGatewayStore,
+        route_hot_state: Arc<dyn RouteHotState>,
+        runtime_policy_store: Arc<dyn RuntimePolicyRepository>,
+    ) -> Self {
+        Self {
+            config,
+            store,
+            route_hot_state,
+            runtime_policy_store,
             postgres_store: None,
         }
     }
 
     /// Creates app state with an additional durable `PostgreSQL` store.
     #[must_use]
-    pub const fn new_with_postgres_store(
+    pub fn new_with_postgres_store(
         config: GatewayConfig,
         store: InMemoryGatewayStore,
         postgres_store: PostgresGatewayStore,
     ) -> Self {
+        let route_hot_state = Arc::new(store.clone());
+        let runtime_policy_store = Arc::new(store.clone());
         Self {
             config,
             store,
+            route_hot_state,
+            runtime_policy_store,
+            postgres_store: Some(postgres_store),
+        }
+    }
+
+    /// Creates app state with durable `PostgreSQL` and runtime policy hot state.
+    #[must_use]
+    pub fn new_with_postgres_store_and_runtime_policy_store(
+        config: GatewayConfig,
+        store: InMemoryGatewayStore,
+        postgres_store: PostgresGatewayStore,
+        runtime_policy_store: Arc<dyn RuntimePolicyRepository>,
+    ) -> Self {
+        let route_hot_state = Arc::new(store.clone());
+        Self {
+            config,
+            store,
+            route_hot_state,
+            runtime_policy_store,
+            postgres_store: Some(postgres_store),
+        }
+    }
+
+    /// Creates app state with durable `PostgreSQL` and explicit hot-state backends.
+    #[must_use]
+    pub fn new_with_postgres_store_and_hot_state_backends(
+        config: GatewayConfig,
+        store: InMemoryGatewayStore,
+        postgres_store: PostgresGatewayStore,
+        route_hot_state: Arc<dyn RouteHotState>,
+        runtime_policy_store: Arc<dyn RuntimePolicyRepository>,
+    ) -> Self {
+        Self {
+            config,
+            store,
+            route_hot_state,
+            runtime_policy_store,
             postgres_store: Some(postgres_store),
         }
     }
@@ -1194,6 +1322,18 @@ impl AppState {
     #[must_use]
     pub const fn store(&self) -> &InMemoryGatewayStore {
         &self.store
+    }
+
+    /// Returns the route hot-state backend.
+    #[must_use]
+    pub fn route_hot_state(&self) -> &dyn RouteHotState {
+        self.route_hot_state.as_ref()
+    }
+
+    /// Returns the runtime policy hot-state backend.
+    #[must_use]
+    pub fn runtime_policy_store(&self) -> &dyn RuntimePolicyRepository {
+        self.runtime_policy_store.as_ref()
     }
 
     /// Returns whether route decisions and attempts are bridged to `PostgreSQL`.
@@ -1868,6 +2008,7 @@ pub async fn build_app_state(config: GatewayConfig) -> crate::error::Result<AppS
         store.set_secret_file_backend_dir(dir);
     }
     bootstrap_single_user_if_configured(&store, &config, chrono::Utc::now())?;
+    let hot_state_backends = hot_state_backends_for_config(&config, &store).await?;
     if let Some(database_url) = config.database_url.as_deref() {
         let pool = PgPoolOptions::new()
             .connect(database_url)
@@ -1878,13 +2019,62 @@ pub async fn build_app_state(config: GatewayConfig) -> crate::error::Result<AppS
                 ),
             })?;
         migrations::run(&pool).await?;
-        return Ok(AppState::new_with_postgres_store(
+        return Ok(AppState::new_with_postgres_store_and_hot_state_backends(
             config,
             store,
             PostgresGatewayStore::new(pool),
+            hot_state_backends.route_hot_state,
+            hot_state_backends.runtime_policy_store,
         ));
     }
-    Ok(AppState::new(config, store))
+    Ok(AppState::new_with_hot_state_backends(
+        config,
+        store,
+        hot_state_backends.route_hot_state,
+        hot_state_backends.runtime_policy_store,
+    ))
+}
+
+struct HotStateBackends {
+    route_hot_state: Arc<dyn RouteHotState>,
+    runtime_policy_store: Arc<dyn RuntimePolicyRepository>,
+}
+
+async fn hot_state_backends_for_config(
+    config: &GatewayConfig,
+    store: &InMemoryGatewayStore,
+) -> crate::error::Result<HotStateBackends> {
+    match config.hot_state_backend_profile.as_str() {
+        "memory" => Ok(HotStateBackends {
+            route_hot_state: Arc::new(store.clone()),
+            runtime_policy_store: Arc::new(store.clone()),
+        }),
+        "redis" => {
+            let redis_url = config.redis_url.as_deref().ok_or_else(|| {
+                crate::error::GatewayError::BadRequest {
+                    message:
+                        "STARWEAVER_GATEWAY_HOT_STATE_BACKEND=redis requires STARWEAVER_GATEWAY_REDIS_URL"
+                            .to_owned(),
+                }
+            })?;
+            let timeout = Duration::from_millis(config.readiness_probe_timeout_ms);
+            let backend = RedisRuntimePolicyRepository::connect(redis_url, timeout)
+                .await
+                .map_err(|error| crate::error::GatewayError::Internal {
+                    message: format!(
+                        "failed to connect gateway Redis-compatible hot state: {error}"
+                    ),
+                })?;
+            let backend = Arc::new(backend);
+            Ok(HotStateBackends {
+                route_hot_state: backend.clone(),
+                runtime_policy_store: backend,
+            })
+        }
+        _ => Err(crate::error::GatewayError::BadRequest {
+            message: "hot-state backend profile must be memory or redis".to_owned(),
+        }),
+    }
 }
 
 async fn shutdown_signal() {
@@ -1985,8 +2175,14 @@ pub async fn run_background_worker_tick_once(
             }
         }
 
-        let runtime_summary =
-            run_runtime_policy_reconciler_once(&state.store, &tenant_id, worker_id, now);
+        let runtime_summary = run_runtime_policy_reconciler_once(
+            &state.store,
+            state.runtime_policy_store(),
+            &tenant_id,
+            worker_id,
+            now,
+        )
+        .await;
         summary.expired_budget_lease_count = summary
             .expired_budget_lease_count
             .saturating_add(runtime_summary.expired_budget_lease_count);
@@ -2244,6 +2440,7 @@ struct ReadinessProfile {
     production_profile: bool,
     production_profile_valid: bool,
     dependency_probe_mode: &'static str,
+    hot_state_backend_profile: String,
     runtime_store_profile: String,
 }
 
@@ -3155,6 +3352,7 @@ async fn readyz(State(state): State<AppState>) -> (StatusCode, Json<ReadinessRes
                 production_profile: is_production_environment(&state.config.environment),
                 production_profile_valid: diagnostics.is_empty(),
                 dependency_probe_mode: state.config.dependency_probe_mode.as_str(),
+                hot_state_backend_profile: state.config.hot_state_backend_profile.clone(),
                 runtime_store_profile: state.config.runtime_store_profile.clone(),
             },
             dependencies: ReadinessDependencies {
@@ -3458,11 +3656,12 @@ async fn run_route_simulation(
             protocol_family: request.protocol_family,
             alias_name,
             streaming: request.streaming,
-            hot_state: state.store(),
+            hot_state: state.route_hot_state(),
             config_version: Some(loaded_catalog.version),
             now,
             route_affinity_hash: None,
-        })?;
+        })
+        .await?;
     let (status, reason, selected) = match plan.outcome {
         RoutePlanOutcome::Selected(selection) => (
             RouteDecisionStatus::Selected.as_str(),
@@ -4245,7 +4444,7 @@ async fn emergency_disable_provider_endpoint(
         ResourceStatus::Disabled,
         now,
     )?;
-    set_endpoint_emergency_drain(&state, &updated, &request.reason, request.expires_at, now);
+    set_endpoint_emergency_drain(&state, &updated, &request.reason, request.expires_at, now).await;
     let operation = create_emergency_operation_record(
         &state,
         &actor,
@@ -4811,13 +5010,14 @@ async fn get_realtime_overview(
         .latest_published_snapshot_for_tenant(&actor.tenant_id);
     let config_version = latest_config.as_ref().map(|snapshot| snapshot.version);
     let publication = state.store.config_publication(&actor.tenant_id);
-    let provider_summary = realtime_provider_summary(&state, &actor.tenant_id, config_version, now);
+    let provider_summary =
+        realtime_provider_summary(&state, &actor.tenant_id, config_version, now).await;
     let route_summary = realtime_route_summary(&state, &actor.tenant_id);
     let worker_summary = realtime_worker_summary(&state, &actor.tenant_id, config_version);
     let otel_exporter_summary = realtime_otel_exporter_summary(&state, &actor.tenant_id);
     let validation_summary = validation_diagnostics_summary(&state, &actor.tenant_id);
-    let budget_summary = realtime_budget_summary(&state, &actor.tenant_id);
-    let quota_summary = realtime_quota_summary(&state, &actor.tenant_id);
+    let budget_summary = realtime_budget_summary(&state, &actor.tenant_id).await;
+    let quota_summary = realtime_quota_summary(&state, &actor.tenant_id).await;
     Ok(Json(json!({
         "schema": "gateway.admin.realtime_overview.v1",
         "source": {
@@ -4874,7 +5074,7 @@ async fn get_realtime_providers(
         &actor.tenant_id,
         now,
         "providers",
-        realtime_provider_summary(&state, &actor.tenant_id, config_version, now),
+        realtime_provider_summary(&state, &actor.tenant_id, config_version, now).await,
     )))
 }
 
@@ -4904,7 +5104,7 @@ async fn get_realtime_budgets(
         &actor.tenant_id,
         now,
         "budgets",
-        realtime_budget_summary(&state, &actor.tenant_id),
+        realtime_budget_summary(&state, &actor.tenant_id).await,
     )))
 }
 
@@ -4919,7 +5119,7 @@ async fn get_realtime_quotas(
         &actor.tenant_id,
         now,
         "quotas",
-        realtime_quota_summary(&state, &actor.tenant_id),
+        realtime_quota_summary(&state, &actor.tenant_id).await,
     )))
 }
 
@@ -4995,15 +5195,27 @@ async fn get_budget_dashboard(
     )
     .await?;
     let ledger_buckets = ledger_buckets_for_analytics(&state, &scope.tenant_id).await?;
+    let hot_state_available = state
+        .runtime_policy_store()
+        .runtime_policy_hot_state_available()
+        .await;
+    let budgets = budget_dashboard_rows(
+        state.store(),
+        &scope,
+        &ledger_buckets,
+        now,
+        hot_state_available,
+    );
+    let realtime = realtime_budget_summary(&state, &scope.tenant_id).await;
     Ok(Json(json!({
         "schema": "gateway.admin.budget_dashboard.v1",
         "scope": dashboard_scope_body(&scope),
         "generated_at": now,
-        "budgets": budget_dashboard_rows(&state, &scope, &ledger_buckets, now),
-        "realtime": realtime_budget_summary(&state, &scope.tenant_id),
+        "budgets": budgets,
+        "realtime": realtime,
         "sources": {
             "usage_ledger_rollups": "durable_ledger_buckets",
-            "budget_hot_state": if state.store.runtime_policy_hot_state_available() {
+            "budget_hot_state": if hot_state_available {
                 "redis_compatible_hot_state"
             } else {
                 "unavailable"
@@ -5032,19 +5244,20 @@ async fn get_budget_policy_timeseries(
     .await?;
     let policy = budget_policy_for_actor(&state, &actor, &budget_policy_id)?;
     let ledger_buckets = ledger_buckets_for_analytics(&state, &actor.tenant_id).await?;
+    let hot_state_available = state
+        .runtime_policy_store()
+        .runtime_policy_hot_state_available()
+        .await;
+    let budget_policy =
+        budget_policy_dashboard_body(&policy, &ledger_buckets, now, hot_state_available);
     Ok(Json(json!({
         "schema": "gateway.admin.budget_timeseries.v1",
-        "budget_policy": budget_policy_dashboard_body(
-            &state,
-            &policy,
-            &ledger_buckets,
-            now
-        ),
+        "budget_policy": budget_policy,
         "bucket_kind": bucket_kind,
         "points": budget_policy_timeseries_points(&policy, &ledger_buckets, bucket_kind),
         "sources": {
             "usage_ledger_rollups": "durable_ledger_buckets",
-            "budget_hot_state": if state.store.runtime_policy_hot_state_available() {
+            "budget_hot_state": if hot_state_available {
                 "redis_compatible_hot_state"
             } else {
                 "unavailable"
@@ -5076,15 +5289,21 @@ async fn get_quota_dashboard(
     )
     .await?;
     let ledger_buckets = ledger_buckets_for_analytics(&state, &scope.tenant_id).await?;
+    let hot_state_available = state
+        .runtime_policy_store()
+        .runtime_policy_hot_state_available()
+        .await;
+    let quotas = quota_dashboard_rows(&state, &scope, &ledger_buckets, now).await;
+    let realtime = realtime_quota_summary(&state, &scope.tenant_id).await;
     Ok(Json(json!({
         "schema": "gateway.admin.quota_dashboard.v1",
         "scope": dashboard_scope_body(&scope),
         "generated_at": now,
-        "quotas": quota_dashboard_rows(&state, &scope, &ledger_buckets, now),
-        "realtime": realtime_quota_summary(&state, &scope.tenant_id),
+        "quotas": quotas,
+        "realtime": realtime,
         "sources": {
             "usage_ledger_rollups": "durable_ledger_buckets",
-            "quota_hot_state": if state.store.runtime_policy_hot_state_available() {
+            "quota_hot_state": if hot_state_available {
                 "redis_compatible_hot_state"
             } else {
                 "unavailable"
@@ -5113,9 +5332,10 @@ async fn get_rate_limit_timeseries(
     .await?;
     let policy = quota_policy_for_actor(&state, &actor, &quota_policy_id)?;
     let ledger_buckets = ledger_buckets_for_analytics(&state, &actor.tenant_id).await?;
+    let quota_policy = quota_policy_dashboard_body(&state, &policy, &ledger_buckets, now).await;
     Ok(Json(json!({
         "schema": "gateway.admin.rate_limit_timeseries.v1",
-        "quota_policy": quota_policy_dashboard_body(&state, &policy, &ledger_buckets, now),
+        "quota_policy": quota_policy,
         "bucket_kind": bucket_kind,
         "points": quota_policy_timeseries_points(&policy, &ledger_buckets, bucket_kind),
         "sources": {
@@ -5758,7 +5978,7 @@ async fn get_provider_endpoint_observability_health(
             &route_decisions,
             &route_attempts,
             now
-        ),
+        ).await,
         "sources": {
             "hot_state": "redis_compatible_hot_state",
             "route_evidence": "durable",
@@ -12824,7 +13044,9 @@ async fn model_ingress(
         route_target.selected_route.as_ref(),
         request_body_bytes,
         chrono::Utc::now(),
-    ) {
+    )
+    .await
+    {
         Ok(preflight) => preflight,
         Err(error) => {
             record_runtime_policy_block_decision(
@@ -12852,7 +13074,7 @@ async fn model_ingress(
     {
         Ok(response) => response,
         Err(error) => {
-            release_runtime_policy_reservations(&state, &preflight);
+            release_runtime_policy_reservations(&state, &preflight).await;
             return Err(error);
         }
     };
@@ -12866,7 +13088,7 @@ async fn model_ingress(
         attempt_started_at,
     )
     .await?;
-    release_runtime_policy_reservations(&state, &preflight);
+    release_runtime_policy_reservations(&state, &preflight).await;
     Ok(Json(response))
 }
 
@@ -13287,7 +13509,7 @@ async fn record_terminal_usage_event(
     if let Some(store) = state.postgres_store.as_ref() {
         store.insert_usage_event(&record).await?;
     }
-    finalize_runtime_policy_terminal(state, actor, input, &usage_payload, &cost_payload);
+    finalize_runtime_policy_terminal(state, actor, input, &usage_payload, &cost_payload).await;
     Ok(())
 }
 
@@ -13530,31 +13752,35 @@ fn fixed_per_million_cost(units: i64, price_per_million: i64, rounding_mode: &st
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
-fn finalize_runtime_policy_terminal(
+async fn finalize_runtime_policy_terminal(
     state: &AppState,
     actor: &AuthenticatedActor,
     input: &TerminalUsageInput<'_>,
     usage_payload: &Value,
     cost_payload: &Value,
 ) {
-    finalize_runtime_quota_terminal(state, actor, input, usage_payload);
+    finalize_runtime_quota_terminal(state, actor, input, usage_payload).await;
     finalize_runtime_budget_terminal(state, actor, input, usage_payload, cost_payload);
 }
 
-fn finalize_runtime_quota_terminal(
+async fn finalize_runtime_quota_terminal(
     state: &AppState,
     actor: &AuthenticatedActor,
     input: &TerminalUsageInput<'_>,
     usage_payload: &Value,
 ) {
-    if !state.store.runtime_policy_hot_state_available() {
+    if !state
+        .runtime_policy_store()
+        .runtime_policy_hot_state_available()
+        .await
+    {
         return;
     }
-    finalize_runtime_token_actual_quota_terminal(state, actor, input, usage_payload);
-    finalize_runtime_stream_duration_quota_terminal(state, actor, input);
+    finalize_runtime_token_actual_quota_terminal(state, actor, input, usage_payload).await;
+    finalize_runtime_stream_duration_quota_terminal(state, actor, input).await;
 }
 
-fn finalize_runtime_token_actual_quota_terminal(
+async fn finalize_runtime_token_actual_quota_terminal(
     state: &AppState,
     actor: &AuthenticatedActor,
     input: &TerminalUsageInput<'_>,
@@ -13579,12 +13805,13 @@ fn finalize_runtime_token_actual_quota_terminal(
         }
         let key = runtime_quota_counter_key(&policy, input.ended_at);
         state
-            .store
-            .adjust_runtime_policy_counter(key, terminal_tokens);
+            .runtime_policy_store()
+            .adjust_runtime_policy_counter(key, terminal_tokens)
+            .await;
     }
 }
 
-fn finalize_runtime_stream_duration_quota_terminal(
+async fn finalize_runtime_stream_duration_quota_terminal(
     state: &AppState,
     actor: &AuthenticatedActor,
     input: &TerminalUsageInput<'_>,
@@ -13608,8 +13835,9 @@ fn finalize_runtime_stream_duration_quota_terminal(
         }
         let key = runtime_quota_counter_key(&policy, input.ended_at);
         state
-            .store
-            .adjust_runtime_policy_counter(key, stream_seconds);
+            .runtime_policy_store()
+            .adjust_runtime_policy_counter(key, stream_seconds)
+            .await;
     }
 }
 
@@ -13839,7 +14067,7 @@ fn terminal_usage_token_count(usage_payload: &Value) -> i64 {
         .unwrap_or_default()
 }
 
-fn enforce_runtime_policy_preflight(
+async fn enforce_runtime_policy_preflight(
     state: &AppState,
     actor: &AuthenticatedActor,
     replay_case: &GatewayReplayCase,
@@ -13847,7 +14075,7 @@ fn enforce_runtime_policy_preflight(
     request_body_bytes: usize,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<RuntimePolicyPreflight> {
-    let budget_reservations = enforce_runtime_budget_preflight(state, actor, selected, now)?;
+    let budget_reservations = enforce_runtime_budget_preflight(state, actor, selected, now).await?;
     let quota_reservations = match enforce_runtime_quota_preflight(
         state,
         actor,
@@ -13855,10 +14083,12 @@ fn enforce_runtime_policy_preflight(
         selected,
         request_body_bytes,
         now,
-    ) {
+    )
+    .await
+    {
         Ok(reservations) => reservations,
         Err(error) => {
-            release_runtime_budget_reservations(state, &budget_reservations);
+            release_runtime_budget_reservations(state, &budget_reservations).await;
             return Err(error);
         }
     };
@@ -13868,49 +14098,59 @@ fn enforce_runtime_policy_preflight(
     })
 }
 
-fn release_runtime_policy_reservations(state: &AppState, preflight: &RuntimePolicyPreflight) {
-    release_runtime_budget_reservations(state, &preflight.budget_reservations);
-    release_runtime_quota_reservations(state, &preflight.quota_reservations);
+async fn release_runtime_policy_reservations(state: &AppState, preflight: &RuntimePolicyPreflight) {
+    release_runtime_budget_reservations(state, &preflight.budget_reservations).await;
+    release_runtime_quota_reservations(state, &preflight.quota_reservations).await;
 }
 
-fn release_runtime_budget_reservations(
+async fn release_runtime_budget_reservations(
     state: &AppState,
     reservations: &[RuntimeBudgetReservation],
 ) {
     for reservation in reservations {
         if state
-            .store
+            .runtime_policy_store()
             .release_runtime_budget_lease(&reservation.lease_id, chrono::Utc::now())
+            .await
             .is_some()
         {
-            state.store.adjust_runtime_policy_counter(
-                reservation.counter_key.clone(),
-                -reservation.amount,
-            );
+            state
+                .runtime_policy_store()
+                .adjust_runtime_policy_counter(reservation.counter_key.clone(), -reservation.amount)
+                .await;
         }
     }
 }
 
-fn release_runtime_quota_reservations(state: &AppState, reservations: &[RuntimeQuotaReservation]) {
+async fn release_runtime_quota_reservations(
+    state: &AppState,
+    reservations: &[RuntimeQuotaReservation],
+) {
     for reservation in reservations {
         match reservation.counter_backend {
             RuntimePolicyCounterBackend::HotState => {
-                state.store.adjust_runtime_policy_counter(
-                    reservation.counter_key.clone(),
-                    -reservation.amount,
-                );
+                state
+                    .runtime_policy_store()
+                    .adjust_runtime_policy_counter(
+                        reservation.counter_key.clone(),
+                        -reservation.amount,
+                    )
+                    .await;
             }
             RuntimePolicyCounterBackend::LossAllowance => {
-                state.store.adjust_runtime_policy_loss_allowance_counter(
-                    reservation.counter_key.clone(),
-                    -reservation.amount,
-                );
+                state
+                    .runtime_policy_store()
+                    .adjust_runtime_policy_loss_allowance_counter(
+                        reservation.counter_key.clone(),
+                        -reservation.amount,
+                    )
+                    .await;
             }
         }
     }
 }
 
-fn enforce_runtime_budget_preflight(
+async fn enforce_runtime_budget_preflight(
     state: &AppState,
     actor: &AuthenticatedActor,
     selected: Option<&SelectedRouteEvidence>,
@@ -13943,14 +14183,14 @@ fn enforce_runtime_budget_preflight(
             _ => false,
         };
         if exceeded {
-            release_runtime_budget_reservations(state, &reservations);
+            release_runtime_budget_reservations(state, &reservations).await;
             return Err(GatewayError::BudgetExceeded {
                 reason: "hard_limit_reached",
             });
         }
         if policy.limit_kind == "requests" {
             let reservation =
-                reserve_runtime_request_budget(state, actor, &policy, current, limit, now)?;
+                reserve_runtime_request_budget(state, actor, &policy, current, limit, now).await?;
             reservations.push(reservation);
         }
     }
@@ -13988,7 +14228,7 @@ fn runtime_budget_policy_is_preflight_enforced(policy: &BudgetPolicyRecord) -> b
         && matches!(policy.limit_kind.as_str(), "requests" | "tokens" | "cost")
 }
 
-fn reserve_runtime_request_budget(
+async fn reserve_runtime_request_budget(
     state: &AppState,
     actor: &AuthenticatedActor,
     policy: &BudgetPolicyRecord,
@@ -13996,7 +14236,11 @@ fn reserve_runtime_request_budget(
     limit: i64,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<RuntimeBudgetReservation> {
-    if !state.store.runtime_policy_hot_state_available() {
+    if !state
+        .runtime_policy_store()
+        .runtime_policy_hot_state_available()
+        .await
+    {
         return Err(GatewayError::BudgetExceeded {
             reason: "budget_hot_state_unavailable",
         });
@@ -14004,16 +14248,20 @@ fn reserve_runtime_request_budget(
     let counter_key = runtime_budget_reservation_key(policy, now);
     let lease_id = new_prefixed_id("bls");
     let reserved_after_increment = state
-        .store
-        .adjust_runtime_policy_counter(counter_key.clone(), 1);
+        .runtime_policy_store()
+        .adjust_runtime_policy_counter(counter_key.clone(), 1)
+        .await;
     if current_ledger_value.saturating_add(reserved_after_increment) > limit {
-        state.store.adjust_runtime_policy_counter(counter_key, -1);
+        state
+            .runtime_policy_store()
+            .adjust_runtime_policy_counter(counter_key, -1)
+            .await;
         return Err(GatewayError::BudgetExceeded {
             reason: "hard_limit_reserved",
         });
     }
     state
-        .store
+        .runtime_policy_store()
         .record_runtime_budget_lease(RuntimeBudgetLeaseRecord {
             lease_id: lease_id.clone(),
             tenant_id: policy.tenant_id.clone(),
@@ -14025,7 +14273,8 @@ fn reserve_runtime_request_budget(
             expires_at: now + chrono::Duration::seconds(RUNTIME_BUDGET_LEASE_TTL_SECONDS),
             created_at: now,
             updated_at: now,
-        });
+        })
+        .await;
     Ok(RuntimeBudgetReservation {
         lease_id,
         counter_key,
@@ -14148,7 +14397,7 @@ fn runtime_budget_bucket_value(policy: &BudgetPolicyRecord, bucket: &LedgerBucke
     }
 }
 
-fn enforce_runtime_quota_preflight(
+async fn enforce_runtime_quota_preflight(
     state: &AppState,
     actor: &AuthenticatedActor,
     replay_case: &GatewayReplayCase,
@@ -14166,7 +14415,10 @@ fn enforce_runtime_quota_preflight(
         })
         .collect::<Vec<_>>();
 
-    let hot_state_available = state.store.runtime_policy_hot_state_available();
+    let hot_state_available = state
+        .runtime_policy_store()
+        .runtime_policy_hot_state_available()
+        .await;
     let input = RuntimeQuotaPreflightInput {
         state,
         replay_case,
@@ -14174,8 +14426,8 @@ fn enforce_runtime_quota_preflight(
         now,
         hot_state_available,
     };
-    enforce_runtime_quota_preflight_limits(&input, &policies)?;
-    reserve_runtime_quota_preflight(&input, policies)
+    enforce_runtime_quota_preflight_limits(&input, &policies).await?;
+    reserve_runtime_quota_preflight(&input, policies).await
 }
 
 struct RuntimeQuotaPreflightInput<'a> {
@@ -14186,7 +14438,7 @@ struct RuntimeQuotaPreflightInput<'a> {
     hot_state_available: bool,
 }
 
-fn enforce_runtime_quota_preflight_limits(
+async fn enforce_runtime_quota_preflight_limits(
     input: &RuntimeQuotaPreflightInput<'_>,
     policies: &[QuotaPolicyRecord],
 ) -> Result<()> {
@@ -14196,7 +14448,7 @@ fn enforce_runtime_quota_preflight_limits(
         }
         enforce_runtime_quota_body_limit(policy, input.request_body_bytes)?;
         if input.hot_state_available {
-            enforce_runtime_quota_current_limit(input.state, policy, input.now)?;
+            enforce_runtime_quota_current_limit(input.state, policy, input.now).await?;
         }
     }
     Ok(())
@@ -14221,7 +14473,7 @@ fn enforce_runtime_quota_body_limit(
     Ok(())
 }
 
-fn enforce_runtime_quota_current_limit(
+async fn enforce_runtime_quota_current_limit(
     state: &AppState,
     policy: &QuotaPolicyRecord,
     now: chrono::DateTime<chrono::Utc>,
@@ -14232,7 +14484,7 @@ fn enforce_runtime_quota_current_limit(
             policy.increment_source.as_str()
         ),
         ("token_actual_rate", "terminal_usage_event")
-    ) && runtime_quota_current_value(state, policy, now) >= policy.limit
+    ) && runtime_quota_current_value(state, policy, now).await >= policy.limit
     {
         return Err(GatewayError::QuotaExceeded {
             reason: "token_actual_rate_limit_reached",
@@ -14244,7 +14496,7 @@ fn enforce_runtime_quota_current_limit(
             policy.increment_source.as_str()
         ),
         ("stream_duration", "stream_start")
-    ) && runtime_quota_current_value(state, policy, now) >= policy.limit
+    ) && runtime_quota_current_value(state, policy, now).await >= policy.limit
     {
         return Err(GatewayError::QuotaExceeded {
             reason: "stream_duration_limit_reached",
@@ -14253,7 +14505,7 @@ fn enforce_runtime_quota_current_limit(
     Ok(())
 }
 
-fn reserve_runtime_quota_preflight(
+async fn reserve_runtime_quota_preflight(
     input: &RuntimeQuotaPreflightInput<'_>,
     policies: Vec<QuotaPolicyRecord>,
 ) -> Result<Vec<RuntimeQuotaReservation>> {
@@ -14264,7 +14516,7 @@ fn reserve_runtime_quota_preflight(
         }
         if runtime_quota_policy_needs_hot_state(&policy) && !input.hot_state_available {
             if let Some(reservation) =
-                handle_runtime_quota_hot_state_loss(input.state, &policy, input.now)?
+                handle_runtime_quota_hot_state_loss(input.state, &policy, input.now).await?
             {
                 reservations.push(reservation);
             }
@@ -14276,13 +14528,13 @@ fn reserve_runtime_quota_preflight(
         ) {
             ("request_rate", "accepted_preflight_request") => {
                 let key = runtime_quota_counter_key(&policy, input.now);
-                let decision =
-                    input
-                        .state
-                        .store
-                        .increment_runtime_quota_counter(key, 1, policy.limit);
+                let decision = input
+                    .state
+                    .runtime_policy_store()
+                    .increment_runtime_quota_counter(key, 1, policy.limit)
+                    .await;
                 if !decision.allowed {
-                    release_runtime_quota_reservations(input.state, &reservations);
+                    release_runtime_quota_reservations(input.state, &reservations).await;
                     return Err(GatewayError::QuotaExceeded {
                         reason: "request_rate_limit_reached",
                     });
@@ -14295,10 +14547,12 @@ fn reserve_runtime_quota_preflight(
                     1,
                     "concurrent_request_limit_reached",
                     input.now,
-                ) {
+                )
+                .await
+                {
                     Ok(reservation) => reservations.push(reservation),
                     Err(error) => {
-                        release_runtime_quota_reservations(input.state, &reservations);
+                        release_runtime_quota_reservations(input.state, &reservations).await;
                         return Err(error);
                     }
                 }
@@ -14310,10 +14564,12 @@ fn reserve_runtime_quota_preflight(
                     1,
                     "concurrent_stream_limit_reached",
                     input.now,
-                ) {
+                )
+                .await
+                {
                     Ok(reservation) => reservations.push(reservation),
                     Err(error) => {
-                        release_runtime_quota_reservations(input.state, &reservations);
+                        release_runtime_quota_reservations(input.state, &reservations).await;
                         return Err(error);
                     }
                 }
@@ -14351,21 +14607,21 @@ fn runtime_quota_policy_requires_stream(policy: &QuotaPolicyRecord) -> bool {
     )
 }
 
-fn handle_runtime_quota_hot_state_loss(
+async fn handle_runtime_quota_hot_state_loss(
     state: &AppState,
     policy: &QuotaPolicyRecord,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Option<RuntimeQuotaReservation>> {
     match policy.loss_behavior.as_str() {
         "fail_open" => Ok(None),
-        "fail_limited" => reserve_runtime_quota_loss_allowance(state, policy, now),
+        "fail_limited" => reserve_runtime_quota_loss_allowance(state, policy, now).await,
         _ => Err(GatewayError::QuotaExceeded {
             reason: "hot_state_unavailable",
         }),
     }
 }
 
-fn reserve_runtime_quota_loss_allowance(
+async fn reserve_runtime_quota_loss_allowance(
     state: &AppState,
     policy: &QuotaPolicyRecord,
     now: chrono::DateTime<chrono::Utc>,
@@ -14377,10 +14633,10 @@ fn reserve_runtime_quota_loss_allowance(
         });
     }
     let counter_key = runtime_quota_loss_allowance_key(policy, now);
-    let decision =
-        state
-            .store
-            .increment_runtime_policy_loss_allowance_counter(counter_key.clone(), 1, limit);
+    let decision = state
+        .runtime_policy_store()
+        .increment_runtime_policy_loss_allowance_counter(counter_key.clone(), 1, limit)
+        .await;
     if !decision.allowed {
         return Err(GatewayError::QuotaExceeded {
             reason: "fail_limited_allowance_exhausted",
@@ -14403,16 +14659,19 @@ fn reserve_runtime_quota_loss_allowance(
     }
 }
 
-fn runtime_quota_current_value(
+async fn runtime_quota_current_value(
     state: &AppState,
     policy: &QuotaPolicyRecord,
     now: chrono::DateTime<chrono::Utc>,
 ) -> i64 {
     let key = runtime_quota_counter_key(policy, now);
-    state.store.runtime_policy_counter(&key)
+    state
+        .runtime_policy_store()
+        .runtime_policy_counter(&key)
+        .await
 }
 
-fn reserve_runtime_quota_counter(
+async fn reserve_runtime_quota_counter(
     state: &AppState,
     policy: &QuotaPolicyRecord,
     amount: i64,
@@ -14421,12 +14680,14 @@ fn reserve_runtime_quota_counter(
 ) -> Result<RuntimeQuotaReservation> {
     let counter_key = runtime_quota_counter_key(policy, now);
     let current = state
-        .store
-        .adjust_runtime_policy_counter(counter_key.clone(), amount);
+        .runtime_policy_store()
+        .adjust_runtime_policy_counter(counter_key.clone(), amount)
+        .await;
     if current > policy.limit {
         state
-            .store
-            .adjust_runtime_policy_counter(counter_key, -amount);
+            .runtime_policy_store()
+            .adjust_runtime_policy_counter(counter_key, -amount)
+            .await;
         return Err(GatewayError::QuotaExceeded { reason });
     }
     Ok(RuntimeQuotaReservation {
@@ -14496,13 +14757,16 @@ fn usize_to_i64(value: usize) -> i64 {
 /// durable usage evidence. It never lowers counters and never clears active
 /// request or stream leases.
 #[must_use]
-pub fn run_runtime_policy_reconciler_once(
+pub async fn run_runtime_policy_reconciler_once(
     store: &InMemoryGatewayStore,
+    runtime_policy_store: &dyn RuntimePolicyRepository,
     tenant_id: &str,
     worker_id: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> RuntimePolicyReconciliationSummary {
-    let hot_state_available = store.runtime_policy_hot_state_available();
+    let hot_state_available = runtime_policy_store
+        .runtime_policy_hot_state_available()
+        .await;
     let mut summary = RuntimePolicyReconciliationSummary {
         tenant_id: tenant_id.to_owned(),
         worker_id: worker_id.to_owned(),
@@ -14525,10 +14789,16 @@ pub fn run_runtime_policy_reconciler_once(
         .iter()
         .filter(|policy| runtime_budget_policy_is_preflight_enforced(policy))
         .count();
-    for lease in store.expire_runtime_budget_leases(tenant_id, now) {
-        let previous_value = store.runtime_policy_counter(&lease.counter_key);
-        let repaired_value =
-            store.adjust_runtime_policy_counter(lease.counter_key.clone(), -lease.amount);
+    for lease in runtime_policy_store
+        .expire_runtime_budget_leases(tenant_id, now)
+        .await
+    {
+        let previous_value = runtime_policy_store
+            .runtime_policy_counter(&lease.counter_key)
+            .await;
+        let repaired_value = runtime_policy_store
+            .adjust_runtime_policy_counter(lease.counter_key.clone(), -lease.amount)
+            .await;
         summary.expired_budget_lease_count += 1;
         summary.expired_budget_lease_total = summary
             .expired_budget_lease_total
@@ -14564,12 +14834,16 @@ pub fn run_runtime_policy_reconciler_once(
             continue;
         }
         let counter_key = runtime_quota_counter_key(&policy, now);
-        let current_value = store.runtime_policy_counter(&counter_key);
+        let current_value = runtime_policy_store
+            .runtime_policy_counter(&counter_key)
+            .await;
         if current_value >= durable_value {
             continue;
         }
         let delta = durable_value.saturating_sub(current_value);
-        store.adjust_runtime_policy_counter(counter_key, delta);
+        runtime_policy_store
+            .adjust_runtime_policy_counter(counter_key, delta)
+            .await;
         summary.repaired_counter_count += 1;
         summary.audit_event_count += 1;
         summary.repaired_delta_total = summary.repaired_delta_total.saturating_add(delta);
@@ -16690,7 +16964,7 @@ fn emergency_operation_audit_event_type(operation_kind: &str) -> &'static str {
     }
 }
 
-fn set_endpoint_emergency_drain(
+async fn set_endpoint_emergency_drain(
     state: &AppState,
     endpoint: &ProviderEndpointRecord,
     reason: &str,
@@ -16700,14 +16974,17 @@ fn set_endpoint_emergency_drain(
     let Some(publication) = state.store.config_publication(&endpoint.tenant_id) else {
         return;
     };
-    state.store.set_endpoint_drain(EndpointDrainRecord {
-        tenant_id: endpoint.tenant_id.clone(),
-        provider_endpoint_id: endpoint.provider_endpoint_id.clone(),
-        config_version: publication.version,
-        reason: reason.trim().to_owned(),
-        created_at: now,
-        expires_at,
-    });
+    state
+        .route_hot_state()
+        .set_endpoint_drain(EndpointDrainRecord {
+            tenant_id: endpoint.tenant_id.clone(),
+            provider_endpoint_id: endpoint.provider_endpoint_id.clone(),
+            config_version: publication.version,
+            reason: reason.trim().to_owned(),
+            created_at: now,
+            expires_at,
+        })
+        .await;
 }
 
 fn config_snapshot_summary(snapshot: &crate::config::PublishedConfigSnapshot) -> Value {
@@ -21806,7 +22083,7 @@ fn config_worker_reload_body(record: &ConfigWorkerReloadRecord) -> Value {
     })
 }
 
-fn realtime_provider_summary(
+async fn realtime_provider_summary(
     state: &AppState,
     tenant_id: &str,
     config_version: Option<i64>,
@@ -21819,47 +22096,54 @@ fn realtime_provider_summary(
     let mut blocked_count = 0usize;
     let mut unknown_count = 0usize;
     let mut drained_count = 0usize;
-    let endpoints = state
+    let provider_endpoints = state
         .store
         .provider_endpoints_for_tenant(tenant_id)
         .into_iter()
         .filter(|endpoint| endpoint.status != ResourceStatus::Deleted)
-        .map(|endpoint| {
-            let health_state = state.store.endpoint_health_state(
-                tenant_id,
-                &endpoint.provider_endpoint_id,
-                config_version,
-                now,
-            );
-            match health_state {
-                EndpointHealthState::Healthy => healthy_count += 1,
-                EndpointHealthState::Warmup => warmup_count += 1,
-                EndpointHealthState::Degraded => degraded_count += 1,
-                EndpointHealthState::Unhealthy => unhealthy_count += 1,
-                EndpointHealthState::Blocked => blocked_count += 1,
-                EndpointHealthState::Unknown => unknown_count += 1,
-            }
-            let drained = state.store.endpoint_is_drained(
-                tenant_id,
-                &endpoint.provider_endpoint_id,
-                config_version,
-                now,
-            );
-            if drained {
-                drained_count += 1;
-            }
-            json!({
-                "provider_endpoint_id": endpoint.provider_endpoint_id,
-                "organization_id": endpoint.organization_id,
-                "provider_kind": endpoint.provider_kind,
-                "status": endpoint.status.as_str(),
-                "health_state": health_state.as_str(),
-                "drained": drained,
-                "config_version": config_version,
-                "source": "redis_compatible_hot_state"
-            })
-        })
         .collect::<Vec<_>>();
+    let mut endpoints = Vec::with_capacity(provider_endpoints.len());
+    for endpoint in provider_endpoints {
+        let health_state = state
+            .route_hot_state()
+            .endpoint_health_state(
+                tenant_id,
+                &endpoint.provider_endpoint_id,
+                config_version,
+                now,
+            )
+            .await;
+        match health_state {
+            EndpointHealthState::Healthy => healthy_count += 1,
+            EndpointHealthState::Warmup => warmup_count += 1,
+            EndpointHealthState::Degraded => degraded_count += 1,
+            EndpointHealthState::Unhealthy => unhealthy_count += 1,
+            EndpointHealthState::Blocked => blocked_count += 1,
+            EndpointHealthState::Unknown => unknown_count += 1,
+        }
+        let drained = state
+            .route_hot_state()
+            .endpoint_is_drained(
+                tenant_id,
+                &endpoint.provider_endpoint_id,
+                config_version,
+                now,
+            )
+            .await;
+        if drained {
+            drained_count += 1;
+        }
+        endpoints.push(json!({
+            "provider_endpoint_id": endpoint.provider_endpoint_id,
+            "organization_id": endpoint.organization_id,
+            "provider_kind": endpoint.provider_kind,
+            "status": endpoint.status.as_str(),
+            "health_state": health_state.as_str(),
+            "drained": drained,
+            "config_version": config_version,
+            "source": "redis_compatible_hot_state"
+        }));
+    }
     let freshness_status = if endpoints.is_empty() || unknown_count == endpoints.len() {
         "unavailable"
     } else if unknown_count > 0 {
@@ -21928,7 +22212,7 @@ fn realtime_route_summary(state: &AppState, tenant_id: &str) -> Value {
     })
 }
 
-fn realtime_budget_summary(state: &AppState, tenant_id: &str) -> Value {
+async fn realtime_budget_summary(state: &AppState, tenant_id: &str) -> Value {
     let policies = state
         .store
         .budget_policies_for_tenant(tenant_id)
@@ -21941,9 +22225,15 @@ fn realtime_budget_summary(state: &AppState, tenant_id: &str) -> Value {
             policy.hard_limit.is_some() && runtime_budget_policy_is_preflight_enforced(policy)
         })
         .collect::<Vec<_>>();
-    let hot_state_available = state.store.runtime_policy_hot_state_available();
+    let hot_state_available = state
+        .runtime_policy_store()
+        .runtime_policy_hot_state_available()
+        .await;
     let conservative_active = !hot_state_available && !hard_block_policies.is_empty();
-    let leases = state.store.runtime_budget_leases_for_tenant(tenant_id);
+    let leases = state
+        .runtime_policy_store()
+        .runtime_budget_leases_for_tenant(tenant_id)
+        .await;
     let reserved_lease_count = leases
         .iter()
         .filter(|lease| lease.status == "reserved")
@@ -21998,7 +22288,7 @@ fn realtime_budget_summary(state: &AppState, tenant_id: &str) -> Value {
     })
 }
 
-fn realtime_quota_summary(state: &AppState, tenant_id: &str) -> Value {
+async fn realtime_quota_summary(state: &AppState, tenant_id: &str) -> Value {
     let policies = state
         .store
         .quota_policies_for_tenant(tenant_id)
@@ -22021,7 +22311,11 @@ fn realtime_quota_summary(state: &AppState, tenant_id: &str) -> Value {
     }
     let hot_state_status = if active_policy_count == 0 {
         "unavailable"
-    } else if state.store.runtime_policy_hot_state_available() {
+    } else if state
+        .runtime_policy_store()
+        .runtime_policy_hot_state_available()
+        .await
+    {
         "available"
     } else {
         "unavailable"
@@ -22059,26 +22353,28 @@ fn realtime_quota_summary(state: &AppState, tenant_id: &str) -> Value {
 }
 
 fn budget_dashboard_rows(
-    state: &AppState,
+    store: &InMemoryGatewayStore,
     scope: &DashboardScopeInput,
     ledger_buckets: &[LedgerBucketRecord],
     now: chrono::DateTime<chrono::Utc>,
+    hot_state_available: bool,
 ) -> Vec<Value> {
-    state
-        .store
+    store
         .budget_policies_for_tenant(&scope.tenant_id)
         .into_iter()
         .filter(|policy| policy.status != ResourceStatus::Deleted)
         .filter(|policy| policy_matches_dashboard_scope(policy, scope))
-        .map(|policy| budget_policy_dashboard_body(state, &policy, ledger_buckets, now))
+        .map(|policy| {
+            budget_policy_dashboard_body(&policy, ledger_buckets, now, hot_state_available)
+        })
         .collect()
 }
 
 fn budget_policy_dashboard_body(
-    state: &AppState,
     policy: &BudgetPolicyRecord,
     ledger_buckets: &[LedgerBucketRecord],
     now: chrono::DateTime<chrono::Utc>,
+    hot_state_available: bool,
 ) -> Value {
     let current_value = ledger_buckets
         .iter()
@@ -22108,7 +22404,7 @@ fn budget_policy_dashboard_body(
         "status": policy.status.as_str(),
         "source": {
             "current_value": "durable_ledger_buckets",
-            "hot_state_status": if state.store.runtime_policy_hot_state_available() {
+            "hot_state_status": if hot_state_available {
                 "available"
             } else {
                 "unavailable"
@@ -22146,30 +22442,34 @@ fn budget_policy_timeseries_points(
         .collect()
 }
 
-fn quota_dashboard_rows(
+async fn quota_dashboard_rows(
     state: &AppState,
     scope: &DashboardScopeInput,
     ledger_buckets: &[LedgerBucketRecord],
     now: chrono::DateTime<chrono::Utc>,
 ) -> Vec<Value> {
-    state
+    let policies = state
         .store
         .quota_policies_for_tenant(&scope.tenant_id)
         .into_iter()
         .filter(|policy| policy.status != ResourceStatus::Deleted)
         .filter(|policy| policy_matches_dashboard_scope(policy, scope))
-        .map(|policy| quota_policy_dashboard_body(state, &policy, ledger_buckets, now))
-        .collect()
+        .collect::<Vec<_>>();
+    let mut rows = Vec::with_capacity(policies.len());
+    for policy in policies {
+        rows.push(quota_policy_dashboard_body(state, &policy, ledger_buckets, now).await);
+    }
+    rows
 }
 
-fn quota_policy_dashboard_body(
+async fn quota_policy_dashboard_body(
     state: &AppState,
     policy: &QuotaPolicyRecord,
     ledger_buckets: &[LedgerBucketRecord],
     now: chrono::DateTime<chrono::Utc>,
 ) -> Value {
     let current_value = if runtime_quota_policy_needs_hot_state(policy) {
-        runtime_quota_current_value(state, policy, now)
+        runtime_quota_current_value(state, policy, now).await
     } else {
         quota_policy_ledger_value(policy, ledger_buckets)
     };
@@ -22380,7 +22680,7 @@ fn provider_endpoint_observability_scope(
     })
 }
 
-fn provider_endpoint_health_observability_body(
+async fn provider_endpoint_health_observability_body(
     state: &AppState,
     endpoint: &ProviderEndpointRecord,
     route_decisions: &[RouteDecisionRecord],
@@ -22392,18 +22692,24 @@ fn provider_endpoint_health_observability_body(
         .latest_published_snapshot_for_tenant(&endpoint.tenant_id)
         .as_ref()
         .map(|snapshot| snapshot.version);
-    let health_state = state.store.endpoint_health_state(
-        &endpoint.tenant_id,
-        &endpoint.provider_endpoint_id,
-        config_version,
-        now,
-    );
-    let drained = state.store.endpoint_is_drained(
-        &endpoint.tenant_id,
-        &endpoint.provider_endpoint_id,
-        config_version,
-        now,
-    );
+    let health_state = state
+        .route_hot_state()
+        .endpoint_health_state(
+            &endpoint.tenant_id,
+            &endpoint.provider_endpoint_id,
+            config_version,
+            now,
+        )
+        .await;
+    let drained = state
+        .route_hot_state()
+        .endpoint_is_drained(
+            &endpoint.tenant_id,
+            &endpoint.provider_endpoint_id,
+            config_version,
+            now,
+        )
+        .await;
     let recent_attempts = route_attempts
         .iter()
         .filter(|attempt| attempt.provider_endpoint_id == endpoint.provider_endpoint_id)
@@ -23982,11 +24288,12 @@ async fn runtime_route_target(
             protocol_family: replay_case.protocol_family,
             alias_name: requested_model,
             streaming: replay_case.streaming,
-            hot_state: state.store(),
+            hot_state: state.route_hot_state(),
             config_version: Some(loaded_catalog.version),
             now: chrono::Utc::now(),
             route_affinity_hash,
-        })?;
+        })
+        .await?;
     match plan.outcome {
         RoutePlanOutcome::Selected(selection) => {
             let upstream_credential_snapshot =
@@ -24073,7 +24380,8 @@ async fn selected_runtime_route_target(
         &selection,
         config_version,
         route_affinity_hash,
-    );
+    )
+    .await;
     Ok(RuntimeRouteTarget {
         authorization_resource_id: selection.model_alias_id,
         upstream_model_id: selection.upstream_model_id,
@@ -24103,7 +24411,7 @@ fn runtime_credential_snapshot(
     })
 }
 
-fn record_sticky_route_mapping(
+async fn record_sticky_route_mapping(
     state: &AppState,
     actor: &AuthenticatedActor,
     selection: &RouteSelection,
@@ -24117,18 +24425,21 @@ fn record_sticky_route_mapping(
         return;
     };
     let now = chrono::Utc::now();
-    state.store.set_sticky_route(StickyRouteRecord {
-        tenant_id: actor.tenant_id.clone(),
-        project_id: actor.project_id.clone(),
-        model_alias_id: selection.model_alias_id.clone(),
-        affinity_hash: affinity_hash.to_owned(),
-        routing_group_id: selection.routing_group_id.clone(),
-        model_target_id: selection.model_target_id.clone(),
-        provider_endpoint_id: selection.provider_endpoint.provider_endpoint_id.clone(),
-        config_version,
-        created_at: now,
-        expires_at: now + chrono::Duration::seconds(ttl_seconds),
-    });
+    state
+        .route_hot_state()
+        .set_sticky_route(StickyRouteRecord {
+            tenant_id: actor.tenant_id.clone(),
+            project_id: actor.project_id.clone(),
+            model_alias_id: selection.model_alias_id.clone(),
+            affinity_hash: affinity_hash.to_owned(),
+            routing_group_id: selection.routing_group_id.clone(),
+            model_target_id: selection.model_target_id.clone(),
+            provider_endpoint_id: selection.provider_endpoint.provider_endpoint_id.clone(),
+            config_version,
+            created_at: now,
+            expires_at: now + chrono::Duration::seconds(ttl_seconds),
+        })
+        .await;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -24275,8 +24586,8 @@ mod tests {
         runtime_quota_loss_allowance_key, runtime_route_target, validate_gateway_config, AppState,
         BackgroundWorkerMode, CreatePricingSkuRequest, DependencyProbeMode,
         ExportObjectStorageHttpConfig, GatewayConfig, NotificationDeliveryTransport,
-        OtelExporterTransport, ProviderTransportMode, SingleUserAuthConfig,
-        ADMIN_ROUTE_ATTEMPT_LIST_PATH, ADMIN_ROUTE_DECISION_LIST_PATH,
+        OtelExporterTransport, ProviderTransportMode, RuntimePolicyReconciliationSummary,
+        SingleUserAuthConfig, ADMIN_ROUTE_ATTEMPT_LIST_PATH, ADMIN_ROUTE_DECISION_LIST_PATH,
         ADMIN_ROUTE_SIMULATION_LIST_PATH, CODEX_API_BASE_URL, CSRF_TOKEN_HEADER,
         GATEWAY_SESSION_ID_HEADER, PROJECT_ID_HEADER, REQUEST_ID_HEADER,
         RUNTIME_BUDGET_LEASE_TTL_SECONDS, SESSION_TOKEN_PREFIX, SINGLE_USER_ID,
@@ -24290,8 +24601,8 @@ mod tests {
     use crate::config::{publish_config_snapshot, PublishConfigSnapshotRequest};
     use crate::domain::{
         new_prefixed_id, ActorKind, DirectoryStatus, ExternalIdentityRecord, MembershipStatus,
-        NotificationDeliveryAttemptRecord, ResourceStatus, UpstreamCredentialStatus,
-        UsageEventRecord, ValidationDiagnosticRecord,
+        NotificationDeliveryAttemptRecord, ResourceStatus, RuntimeBudgetLeaseRecord,
+        UpstreamCredentialStatus, UsageEventRecord, ValidationDiagnosticRecord,
     };
     use crate::error::GatewayError;
     use crate::fixtures::{
@@ -24460,6 +24771,7 @@ mod tests {
         const KEYS: &[&str] = &[
             "STARWEAVER_GATEWAY_DATABASE_URL",
             "STARWEAVER_GATEWAY_REDIS_URL",
+            "STARWEAVER_GATEWAY_HOT_STATE_BACKEND",
             "STARWEAVER_GATEWAY_RUNTIME_STORE",
             "STARWEAVER_GATEWAY_ENV",
             "STARWEAVER_GATEWAY_DEPENDENCY_PROBE_MODE",
@@ -24530,6 +24842,7 @@ mod tests {
             config.dependency_probe_mode,
             DependencyProbeMode::Configured
         );
+        assert_eq!(config.hot_state_backend_profile, "memory");
         assert_eq!(config.runtime_store_profile, "memory");
         assert_eq!(
             single_user.user_primary_email.as_deref(),
@@ -24797,6 +25110,7 @@ mod tests {
         const KEYS: &[&str] = &[
             "STARWEAVER_GATEWAY_DATABASE_URL",
             "STARWEAVER_GATEWAY_REDIS_URL",
+            "STARWEAVER_GATEWAY_HOT_STATE_BACKEND",
             "STARWEAVER_GATEWAY_RUNTIME_STORE",
             "STARWEAVER_GATEWAY_ENV",
             "STARWEAVER_GATEWAY_DEPENDENCY_PROBE_MODE",
@@ -24863,6 +25177,7 @@ mod tests {
         const KEYS: &[&str] = &[
             "STARWEAVER_GATEWAY_DATABASE_URL",
             "STARWEAVER_GATEWAY_REDIS_URL",
+            "STARWEAVER_GATEWAY_HOT_STATE_BACKEND",
             "STARWEAVER_GATEWAY_RUNTIME_STORE",
             "STARWEAVER_GATEWAY_ENV",
             "STARWEAVER_GATEWAY_SECRET_BACKEND",
@@ -24898,6 +25213,7 @@ mod tests {
             "postgres://gateway.example/starweaver",
         );
         std::env::set_var("STARWEAVER_GATEWAY_REDIS_URL", "rediss://redis.example/0");
+        std::env::set_var("STARWEAVER_GATEWAY_HOT_STATE_BACKEND", "Redis");
         std::env::set_var("STARWEAVER_GATEWAY_SECRET_BACKEND", "file");
         std::env::set_var(
             "STARWEAVER_GATEWAY_SECRET_BACKEND_FILE_DIR",
@@ -24933,7 +25249,10 @@ mod tests {
         assert!(config.session_cookie_http_only);
         assert_eq!(config.session_cookie_same_site, "strict");
         assert_eq!(config.runtime_store_profile, "postgres");
-        assert!(validate_gateway_config(&config).is_ok());
+        assert_eq!(config.hot_state_backend_profile, "redis");
+        if let Err(error) = validate_gateway_config(&config) {
+            panic!("secure production profile should pass validation: {error}");
+        }
     }
 
     #[tokio::test]
@@ -25016,6 +25335,9 @@ mod tests {
         assert!(error.to_string().contains("durable_runtime_store_required"));
         assert!(error
             .to_string()
+            .contains("durable_hot_state_backend_required"));
+        assert!(error
+            .to_string()
             .contains("durable_secret_backend_required"));
         assert!(error.to_string().contains("telemetry_required"));
         assert!(error.to_string().contains("public_base_url_https_required"));
@@ -25028,6 +25350,7 @@ mod tests {
             environment: "production".to_owned(),
             database_url: Some("postgres://gateway.example/starweaver".to_owned()),
             redis_url: Some("rediss://redis.example/0".to_owned()),
+            hot_state_backend_profile: "redis".to_owned(),
             runtime_store_profile: "postgres".to_owned(),
             public_base_url: Some("http://gateway.example.com".to_owned()),
             cors_allowed_origins: vec!["*".to_owned()],
@@ -25079,6 +25402,17 @@ mod tests {
             .to_string()
             .contains("runtime_store_profile_unsupported"));
 
+        let unsupported_hot_state = match validate_gateway_config(&GatewayConfig {
+            hot_state_backend_profile: "dynamodb".to_owned(),
+            ..GatewayConfig::default()
+        }) {
+            Ok(()) => panic!("unsupported hot-state backend should be rejected"),
+            Err(error) => error,
+        };
+        assert!(unsupported_hot_state
+            .to_string()
+            .contains("hot_state_backend_profile_unsupported"));
+
         let unsupported_secret_backend = match validate_gateway_config(&GatewayConfig {
             secret_backend_profile: "gcp-secret-manager".to_owned(),
             ..GatewayConfig::default()
@@ -25089,6 +25423,23 @@ mod tests {
         assert!(unsupported_secret_backend
             .to_string()
             .contains("secret_backend_profile_unsupported"));
+    }
+
+    #[tokio::test]
+    async fn build_app_state_with_redis_hot_state_requires_redis_url() {
+        let Err(error) = build_app_state(GatewayConfig {
+            hot_state_backend_profile: "redis".to_owned(),
+            background_worker_mode: BackgroundWorkerMode::Disabled,
+            ..GatewayConfig::default()
+        })
+        .await
+        else {
+            panic!("redis hot-state profile without Redis URL should fail startup");
+        };
+
+        assert!(error.to_string().contains(
+            "STARWEAVER_GATEWAY_HOT_STATE_BACKEND=redis requires STARWEAVER_GATEWAY_REDIS_URL"
+        ));
     }
 
     #[tokio::test]
@@ -25130,6 +25481,7 @@ mod tests {
         assert_eq!(body["profile"]["production_profile"], false);
         assert_eq!(body["profile"]["production_profile_valid"], true);
         assert_eq!(body["profile"]["dependency_probe_mode"], "live");
+        assert_eq!(body["profile"]["hot_state_backend_profile"], "memory");
         assert_eq!(body["profile"]["runtime_store_profile"], "memory");
         assert_eq!(body["dependencies"]["database"], "unavailable");
         assert_eq!(body["dependencies"]["database_migrations"], "unavailable");
@@ -25181,6 +25533,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["profile"]["dependency_probe_mode"], "configured");
+        assert_eq!(body["profile"]["hot_state_backend_profile"], "memory");
         assert_eq!(body["dependencies"]["database"], "configured");
         assert_eq!(body["dependencies"]["database_migrations"], "not_checked");
         assert_eq!(body["dependencies"]["hot_state"], "configured");
@@ -27897,9 +28250,11 @@ mod tests {
 
         let first =
             enforce_runtime_policy_preflight(&state, &actor, replay_case, Some(selected), 32, now)
+                .await
                 .unwrap_or_else(|error| panic!("first preflight should reserve: {error}"));
         let second =
-            enforce_runtime_policy_preflight(&state, &actor, replay_case, Some(selected), 32, now);
+            enforce_runtime_policy_preflight(&state, &actor, replay_case, Some(selected), 32, now)
+                .await;
 
         assert!(matches!(
             second,
@@ -27907,14 +28262,15 @@ mod tests {
                 reason: "hard_limit_reserved"
             })
         ));
-        assert_eq!(store.runtime_policy_counter(&reservation_key), 1);
-        release_runtime_policy_reservations(&state, &first);
-        assert_eq!(store.runtime_policy_counter(&reservation_key), 0);
+        assert_eq!(store.runtime_policy_counter(&reservation_key).await, 1);
+        release_runtime_policy_reservations(&state, &first).await;
+        assert_eq!(store.runtime_policy_counter(&reservation_key).await, 0);
 
         let third =
             enforce_runtime_policy_preflight(&state, &actor, replay_case, Some(selected), 32, now)
+                .await
                 .unwrap_or_else(|error| panic!("released reservation should free budget: {error}"));
-        release_runtime_policy_reservations(&state, &third);
+        release_runtime_policy_reservations(&state, &third).await;
     }
 
     #[tokio::test]
@@ -27970,10 +28326,12 @@ mod tests {
 
         let first =
             enforce_runtime_policy_preflight(&state, &actor, replay_case, Some(selected), 32, now)
+                .await
                 .unwrap_or_else(|error| panic!("first preflight should reserve: {error}"));
         let blocked =
-            enforce_runtime_policy_preflight(&state, &actor, replay_case, Some(selected), 32, now);
-        let leases = store.runtime_budget_leases_for_tenant(TEST_TENANT_ID);
+            enforce_runtime_policy_preflight(&state, &actor, replay_case, Some(selected), 32, now)
+                .await;
+        let leases = store.runtime_budget_leases_for_tenant(TEST_TENANT_ID).await;
 
         assert!(matches!(
             blocked,
@@ -27984,34 +28342,30 @@ mod tests {
         assert_eq!(leases.len(), 1);
         assert_eq!(leases[0].status, "reserved");
         assert_eq!(leases[0].request_id, "req_budget_lease_expiry_1");
-        assert_eq!(store.runtime_policy_counter(&reservation_key), 1);
+        assert_eq!(store.runtime_policy_counter(&reservation_key).await, 1);
 
         let repair_at = now + Duration::seconds(RUNTIME_BUDGET_LEASE_TTL_SECONDS + 1);
         let summary = run_runtime_policy_reconciler_once(
             &store,
+            &store,
             TEST_TENANT_ID,
             "runtime_policy_reconciler_test",
             repair_at,
-        );
-        let repaired_leases = store.runtime_budget_leases_for_tenant(TEST_TENANT_ID);
+        )
+        .await;
+        let repaired_leases = store.runtime_budget_leases_for_tenant(TEST_TENANT_ID).await;
 
-        assert_eq!(summary.considered_budget_policy_count, 1);
-        assert_eq!(summary.expired_budget_lease_count, 1);
-        assert_eq!(summary.expired_budget_lease_total, 1);
-        assert_eq!(summary.considered_quota_policy_count, 0);
-        assert_eq!(summary.audit_event_count, 1);
-        assert_eq!(store.runtime_policy_counter(&reservation_key), 0);
-        assert_eq!(repaired_leases[0].status, "expired");
-        assert!(store.audit_events().iter().any(|event| {
-            event.event_type == "gateway.runtime_policy.budget_lease_expired"
-                && event.resource_id == policy.budget_policy_id
-                && event.redacted_diff["repair_action"] == "expire_budget_lease"
-                && event.redacted_diff["lease"]["request_id"] == "req_budget_lease_expiry_1"
-                && event.redacted_diff["redaction"]["raw_hot_state_key_included"] == false
-        }));
+        assert_budget_lease_repair_evidence(
+            &store,
+            &summary,
+            &reservation_key,
+            &repaired_leases,
+            &policy.budget_policy_id,
+        )
+        .await;
 
-        release_runtime_policy_reservations(&state, &first);
-        assert_eq!(store.runtime_policy_counter(&reservation_key), 0);
+        release_runtime_policy_reservations(&state, &first).await;
+        assert_eq!(store.runtime_policy_counter(&reservation_key).await, 0);
         let third = enforce_runtime_policy_preflight(
             &state,
             &actor,
@@ -28020,10 +28374,34 @@ mod tests {
             32,
             repair_at,
         )
+        .await
         .unwrap_or_else(|error| panic!("expired reservation should free budget: {error}"));
-        assert_eq!(store.runtime_policy_counter(&reservation_key), 1);
-        release_runtime_policy_reservations(&state, &third);
-        assert_eq!(store.runtime_policy_counter(&reservation_key), 0);
+        assert_eq!(store.runtime_policy_counter(&reservation_key).await, 1);
+        release_runtime_policy_reservations(&state, &third).await;
+        assert_eq!(store.runtime_policy_counter(&reservation_key).await, 0);
+    }
+
+    async fn assert_budget_lease_repair_evidence(
+        store: &InMemoryGatewayStore,
+        summary: &RuntimePolicyReconciliationSummary,
+        reservation_key: &str,
+        repaired_leases: &[RuntimeBudgetLeaseRecord],
+        budget_policy_id: &str,
+    ) {
+        assert_eq!(summary.considered_budget_policy_count, 1);
+        assert_eq!(summary.expired_budget_lease_count, 1);
+        assert_eq!(summary.expired_budget_lease_total, 1);
+        assert_eq!(summary.considered_quota_policy_count, 0);
+        assert_eq!(summary.audit_event_count, 1);
+        assert_eq!(store.runtime_policy_counter(reservation_key).await, 0);
+        assert_eq!(repaired_leases[0].status, "expired");
+        assert!(store.audit_events().iter().any(|event| {
+            event.event_type == "gateway.runtime_policy.budget_lease_expired"
+                && event.resource_id == budget_policy_id
+                && event.redacted_diff["repair_action"] == "expire_budget_lease"
+                && event.redacted_diff["lease"]["request_id"] == "req_budget_lease_expiry_1"
+                && event.redacted_diff["redaction"]["raw_hot_state_key_included"] == false
+        }));
     }
 
     #[tokio::test]
@@ -28078,9 +28456,11 @@ mod tests {
 
         let first =
             enforce_runtime_policy_preflight(&state, &actor, replay_case, Some(selected), 32, now)
+                .await
                 .unwrap_or_else(|error| panic!("first preflight should reserve: {error}"));
         let second =
-            enforce_runtime_policy_preflight(&state, &actor, replay_case, Some(selected), 32, now);
+            enforce_runtime_policy_preflight(&state, &actor, replay_case, Some(selected), 32, now)
+                .await;
 
         assert!(matches!(
             second,
@@ -28088,14 +28468,15 @@ mod tests {
                 reason: "concurrent_request_limit_reached"
             })
         ));
-        assert_eq!(store.runtime_policy_counter(&reservation_key), 1);
-        release_runtime_policy_reservations(&state, &first);
-        assert_eq!(store.runtime_policy_counter(&reservation_key), 0);
+        assert_eq!(store.runtime_policy_counter(&reservation_key).await, 1);
+        release_runtime_policy_reservations(&state, &first).await;
+        assert_eq!(store.runtime_policy_counter(&reservation_key).await, 0);
 
         let third =
             enforce_runtime_policy_preflight(&state, &actor, replay_case, Some(selected), 32, now)
+                .await
                 .unwrap_or_else(|error| panic!("released reservation should free quota: {error}"));
-        release_runtime_policy_reservations(&state, &third);
+        release_runtime_policy_reservations(&state, &third).await;
     }
 
     #[tokio::test]
@@ -28156,9 +28537,11 @@ mod tests {
 
         let first =
             enforce_runtime_policy_preflight(&state, &actor, replay_case, Some(selected), 32, now)
+                .await
                 .unwrap_or_else(|error| panic!("first preflight should reserve: {error}"));
         let second =
-            enforce_runtime_policy_preflight(&state, &actor, replay_case, Some(selected), 32, now);
+            enforce_runtime_policy_preflight(&state, &actor, replay_case, Some(selected), 32, now)
+                .await;
 
         assert!(matches!(
             second,
@@ -28166,16 +28549,17 @@ mod tests {
                 reason: "concurrent_stream_limit_reached"
             })
         ));
-        assert_eq!(store.runtime_policy_counter(&reservation_key), 1);
-        release_runtime_policy_reservations(&state, &first);
-        assert_eq!(store.runtime_policy_counter(&reservation_key), 0);
+        assert_eq!(store.runtime_policy_counter(&reservation_key).await, 1);
+        release_runtime_policy_reservations(&state, &first).await;
+        assert_eq!(store.runtime_policy_counter(&reservation_key).await, 0);
 
         let third =
             enforce_runtime_policy_preflight(&state, &actor, replay_case, Some(selected), 32, now)
+                .await
                 .unwrap_or_else(|error| {
                     panic!("released reservation should free stream quota: {error}")
                 });
-        release_runtime_policy_reservations(&state, &third);
+        release_runtime_policy_reservations(&state, &third).await;
     }
 
     #[tokio::test]
@@ -28252,7 +28636,7 @@ mod tests {
             .find(|policy| policy.counter_kind == "token_actual_rate")
             .unwrap_or_else(|| panic!("quota policy should exist"));
         let counter_key = runtime_quota_counter_key(&policy, chrono::Utc::now());
-        assert_eq!(store.runtime_policy_counter(&counter_key), 3);
+        assert_eq!(store.runtime_policy_counter(&counter_key).await, 3);
 
         let second = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
         let second_status = second.status();
@@ -28299,23 +28683,27 @@ mod tests {
             .find(|policy| policy.counter_kind == "token_actual_rate")
             .unwrap_or_else(|| panic!("quota policy should exist"));
         let counter_key = runtime_quota_counter_key(&policy, chrono::Utc::now());
-        assert_eq!(store.runtime_policy_counter(&counter_key), 3);
-        store.adjust_runtime_policy_counter(counter_key.clone(), -3);
-        assert_eq!(store.runtime_policy_counter(&counter_key), 0);
+        assert_eq!(store.runtime_policy_counter(&counter_key).await, 3);
+        store
+            .adjust_runtime_policy_counter(counter_key.clone(), -3)
+            .await;
+        assert_eq!(store.runtime_policy_counter(&counter_key).await, 0);
 
         let summary = run_runtime_policy_reconciler_once(
+            &store,
             &store,
             TEST_TENANT_ID,
             "runtime_policy_reconciler_test",
             chrono::Utc::now(),
-        );
+        )
+        .await;
 
         assert_eq!(summary.considered_quota_policy_count, 1);
         assert_eq!(summary.repairable_quota_policy_count, 1);
         assert_eq!(summary.repaired_counter_count, 1);
         assert_eq!(summary.audit_event_count, 1);
         assert_eq!(summary.repaired_delta_total, 3);
-        assert_eq!(store.runtime_policy_counter(&counter_key), 3);
+        assert_eq!(store.runtime_policy_counter(&counter_key).await, 3);
         assert!(store.audit_events().iter().any(|event| {
             event.event_type == "gateway.runtime_policy.reconciliation_repair"
                 && event.resource_id == policy.quota_policy_id
@@ -28391,7 +28779,7 @@ mod tests {
             .find(|policy| policy.counter_kind == "stream_duration")
             .unwrap_or_else(|| panic!("quota policy should exist"));
         let counter_key = runtime_quota_counter_key(&policy, chrono::Utc::now());
-        assert_eq!(store.runtime_policy_counter(&counter_key), 1);
+        assert_eq!(store.runtime_policy_counter(&counter_key).await, 1);
 
         let second = post_replay_case_over_http(
             store.clone(),
@@ -28467,23 +28855,27 @@ mod tests {
             .find(|policy| policy.counter_kind == "stream_duration")
             .unwrap_or_else(|| panic!("quota policy should exist"));
         let counter_key = runtime_quota_counter_key(&policy, now);
-        assert_eq!(store.runtime_policy_counter(&counter_key), 1);
-        store.adjust_runtime_policy_counter(counter_key.clone(), -1);
-        assert_eq!(store.runtime_policy_counter(&counter_key), 0);
+        assert_eq!(store.runtime_policy_counter(&counter_key).await, 1);
+        store
+            .adjust_runtime_policy_counter(counter_key.clone(), -1)
+            .await;
+        assert_eq!(store.runtime_policy_counter(&counter_key).await, 0);
 
         let summary = run_runtime_policy_reconciler_once(
+            &store,
             &store,
             TEST_TENANT_ID,
             "runtime_policy_reconciler_test",
             now,
-        );
+        )
+        .await;
 
         assert_eq!(summary.considered_quota_policy_count, 1);
         assert_eq!(summary.repairable_quota_policy_count, 1);
         assert_eq!(summary.repaired_counter_count, 1);
         assert_eq!(summary.audit_event_count, 1);
         assert_eq!(summary.repaired_delta_total, 1);
-        assert_eq!(store.runtime_policy_counter(&counter_key), 1);
+        assert_eq!(store.runtime_policy_counter(&counter_key).await, 1);
         assert!(store.audit_events().iter().any(|event| {
             event.event_type == "gateway.runtime_policy.reconciliation_repair"
                 && event.resource_id == policy.quota_policy_id
@@ -28676,7 +29068,9 @@ mod tests {
             .is_some_and(|message| message.contains("fail_limited_allowance_exhausted")));
         assert_eq!(store.usage_events_for_tenant(TEST_TENANT_ID).len(), 1);
         assert_eq!(
-            store.runtime_policy_loss_allowance_counter(&allowance_key),
+            store
+                .runtime_policy_loss_allowance_counter(&allowance_key)
+                .await,
             2
         );
     }
@@ -28931,7 +29325,8 @@ mod tests {
                 created_at: now,
                 expires_at: now + Duration::seconds(60),
             },
-        );
+        )
+        .await;
 
         let response = post_responses_request_with_body_and_affinity(
             store.clone(),
@@ -28975,7 +29370,8 @@ mod tests {
                 created_at: now,
                 expires_at: now + Duration::seconds(60),
             },
-        );
+        )
+        .await;
         store.set_endpoint_health(EndpointHealthRecord {
             tenant_id: TEST_TENANT_ID.to_owned(),
             provider_endpoint_id: "pep_openai_secondary".to_owned(),

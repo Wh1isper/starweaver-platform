@@ -14,6 +14,7 @@ pub(crate) mod fixtures;
 pub mod hot_state;
 pub mod migrations;
 pub mod policy;
+pub mod redis_hot_state;
 pub mod replay;
 pub mod route;
 pub mod routing;

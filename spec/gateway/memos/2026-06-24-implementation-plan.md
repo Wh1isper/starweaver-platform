@@ -136,8 +136,8 @@ Completed foundation slices:
   transaction without losing request trace ids.
 - Admin usage analytics now read usage events and ledger buckets from the
   attached PostgreSQL store when durable storage is configured, while runtime
-  policy preflight remains on the immediate in-memory hot path until Redis
-  runtime observation is connected.
+  policy preflight uses the configured Redis-compatible hot-state backend for
+  counters and budget leases.
 - Built-in dashboard overview endpoints now load route evidence and usage
   rollups through the durable-first read adapters when PostgreSQL is attached,
   preserving the in-memory replay path for local tests and single-node
@@ -415,6 +415,9 @@ Completed foundation slices:
   and release images now request BuildKit SBOM and provenance attestations and
   upload image metadata artifacts containing the image digest, tags, labels,
   generated OpenAPI schemas, generated migration checksums, and `SHA256SUMS`.
+  The scheduled nightly workflow condition is explicitly constrained to
+  `refs/heads/main`, while manual nightly dispatch remains available for
+  operator-controlled rebuilds.
 - Agent platform deployment packaging now includes public health, readiness,
   and version probes plus a Linux `amd64` Docker image. The image workflow uses
   a service matrix so both gateway and platform images are smoke-tested on pull
@@ -422,14 +425,38 @@ Completed foundation slices:
   artifact metadata contract.
 - Production profile gates now reject unsafe startup configuration when
   `STARWEAVER_GATEWAY_ENV` is `prod` or `production`: missing PostgreSQL URL,
-  missing Redis-compatible URL, in-memory HTTP runtime store, unsupported
-  runtime store profiles, in-memory secret backend, disabled telemetry, missing
-  HTTPS public base URL, missing or unsafe CORS origins, insecure browser
-  session cookie policy, missing published-snapshot requirement, or an invalid
-  body limit. The `postgres` runtime-store profile is now accepted when
+  missing Redis-compatible URL, in-memory HTTP runtime store, in-memory runtime
+  hot-state backend, unsupported runtime store or hot-state backend profiles,
+  in-memory secret backend, disabled telemetry, missing HTTPS public base URL,
+  missing or unsafe CORS origins, insecure browser session cookie policy,
+  missing published-snapshot requirement, or an invalid body limit. The
+  `postgres` runtime-store profile is now accepted when
   `STARWEAVER_GATEWAY_DATABASE_URL` is configured, unknown profiles fail
-  closed, and `/readyz` reports profile validity and dependency readiness
-  details.
+  closed, and `/readyz` reports profile validity, dependency readiness, runtime
+  store profile, and hot-state backend profile details.
+- Production hot-state configuration now fails closed unless production declares
+  `STARWEAVER_GATEWAY_HOT_STATE_BACKEND=redis` and
+  `STARWEAVER_GATEWAY_REDIS_URL`. The Redis-compatible hot-state backend now
+  owns route health, drain locks, sticky routes, runtime policy counters, budget
+  leases, and built-in realtime dashboard reads; OTel remains the long-term
+  metrics and user-owned dashboard integration path.
+- Gateway app state now exposes route hot-state and runtime policy hot-state
+  backends behind explicit trait-object boundaries. Runtime route planning,
+  emergency drains, sticky-route writes, provider health dashboards,
+  budget/quota hot-state checks, reservations, and reconciliation counter repair
+  use these backends instead of directly depending on the in-memory foundation
+  store, keeping the Redis adapter integration point localized.
+- Runtime policy hot-state repository operations are now async, so budget and
+  quota reservations, counters, lease repair, reconciliation, and dashboard
+  reads can attach a non-blocking Redis-compatible client without blocking
+  gateway request workers. The in-memory backend keeps the same async contract
+  for deterministic replay and local tests.
+- Runtime policy hot state now has a Redis-compatible `fred` backend for
+  counters, request-budget leases, lease repair, and dashboard reads in
+  non-production profiles. Redis connection failures mark hot state unavailable
+  so existing fail-closed and fail-limited policy behavior remains explicit;
+  fail-limited loss allowance stays process-local because it is the fallback
+  path when Redis is unavailable.
 - Fake-provider load and soak harnesses now run through `xtask` and Makefile
   targets. The default CI-sized harnesses exercise every foundation protocol
   replay case, including streaming behavior and provider-native denial, through
@@ -454,6 +481,11 @@ Completed foundation slices:
   `gateway-restore-rehearsal` target restores config snapshots, secret refs plus
   backend values, audit events, usage events, and rebuilt ledger aggregates into
   a fresh in-memory store and runs in `make ci`.
+- Production operations docs now show the Redis-compatible hot-state URL
+  and explicit hot-state backend profile alongside the PostgreSQL runtime store
+  settings that the gateway startup gate requires in production profiles, and
+  document the split between built-in Redis-backed realtime dashboards and
+  user-owned OTel metrics dashboards.
 - Shared auth/authz layering review now records a decision draft under
   `spec/shared/02-auth-authz-layering.md`: keep gateway and platform authn/authz
   service-local for now, share only versioned contracts, and extract shared
@@ -1301,9 +1333,9 @@ Work items:
 
 - [x] Add Docker image, docker-compose profile, migration command, and local secret
   backend wiring.
-- [x] Add production profile checks for PostgreSQL, Redis-compatible backend,
-  secret backend, TLS, cookie security, CORS, body limits, telemetry, and
-  migration status.
+- [x] Add production profile checks for PostgreSQL, Redis-compatible backend
+  declaration, secret backend, TLS, cookie security, CORS, body limits,
+  telemetry, and migration status.
 - [x] Add readiness detail for database, hot-state backend, secret backend,
   loaded config version, latest published config version, exporter health, and
   worker roles.
@@ -1318,7 +1350,8 @@ Acceptance evidence:
 - [x] Compose-based local validation can run migrations and fake-provider smoke
   tests.
 - [x] Production profile refuses unsafe missing secret backend, insecure cookies,
-  missing database, and unsupported hot-state policy configuration.
+  missing database, unsupported hot-state policy configuration, and missing
+  Redis-compatible hot-state dependency configuration.
 - [x] Restore rehearsal proves config snapshots, secret refs, and audit/usage
   evidence remain consistent.
 
