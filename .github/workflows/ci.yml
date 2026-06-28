@@ -84,3 +84,28 @@ jobs:
 
       - name: Validate xtask automation
         run: make scripts-check
+
+      - name: Validate migration checksum manifest
+        run: make migration-checksum-check
+
+      - name: Validate OpenAPI contracts
+        run: make openapi-check
+
+      - name: Validate gateway contracts
+        run: make gateway-contract-check
+
+  gateway-harness:
+    name: Gateway fake-provider and restore harnesses
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run gateway harnesses
+        run: make gateway-harness-check

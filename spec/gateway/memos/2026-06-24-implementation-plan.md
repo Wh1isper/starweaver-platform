@@ -284,7 +284,15 @@ Completed foundation slices:
 - Gateway deployment packaging now includes a Linux `amd64` Docker image,
   local Makefile image build target, pull-request image smoke build, scheduled
   `main` nightly GCR publication, and release-tag or GitHub-release GCR
-  publication using GitHub OIDC Workload Identity Federation.
+  publication using GitHub OIDC Workload Identity Federation. Published nightly
+  and release images now request BuildKit SBOM and provenance attestations and
+  upload image metadata artifacts containing the image digest, tags, labels,
+  generated OpenAPI schemas, generated migration checksums, and `SHA256SUMS`.
+- Agent platform deployment packaging now includes public health, readiness,
+  and version probes plus a Linux `amd64` Docker image. The image workflow uses
+  a service matrix so both gateway and platform images are smoke-tested on pull
+  requests and published as nightly or release images to GCR with the same
+  artifact metadata contract.
 - Production profile gates now reject unsafe startup configuration when
   `STARWEAVER_GATEWAY_ENV` is `prod` or `production`: missing PostgreSQL URL,
   missing Redis-compatible URL, in-memory HTTP runtime store, unsupported
@@ -298,6 +306,19 @@ Completed foundation slices:
   replay case, including streaming behavior and provider-native denial, through
   the shared authorization path without live provider secrets or external
   services.
+- Gateway contract checks now run through `xtask` and `make ci`, tying route
+  metadata, replay cases, protocol family coverage, authorization action ids,
+  provider-native denial contracts, and generated OpenAPI extensions together so
+  a protocol cannot be added to one surface without the others.
+- GitHub Actions now exposes OpenAPI and gateway contract checks as named CI
+  steps, and repository automation verifies that image release artifacts carry
+  the generated OpenAPI schemas alongside image metadata.
+- Release migration checksum manifest generation and checks now cover embedded
+  gateway and platform SQL migrations, run through `make ci`, and are included
+  in nightly and release image artifact bundles.
+- GitHub Actions now runs the gateway fake-provider load harness, soak harness,
+  and restore rehearsal as a named Linux CI job instead of relying only on local
+  `make ci`.
 - Backup and restore operations docs now cover PostgreSQL, object storage,
   secret refs, config snapshots, audit evidence, usage evidence, release
   metadata, restore ordering, and verification gates. A deterministic
@@ -724,7 +745,7 @@ Work items:
   invalidation, worker polling, last-known-good snapshot, and rollback as a new
   snapshot version.
 - Include `OpenTelemetryExportConfig` in runtime snapshot contents.
-- Add OpenAPI generation and annotate operation action ids.
+- [x] Add OpenAPI generation and annotate operation action ids.
 
 Acceptance evidence:
 
@@ -1125,27 +1146,27 @@ Goal: define deployable profiles and prove the service can fail predictably.
 
 Work items:
 
-- Add Docker image, docker-compose profile, migration command, and local secret
+- [x] Add Docker image, docker-compose profile, migration command, and local secret
   backend wiring.
-- Add production profile checks for PostgreSQL, Redis-compatible backend,
+- [x] Add production profile checks for PostgreSQL, Redis-compatible backend,
   secret backend, TLS, cookie security, CORS, body limits, telemetry, and
   migration status.
-- Add readiness detail for database, hot-state backend, secret backend,
+- [x] Add readiness detail for database, hot-state backend, secret backend,
   loaded config version, latest published config version, exporter health, and
   worker roles.
-- Add backup/restore docs for PostgreSQL, object storage, secret refs, config
+- [x] Add backup/restore docs for PostgreSQL, object storage, secret refs, config
   snapshots, and audit evidence.
-- Add load and soak test harnesses using fake providers.
-- Keep live provider smoke tests optional and manually triggered.
+- [x] Add load and soak test harnesses using fake providers.
+- [x] Keep live provider smoke tests optional and manually triggered.
 
 Acceptance evidence:
 
-- `make ci` stays green without live provider secrets.
-- Compose-based local validation can run migrations and fake-provider smoke
+- [x] `make ci` stays green without live provider secrets.
+- [x] Compose-based local validation can run migrations and fake-provider smoke
   tests.
-- Production profile refuses unsafe missing secret backend, insecure cookies,
+- [x] Production profile refuses unsafe missing secret backend, insecure cookies,
   missing database, and unsupported hot-state policy configuration.
-- Restore rehearsal proves config snapshots, secret refs, and audit/usage
+- [x] Restore rehearsal proves config snapshots, secret refs, and audit/usage
   evidence remain consistent.
 
 Feasibility review:

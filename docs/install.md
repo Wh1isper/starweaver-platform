@@ -23,4 +23,8 @@ make test
 make docs-check
 make docs-build
 make scripts-check
+make migration-checksum-check
+make openapi-check
+make gateway-contract-check
+make gateway-harness-check
 ```

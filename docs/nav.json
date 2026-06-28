@@ -1,7 +1,7 @@
 [
   {
     "label": "Getting Started",
-    "items": ["index", "install", "testing"]
+    "items": ["index", "install", "testing", "api-contracts"]
   },
   {
     "label": "Architecture",

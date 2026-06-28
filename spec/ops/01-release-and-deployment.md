@@ -29,7 +29,7 @@ Each release should publish service images:
 
 ```text
 gcr.io/$GCP_PROJECT_ID/starweaver-gateway:v0.1.0
-starweaver-platform-service:v0.1.0
+gcr.io/$GCP_PROJECT_ID/starweaver-platform:v0.1.0
 starweaver-admin-api:v0.1.0
 ```
 
@@ -67,7 +67,7 @@ Every pull request should run:
 cargo fmt --check
 cargo check --workspace --locked
 cargo test --workspace --locked
-migration check
+embedded migration checksum check
 OpenAPI schema check
 Docker build smoke
 local compose smoke when service files change
@@ -77,15 +77,27 @@ The exact commands can be added after the workspace and tooling exist.
 
 Current container gate:
 
-- `.github/workflows/images.yml` builds the gateway image on pull requests that
-  touch Rust service code, the Dockerfile, or the image workflow.
+- `.github/workflows/images.yml` builds gateway and platform images on pull
+  requests that touch Rust service code, Dockerfiles, or the image workflow.
 - The smoke build targets Linux `amd64` because the service deployment target
   is Linux-only.
 
+Current contract gate:
+
+- `make migration-checksum-check` verifies `release/migration-checksums.txt`
+  against the embedded gateway and platform SQL migration files.
+- `make openapi-check` verifies generated gateway and platform OpenAPI contract
+  artifacts under `docs/openapi/` match the route metadata compiled into the
+  service crates.
+- `make gateway-contract-check` verifies gateway route metadata, replay
+  contracts, protocol-family coverage, authorization action ids, and generated
+  OpenAPI extensions. GitHub Actions runs both checks as named steps, in
+  addition to repository automation checks.
+
 ## Image Publication
 
-Gateway image publication uses Google Workload Identity Federation and pushes
-to GCR-compatible registries.
+Gateway and platform image publication uses Google Workload Identity Federation
+and pushes to GCR-compatible registries.
 
 Required GitHub configuration:
 
@@ -102,6 +114,9 @@ Nightly builds are published from `main` by the scheduled workflow:
 gcr.io/$GCP_PROJECT_ID/starweaver-gateway:nightly
 gcr.io/$GCP_PROJECT_ID/starweaver-gateway:nightly-YYYYMMDD-SHORTSHA
 gcr.io/$GCP_PROJECT_ID/starweaver-gateway:main-SHORTSHA
+gcr.io/$GCP_PROJECT_ID/starweaver-platform:nightly
+gcr.io/$GCP_PROJECT_ID/starweaver-platform:nightly-YYYYMMDD-SHORTSHA
+gcr.io/$GCP_PROJECT_ID/starweaver-platform:main-SHORTSHA
 ```
 
 Release builds are published from `v*.*.*` tags or GitHub release publish
@@ -111,10 +126,18 @@ events:
 gcr.io/$GCP_PROJECT_ID/starweaver-gateway:v0.1.0
 gcr.io/$GCP_PROJECT_ID/starweaver-gateway:0.1.0
 gcr.io/$GCP_PROJECT_ID/starweaver-gateway:latest
+gcr.io/$GCP_PROJECT_ID/starweaver-platform:v0.1.0
+gcr.io/$GCP_PROJECT_ID/starweaver-platform:0.1.0
+gcr.io/$GCP_PROJECT_ID/starweaver-platform:latest
 ```
 
 Manual dispatch supports `nightly` and `release` channels. Manual release
 dispatch requires a tag such as `v0.1.0`.
+
+Nightly and release image artifact bundles include the pushed image digest,
+published tags, OCI labels, the generated OpenAPI schemas from `docs/openapi/`,
+the generated migration checksum manifest from `release/migration-checksums.txt`,
+and `SHA256SUMS` covering the full artifact tree.
 
 ## Release Flow
 

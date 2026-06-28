@@ -892,10 +892,18 @@ async fn shutdown_signal() {
 /// platform-local stores. Production entrypoints can replace the in-memory
 /// stores with durable resolvers without changing route ownership authorization.
 pub fn router(state: PlatformServiceState) -> Router {
-    admin_routes()
+    health_routes()
+        .merge(admin_routes())
         .merge(auth_routes())
         .fallback(dispatch_foundation_request)
         .with_state(state)
+}
+
+fn health_routes() -> Router<PlatformServiceState> {
+    Router::new()
+        .route("/healthz", get(platform_healthz))
+        .route("/readyz", get(platform_readyz))
+        .route("/version", get(platform_version))
 }
 
 fn auth_routes() -> Router<PlatformServiceState> {
@@ -932,6 +940,43 @@ fn auth_routes() -> Router<PlatformServiceState> {
         )
         .route("/auth/v1/logout", post(logout_current_auth_session))
         .route("/auth/v1/single-user/login", post(single_user_login))
+}
+
+async fn platform_healthz() -> Json<Value> {
+    Json(json!({
+        "schema": "platform.health.v1",
+        "service": crate::SERVICE_NAME,
+        "status": "ok",
+    }))
+}
+
+async fn platform_readyz(State(state): State<PlatformServiceState>) -> Json<Value> {
+    Json(json!({
+        "schema": "platform.readiness.v1",
+        "service": crate::SERVICE_NAME,
+        "ready": true,
+        "dependencies": {
+            "repository_backend": state.repository_backend().as_str(),
+            "postgres_repository": if state.postgres_repository().is_some() {
+                "configured"
+            } else {
+                "not_configured"
+            },
+            "single_user_provider": if state.single_user_auth.is_some() {
+                "configured"
+            } else {
+                "not_configured"
+            },
+        },
+    }))
+}
+
+async fn platform_version() -> Json<Value> {
+    Json(json!({
+        "schema": "platform.version.v1",
+        "service": crate::SERVICE_NAME,
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 fn admin_routes() -> Router<PlatformServiceState> {
@@ -6043,6 +6088,33 @@ mod tests {
             ),
             unexpected => panic!("unexpected startup error: {unexpected}"),
         }
+    }
+
+    #[tokio::test]
+    async fn health_readiness_and_version_are_public() {
+        let health =
+            request_json(PlatformServiceState::default(), Method::GET, "/healthz", []).await;
+        assert_eq!(health.status, StatusCode::OK);
+        assert_eq!(health.body["schema"], "platform.health.v1");
+        assert_eq!(health.body["service"], crate::SERVICE_NAME);
+        assert_eq!(health.body["status"], "ok");
+
+        let readiness =
+            request_json(PlatformServiceState::default(), Method::GET, "/readyz", []).await;
+        assert_eq!(readiness.status, StatusCode::OK);
+        assert_eq!(readiness.body["schema"], "platform.readiness.v1");
+        assert_eq!(readiness.body["ready"], true);
+        assert_eq!(
+            readiness.body["dependencies"]["repository_backend"],
+            "in_memory"
+        );
+
+        let version =
+            request_json(PlatformServiceState::default(), Method::GET, "/version", []).await;
+        assert_eq!(version.status, StatusCode::OK);
+        assert_eq!(version.body["schema"], "platform.version.v1");
+        assert_eq!(version.body["service"], crate::SERVICE_NAME);
+        assert_eq!(version.body["version"], env!("CARGO_PKG_VERSION"));
     }
 
     #[tokio::test]

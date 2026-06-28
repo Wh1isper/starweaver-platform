@@ -3490,7 +3490,9 @@ dependencies = [
  "chrono",
  "secrecy",
  "serde_json",
+ "sha2",
  "starweaver-gateway",
+ "starweaver-platform",
 ]
 
 [[package]]

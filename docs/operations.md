@@ -87,6 +87,22 @@ provider response builder. They fail if a replay case skips authorization,
 returns the wrong protocol family, changes streaming behavior, or grants
 provider-native access without an explicit production design.
 
+Live provider smoke is deliberately outside ordinary CI. Use the manual
+`Live Provider Smoke` GitHub Actions workflow only after a deployed gateway is
+already configured with live provider credentials and a low-cost model alias.
+The workflow requires:
+
+- repository secret `LIVE_GATEWAY_API_KEY`, an inbound gateway API key scoped to
+  the smoke project
+- manual confirmation value `run-live-provider-smoke`
+- HTTPS `gateway_url`
+- protocol `request_path`
+- low-cost JSON `request_body`
+
+By default, the workflow records only status, response byte count, and response
+SHA-256 in the job summary. Enable `upload_redacted_response` only when the
+response body is safe to retain as a short-lived workflow artifact.
+
 ## Gateway Backup And Restore
 
 Backups must preserve PostgreSQL rows, object-storage exports, external secret
@@ -364,13 +380,17 @@ Required GitHub environment:
 
 Current gates:
 
-- migration check
+- migration checksum check
+- OpenAPI schema check
 - Docker build smoke
 - local compose smoke
+- manual live provider smoke workflow
+- gateway fake-provider load, soak, and restore harnesses
 - incident runbooks
+- BuildKit SBOM and provenance attestations for published service images
+- release image metadata artifact with digest, tags, labels, OpenAPI schemas,
+  migration checksums, and `SHA256SUMS`
 
 Future gates:
 
-- OpenAPI schema check
-- image SBOM generation
-- release artifact checksum generation
+- generated client compatibility check

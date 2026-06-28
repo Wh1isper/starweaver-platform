@@ -1,5 +1,6 @@
 XTASK = cargo run -p xtask --locked --
 GATEWAY_IMAGE ?= starweaver-gateway:dev
+PLATFORM_IMAGE ?= starweaver-platform:dev
 GATEWAY_DOCKER_PLATFORM ?= linux/amd64
 DOCKER_COMPOSE ?= docker compose
 GATEWAY_COMPOSE_PROJECT ?= starweaver-platform
@@ -60,8 +61,17 @@ docker-build-gateway: ## Build the gateway Docker image
 		--tag $(GATEWAY_IMAGE) \
 		.
 
+.PHONY: docker-build-platform
+docker-build-platform: ## Build the platform Docker image
+	@echo "Building platform Docker image $(PLATFORM_IMAGE)"
+	@docker build \
+		--platform $(GATEWAY_DOCKER_PLATFORM) \
+		--file crates/starweaver-platform/Dockerfile \
+		--tag $(PLATFORM_IMAGE) \
+		.
+
 .PHONY: docker-build
-docker-build: docker-build-gateway ## Build service Docker images
+docker-build: docker-build-gateway docker-build-platform ## Build service Docker images
 
 .PHONY: compose-up
 compose-up: ## Start local gateway dependencies and service through Docker Compose
@@ -123,6 +133,26 @@ docs-build: ## Build the static documentation site
 	@mdbook build
 	@$(XTASK) finalize-docs-site
 
+.PHONY: openapi-generate
+openapi-generate: ## Generate service OpenAPI contract files from route metadata
+	@$(XTASK) generate-openapi
+
+.PHONY: openapi-check
+openapi-check: ## Validate generated service OpenAPI contract files
+	@$(XTASK) check-openapi
+
+.PHONY: migration-checksum-generate
+migration-checksum-generate: ## Generate release migration checksum manifest
+	@$(XTASK) generate-migration-checksums
+
+.PHONY: migration-checksum-check
+migration-checksum-check: ## Validate release migration checksum manifest
+	@$(XTASK) check-migration-checksums
+
+.PHONY: gateway-contract-check
+gateway-contract-check: ## Validate gateway route, replay, and OpenAPI contract alignment
+	@$(XTASK) check-gateway-contracts
+
 .PHONY: scripts-check
 scripts-check: ## Validate repository automation scripts through xtask
 	@echo "Checking repository scripts"
@@ -134,4 +164,4 @@ lint: docs-check ## Run pre-commit hooks and docs checks across the repository
 	@pre-commit run -a
 
 .PHONY: ci
-ci: fmt-check check test scripts-check gateway-harness-check docs-check docs-build ## Run the same core checks as CI
+ci: fmt-check check test scripts-check migration-checksum-check openapi-check gateway-contract-check gateway-harness-check docs-check docs-build ## Run the same core checks as CI

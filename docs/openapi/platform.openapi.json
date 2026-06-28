@@ -1,0 +1,3451 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Starweaver Platform API",
+    "version": "0.0.1",
+    "description": "Route metadata generated from starweaver-platform foundation routes."
+  },
+  "paths": {
+    "/v1/conversations": {
+      "post": {
+        "operationId": "platform_post_v1_conversations_platform_conversation_create",
+        "tags": [
+          "platform-runtime"
+        ],
+        "summary": "POST /v1/conversations",
+        "parameters": [],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.conversation.create",
+        "x-starweaver-resource-kind": "Conversation",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/v1/conversations/{conversation_id}": {
+      "get": {
+        "operationId": "platform_get_v1_conversations_conversation_id_platform_conversation_read",
+        "tags": [
+          "platform-runtime"
+        ],
+        "summary": "GET /v1/conversations/{conversation_id}",
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.conversation.read",
+        "x-starweaver-resource-kind": "Conversation",
+        "x-starweaver-resource-id-path-param": "conversation_id",
+        "x-starweaver-scope-path-params": [
+          "conversation_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/v1/conversations/{conversation_id}/sessions": {
+      "get": {
+        "operationId": "platform_get_v1_conversations_conversation_id_sessions_platform_session_read",
+        "tags": [
+          "platform-runtime"
+        ],
+        "summary": "GET /v1/conversations/{conversation_id}/sessions",
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.session.read",
+        "x-starweaver-resource-kind": "AgentSession",
+        "x-starweaver-resource-id-path-param": "conversation_id",
+        "x-starweaver-scope-path-params": [
+          "conversation_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/v1/runs": {
+      "post": {
+        "operationId": "platform_post_v1_runs_platform_run_create",
+        "tags": [
+          "platform-runtime"
+        ],
+        "summary": "POST /v1/runs",
+        "parameters": [],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.run.create",
+        "x-starweaver-resource-kind": "Run",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/v1/runs/{run_id}": {
+      "get": {
+        "operationId": "platform_get_v1_runs_run_id_platform_run_read",
+        "tags": [
+          "platform-runtime"
+        ],
+        "summary": "GET /v1/runs/{run_id}",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.run.read",
+        "x-starweaver-resource-kind": "Run",
+        "x-starweaver-resource-id-path-param": "run_id",
+        "x-starweaver-scope-path-params": [
+          "run_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/v1/runs/{run_id}:cancel": {
+      "post": {
+        "operationId": "platform_post_v1_runs_run_id_cancel_platform_run_cancel",
+        "tags": [
+          "platform-runtime"
+        ],
+        "summary": "POST /v1/runs/{run_id}:cancel",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.run.cancel",
+        "x-starweaver-resource-kind": "Run",
+        "x-starweaver-resource-id-path-param": "run_id",
+        "x-starweaver-scope-path-params": [
+          "run_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/v1/runs/{run_id}:steer": {
+      "post": {
+        "operationId": "platform_post_v1_runs_run_id_steer_platform_run_steer",
+        "tags": [
+          "platform-runtime"
+        ],
+        "summary": "POST /v1/runs/{run_id}:steer",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.run.steer",
+        "x-starweaver-resource-kind": "Run",
+        "x-starweaver-resource-id-path-param": "run_id",
+        "x-starweaver-scope-path-params": [
+          "run_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/v1/runs/{run_id}/events": {
+      "get": {
+        "operationId": "platform_get_v1_runs_run_id_events_platform_run_event_read",
+        "tags": [
+          "platform-runtime"
+        ],
+        "summary": "GET /v1/runs/{run_id}/events",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.run_event.read",
+        "x-starweaver-resource-kind": "RunEvent",
+        "x-starweaver-resource-id-path-param": "run_id",
+        "x-starweaver-scope-path-params": [
+          "run_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/v1/approvals/{approval_id}:decide": {
+      "post": {
+        "operationId": "platform_post_v1_approvals_approval_id_decide_platform_approval_decide",
+        "tags": [
+          "platform-runtime"
+        ],
+        "summary": "POST /v1/approvals/{approval_id}:decide",
+        "parameters": [
+          {
+            "name": "approval_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.approval.decide",
+        "x-starweaver-resource-kind": "Approval",
+        "x-starweaver-resource-id-path-param": "approval_id",
+        "x-starweaver-scope-path-params": [
+          "approval_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/v1/deferred-tools": {
+      "get": {
+        "operationId": "platform_get_v1_deferred_tools_platform_deferred_tool_read",
+        "tags": [
+          "platform-runtime"
+        ],
+        "summary": "GET /v1/deferred-tools",
+        "parameters": [],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.deferred_tool.read",
+        "x-starweaver-resource-kind": "DeferredTool",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/v1/deferred-tools/{deferred_tool_id}:resume": {
+      "post": {
+        "operationId": "platform_post_v1_deferred_tools_deferred_tool_id_resume_platform_deferred_tool_resume",
+        "tags": [
+          "platform-runtime"
+        ],
+        "summary": "POST /v1/deferred-tools/{deferred_tool_id}:resume",
+        "parameters": [
+          {
+            "name": "deferred_tool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.deferred_tool.resume",
+        "x-starweaver-resource-kind": "DeferredTool",
+        "x-starweaver-resource-id-path-param": "deferred_tool_id",
+        "x-starweaver-scope-path-params": [
+          "deferred_tool_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/v1/environment-attachments": {
+      "post": {
+        "operationId": "platform_post_v1_environment_attachments_platform_environment_attachment_create",
+        "tags": [
+          "platform-runtime"
+        ],
+        "summary": "POST /v1/environment-attachments",
+        "parameters": [],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.environment_attachment.create",
+        "x-starweaver-resource-kind": "EnvironmentAttachment",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      },
+      "get": {
+        "operationId": "platform_get_v1_environment_attachments_platform_environment_attachment_read",
+        "tags": [
+          "platform-runtime"
+        ],
+        "summary": "GET /v1/environment-attachments",
+        "parameters": [],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.environment_attachment.read",
+        "x-starweaver-resource-kind": "EnvironmentAttachment",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/v1/environment-attachments/{attachment_lease_id}/health": {
+      "get": {
+        "operationId": "platform_get_v1_environment_attachments_attachment_lease_id_health_platform_environment_attachment_health_read",
+        "tags": [
+          "platform-runtime"
+        ],
+        "summary": "GET /v1/environment-attachments/{attachment_lease_id}/health",
+        "parameters": [
+          {
+            "name": "attachment_lease_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.environment_attachment.health.read",
+        "x-starweaver-resource-kind": "EnvironmentAttachment",
+        "x-starweaver-resource-id-path-param": "attachment_lease_id",
+        "x-starweaver-scope-path-params": [
+          "attachment_lease_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/v1/environment-attachments/{attachment_lease_id}": {
+      "delete": {
+        "operationId": "platform_delete_v1_environment_attachments_attachment_lease_id_platform_environment_attachment_release",
+        "tags": [
+          "platform-runtime"
+        ],
+        "summary": "DELETE /v1/environment-attachments/{attachment_lease_id}",
+        "parameters": [
+          {
+            "name": "attachment_lease_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.environment_attachment.release",
+        "x-starweaver-resource-kind": "EnvironmentAttachment",
+        "x-starweaver-resource-id-path-param": "attachment_lease_id",
+        "x-starweaver-scope-path-params": [
+          "attachment_lease_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/v1/evidence-archives/{evidence_archive_id}": {
+      "get": {
+        "operationId": "platform_get_v1_evidence_archives_evidence_archive_id_platform_evidence_archive_read",
+        "tags": [
+          "platform-runtime"
+        ],
+        "summary": "GET /v1/evidence-archives/{evidence_archive_id}",
+        "parameters": [
+          {
+            "name": "evidence_archive_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.evidence_archive.read",
+        "x-starweaver-resource-kind": "EvidenceArchive",
+        "x-starweaver-resource-id-path-param": "evidence_archive_id",
+        "x-starweaver-scope-path-params": [
+          "evidence_archive_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/v1/evidence-archives/{evidence_archive_id}/debug": {
+      "get": {
+        "operationId": "platform_get_v1_evidence_archives_evidence_archive_id_debug_platform_evidence_archive_debug_read",
+        "tags": [
+          "platform-runtime"
+        ],
+        "summary": "GET /v1/evidence-archives/{evidence_archive_id}/debug",
+        "parameters": [
+          {
+            "name": "evidence_archive_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.evidence_archive.debug.read",
+        "x-starweaver-resource-kind": "EvidenceArchive",
+        "x-starweaver-resource-id-path-param": "evidence_archive_id",
+        "x-starweaver-scope-path-params": [
+          "evidence_archive_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/admin/v1/identity-providers": {
+      "post": {
+        "operationId": "platform_post_admin_v1_identity_providers_platform_identity_provider_write",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "POST /admin/v1/identity-providers",
+        "parameters": [],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.identity_provider.write",
+        "x-starweaver-resource-kind": "IdentityProvider",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      },
+      "get": {
+        "operationId": "platform_get_admin_v1_identity_providers_platform_identity_provider_read",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "GET /admin/v1/identity-providers",
+        "parameters": [],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.identity_provider.read",
+        "x-starweaver-resource-kind": "IdentityProvider",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/admin/v1/identity-providers/{identity_provider_id}": {
+      "get": {
+        "operationId": "platform_get_admin_v1_identity_providers_identity_provider_id_platform_identity_provider_read",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "GET /admin/v1/identity-providers/{identity_provider_id}",
+        "parameters": [
+          {
+            "name": "identity_provider_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.identity_provider.read",
+        "x-starweaver-resource-kind": "IdentityProvider",
+        "x-starweaver-resource-id-path-param": "identity_provider_id",
+        "x-starweaver-scope-path-params": [
+          "identity_provider_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/admin/v1/users": {
+      "get": {
+        "operationId": "platform_get_admin_v1_users_platform_user_read",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "GET /admin/v1/users",
+        "parameters": [],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.user.read",
+        "x-starweaver-resource-kind": "User",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/admin/v1/users/{user_id}": {
+      "get": {
+        "operationId": "platform_get_admin_v1_users_user_id_platform_user_read",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "GET /admin/v1/users/{user_id}",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.user.read",
+        "x-starweaver-resource-kind": "User",
+        "x-starweaver-resource-id-path-param": "user_id",
+        "x-starweaver-scope-path-params": [
+          "user_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/admin/v1/users/{user_id}/status": {
+      "post": {
+        "operationId": "platform_post_admin_v1_users_user_id_status_platform_user_write",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "POST /admin/v1/users/{user_id}/status",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.user.write",
+        "x-starweaver-resource-kind": "User",
+        "x-starweaver-resource-id-path-param": "user_id",
+        "x-starweaver-scope-path-params": [
+          "user_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/admin/v1/users/{user_id}/sessions": {
+      "get": {
+        "operationId": "platform_get_admin_v1_users_user_id_sessions_platform_auth_session_read",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "GET /admin/v1/users/{user_id}/sessions",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.auth_session.read",
+        "x-starweaver-resource-kind": "AuthSession",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [
+          "user_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/admin/v1/users/{user_id}/sessions/{auth_session_id}/revoke": {
+      "post": {
+        "operationId": "platform_post_admin_v1_users_user_id_sessions_auth_session_id_revoke_platform_auth_session_revoke",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "POST /admin/v1/users/{user_id}/sessions/{auth_session_id}/revoke",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "auth_session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.auth_session.revoke",
+        "x-starweaver-resource-kind": "AuthSession",
+        "x-starweaver-resource-id-path-param": "auth_session_id",
+        "x-starweaver-scope-path-params": [
+          "user_id",
+          "auth_session_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/admin/v1/users/{user_id}/external-identities": {
+      "get": {
+        "operationId": "platform_get_admin_v1_users_user_id_external_identities_platform_external_identity_read",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "GET /admin/v1/users/{user_id}/external-identities",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.external_identity.read",
+        "x-starweaver-resource-kind": "ExternalIdentity",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [
+          "user_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/admin/v1/users/{user_id}/external-identities/{external_identity_id}": {
+      "get": {
+        "operationId": "platform_get_admin_v1_users_user_id_external_identities_external_identity_id_platform_external_identity_read",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "GET /admin/v1/users/{user_id}/external-identities/{external_identity_id}",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "external_identity_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.external_identity.read",
+        "x-starweaver-resource-kind": "ExternalIdentity",
+        "x-starweaver-resource-id-path-param": "external_identity_id",
+        "x-starweaver-scope-path-params": [
+          "user_id",
+          "external_identity_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/admin/v1/users/{user_id}/external-identities/{external_identity_id}/unlink": {
+      "post": {
+        "operationId": "platform_post_admin_v1_users_user_id_external_identities_external_identity_id_unlink_platform_external_identity_unlink",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "POST /admin/v1/users/{user_id}/external-identities/{external_identity_id}/unlink",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "external_identity_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.external_identity.unlink",
+        "x-starweaver-resource-kind": "ExternalIdentity",
+        "x-starweaver-resource-id-path-param": "external_identity_id",
+        "x-starweaver-scope-path-params": [
+          "user_id",
+          "external_identity_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/admin/v1/role-bindings": {
+      "get": {
+        "operationId": "platform_get_admin_v1_role_bindings_platform_role_binding_read",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "GET /admin/v1/role-bindings",
+        "parameters": [],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.role_binding.read",
+        "x-starweaver-resource-kind": "RoleBinding",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      },
+      "post": {
+        "operationId": "platform_post_admin_v1_role_bindings_platform_role_binding_write",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "POST /admin/v1/role-bindings",
+        "parameters": [],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.role_binding.write",
+        "x-starweaver-resource-kind": "RoleBinding",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/admin/v1/role-bindings/{role_binding_id}": {
+      "get": {
+        "operationId": "platform_get_admin_v1_role_bindings_role_binding_id_platform_role_binding_read",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "GET /admin/v1/role-bindings/{role_binding_id}",
+        "parameters": [
+          {
+            "name": "role_binding_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.role_binding.read",
+        "x-starweaver-resource-kind": "RoleBinding",
+        "x-starweaver-resource-id-path-param": "role_binding_id",
+        "x-starweaver-scope-path-params": [
+          "role_binding_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/admin/v1/role-bindings/{role_binding_id}/status": {
+      "post": {
+        "operationId": "platform_post_admin_v1_role_bindings_role_binding_id_status_platform_role_binding_write",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "POST /admin/v1/role-bindings/{role_binding_id}/status",
+        "parameters": [
+          {
+            "name": "role_binding_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.role_binding.write",
+        "x-starweaver-resource-kind": "RoleBinding",
+        "x-starweaver-resource-id-path-param": "role_binding_id",
+        "x-starweaver-scope-path-params": [
+          "role_binding_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/admin/v1/audit-events": {
+      "get": {
+        "operationId": "platform_get_admin_v1_audit_events_platform_audit_event_read",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "GET /admin/v1/audit-events",
+        "parameters": [],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.audit_event.read",
+        "x-starweaver-resource-kind": "AuditEvent",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/admin/v1/organizations/{organization_id}/members": {
+      "get": {
+        "operationId": "platform_get_admin_v1_organizations_organization_id_members_platform_organization_member_read",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "GET /admin/v1/organizations/{organization_id}/members",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.organization_member.read",
+        "x-starweaver-resource-kind": "OrganizationMember",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [
+          "organization_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      },
+      "post": {
+        "operationId": "platform_post_admin_v1_organizations_organization_id_members_platform_organization_member_write",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "POST /admin/v1/organizations/{organization_id}/members",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.organization_member.write",
+        "x-starweaver-resource-kind": "OrganizationMember",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [
+          "organization_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/admin/v1/organizations/{organization_id}/members/{organization_member_id}": {
+      "get": {
+        "operationId": "platform_get_admin_v1_organizations_organization_id_members_organization_member_id_platform_organization_member_read",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "GET /admin/v1/organizations/{organization_id}/members/{organization_member_id}",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "organization_member_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.organization_member.read",
+        "x-starweaver-resource-kind": "OrganizationMember",
+        "x-starweaver-resource-id-path-param": "organization_member_id",
+        "x-starweaver-scope-path-params": [
+          "organization_id",
+          "organization_member_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/admin/v1/organizations/{organization_id}/members/{organization_member_id}/status": {
+      "post": {
+        "operationId": "platform_post_admin_v1_organizations_organization_id_members_organization_member_id_status_platform_organization_member_write",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "POST /admin/v1/organizations/{organization_id}/members/{organization_member_id}/status",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "organization_member_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.organization_member.write",
+        "x-starweaver-resource-kind": "OrganizationMember",
+        "x-starweaver-resource-id-path-param": "organization_member_id",
+        "x-starweaver-scope-path-params": [
+          "organization_id",
+          "organization_member_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/admin/v1/organizations/{organization_id}/members/{organization_member_id}/remove": {
+      "post": {
+        "operationId": "platform_post_admin_v1_organizations_organization_id_members_organization_member_id_remove_platform_organization_member_write",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "POST /admin/v1/organizations/{organization_id}/members/{organization_member_id}/remove",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "organization_member_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.organization_member.write",
+        "x-starweaver-resource-kind": "OrganizationMember",
+        "x-starweaver-resource-id-path-param": "organization_member_id",
+        "x-starweaver-scope-path-params": [
+          "organization_id",
+          "organization_member_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/admin/v1/organizations/{organization_id}/invitations": {
+      "get": {
+        "operationId": "platform_get_admin_v1_organizations_organization_id_invitations_platform_organization_invitation_read",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "GET /admin/v1/organizations/{organization_id}/invitations",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.organization_invitation.read",
+        "x-starweaver-resource-kind": "OrganizationInvitation",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [
+          "organization_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      },
+      "post": {
+        "operationId": "platform_post_admin_v1_organizations_organization_id_invitations_platform_organization_invitation_create",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "POST /admin/v1/organizations/{organization_id}/invitations",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.organization_invitation.create",
+        "x-starweaver-resource-kind": "OrganizationInvitation",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [
+          "organization_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/admin/v1/organizations/{organization_id}/invitations/{invitation_id}": {
+      "get": {
+        "operationId": "platform_get_admin_v1_organizations_organization_id_invitations_invitation_id_platform_organization_invitation_read",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "GET /admin/v1/organizations/{organization_id}/invitations/{invitation_id}",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "invitation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.organization_invitation.read",
+        "x-starweaver-resource-kind": "OrganizationInvitation",
+        "x-starweaver-resource-id-path-param": "invitation_id",
+        "x-starweaver-scope-path-params": [
+          "organization_id",
+          "invitation_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/admin/v1/organizations/{organization_id}/invitations/{invitation_id}/revoke": {
+      "post": {
+        "operationId": "platform_post_admin_v1_organizations_organization_id_invitations_invitation_id_revoke_platform_organization_invitation_manage",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "POST /admin/v1/organizations/{organization_id}/invitations/{invitation_id}/revoke",
+        "parameters": [
+          {
+            "name": "organization_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "invitation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.organization_invitation.manage",
+        "x-starweaver-resource-kind": "OrganizationInvitation",
+        "x-starweaver-resource-id-path-param": "invitation_id",
+        "x-starweaver-scope-path-params": [
+          "organization_id",
+          "invitation_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/admin/v1/projects/{project_id}/members": {
+      "get": {
+        "operationId": "platform_get_admin_v1_projects_project_id_members_platform_project_member_read",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "GET /admin/v1/projects/{project_id}/members",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.project_member.read",
+        "x-starweaver-resource-kind": "ProjectMember",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [
+          "project_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      },
+      "post": {
+        "operationId": "platform_post_admin_v1_projects_project_id_members_platform_project_member_write",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "POST /admin/v1/projects/{project_id}/members",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.project_member.write",
+        "x-starweaver-resource-kind": "ProjectMember",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [
+          "project_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/admin/v1/projects/{project_id}/members/{project_member_id}": {
+      "get": {
+        "operationId": "platform_get_admin_v1_projects_project_id_members_project_member_id_platform_project_member_read",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "GET /admin/v1/projects/{project_id}/members/{project_member_id}",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_member_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.project_member.read",
+        "x-starweaver-resource-kind": "ProjectMember",
+        "x-starweaver-resource-id-path-param": "project_member_id",
+        "x-starweaver-scope-path-params": [
+          "project_id",
+          "project_member_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/admin/v1/projects/{project_id}/members/{project_member_id}/status": {
+      "post": {
+        "operationId": "platform_post_admin_v1_projects_project_id_members_project_member_id_status_platform_project_member_write",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "POST /admin/v1/projects/{project_id}/members/{project_member_id}/status",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_member_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.project_member.write",
+        "x-starweaver-resource-kind": "ProjectMember",
+        "x-starweaver-resource-id-path-param": "project_member_id",
+        "x-starweaver-scope-path-params": [
+          "project_id",
+          "project_member_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/admin/v1/secret-refs": {
+      "post": {
+        "operationId": "platform_post_admin_v1_secret_refs_platform_secret_ref_write",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "POST /admin/v1/secret-refs",
+        "parameters": [],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.secret_ref.write",
+        "x-starweaver-resource-kind": "SecretRef",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": true
+      },
+      "get": {
+        "operationId": "platform_get_admin_v1_secret_refs_platform_secret_ref_read",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "GET /admin/v1/secret-refs",
+        "parameters": [],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.secret_ref.read",
+        "x-starweaver-resource-kind": "SecretRef",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/admin/v1/secret-refs/{secret_ref_id}": {
+      "get": {
+        "operationId": "platform_get_admin_v1_secret_refs_secret_ref_id_platform_secret_ref_read",
+        "tags": [
+          "platform-admin"
+        ],
+        "summary": "GET /admin/v1/secret-refs/{secret_ref_id}",
+        "parameters": [
+          {
+            "name": "secret_ref_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.secret_ref.read",
+        "x-starweaver-resource-kind": "SecretRef",
+        "x-starweaver-resource-id-path-param": "secret_ref_id",
+        "x-starweaver-scope-path-params": [
+          "secret_ref_id"
+        ],
+        "x-starweaver-access": "authorized",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/auth/v1/providers": {
+      "get": {
+        "operationId": "platform_get_auth_v1_providers_platform_identity_provider_read",
+        "tags": [
+          "platform-auth"
+        ],
+        "summary": "GET /auth/v1/providers",
+        "parameters": [],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [],
+        "x-starweaver-action-id": "platform.identity_provider.read",
+        "x-starweaver-resource-kind": "IdentityProvider",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [],
+        "x-starweaver-access": "public",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/auth/v1/providers/{identity_provider_id}/start": {
+      "post": {
+        "operationId": "platform_post_auth_v1_providers_identity_provider_id_start_platform_identity_provider_read",
+        "tags": [
+          "platform-auth"
+        ],
+        "summary": "POST /auth/v1/providers/{identity_provider_id}/start",
+        "parameters": [
+          {
+            "name": "identity_provider_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [],
+        "x-starweaver-action-id": "platform.identity_provider.read",
+        "x-starweaver-resource-kind": "IdentityProvider",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [
+          "identity_provider_id"
+        ],
+        "x-starweaver-access": "public",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/auth/v1/providers/{identity_provider_id}/login": {
+      "get": {
+        "operationId": "platform_get_auth_v1_providers_identity_provider_id_login_platform_identity_provider_read",
+        "tags": [
+          "platform-auth"
+        ],
+        "summary": "GET /auth/v1/providers/{identity_provider_id}/login",
+        "parameters": [
+          {
+            "name": "identity_provider_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [],
+        "x-starweaver-action-id": "platform.identity_provider.read",
+        "x-starweaver-resource-kind": "IdentityProvider",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [
+          "identity_provider_id"
+        ],
+        "x-starweaver-access": "public",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/auth/v1/providers/{identity_provider_id}/callback": {
+      "post": {
+        "operationId": "platform_post_auth_v1_providers_identity_provider_id_callback_platform_auth_session_create",
+        "tags": [
+          "platform-auth"
+        ],
+        "summary": "POST /auth/v1/providers/{identity_provider_id}/callback",
+        "parameters": [
+          {
+            "name": "identity_provider_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [],
+        "x-starweaver-action-id": "platform.auth_session.create",
+        "x-starweaver-resource-kind": "AuthSession",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [
+          "identity_provider_id"
+        ],
+        "x-starweaver-access": "public",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/auth/v1/single-user/login": {
+      "post": {
+        "operationId": "platform_post_auth_v1_single_user_login_platform_auth_session_create",
+        "tags": [
+          "platform-auth"
+        ],
+        "summary": "POST /auth/v1/single-user/login",
+        "parameters": [],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [],
+        "x-starweaver-action-id": "platform.auth_session.create",
+        "x-starweaver-resource-kind": "AuthSession",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [],
+        "x-starweaver-access": "public",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/auth/v1/invitations/{invitation_token}/preview": {
+      "get": {
+        "operationId": "platform_get_auth_v1_invitations_invitation_token_preview_platform_organization_invitation_read",
+        "tags": [
+          "platform-auth"
+        ],
+        "summary": "GET /auth/v1/invitations/{invitation_token}/preview",
+        "parameters": [
+          {
+            "name": "invitation_token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [],
+        "x-starweaver-action-id": "platform.organization_invitation.read",
+        "x-starweaver-resource-kind": "OrganizationInvitation",
+        "x-starweaver-resource-id-path-param": "invitation_token",
+        "x-starweaver-scope-path-params": [
+          "invitation_token"
+        ],
+        "x-starweaver-access": "public",
+        "x-starweaver-user-actor-required": false
+      }
+    },
+    "/auth/v1/invitations/{invitation_token}/accept": {
+      "post": {
+        "operationId": "platform_post_auth_v1_invitations_invitation_token_accept_platform_organization_invitation_accept",
+        "tags": [
+          "platform-auth"
+        ],
+        "summary": "POST /auth/v1/invitations/{invitation_token}/accept",
+        "parameters": [
+          {
+            "name": "invitation_token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.organization_invitation.accept",
+        "x-starweaver-resource-kind": "OrganizationInvitation",
+        "x-starweaver-resource-id-path-param": "invitation_token",
+        "x-starweaver-scope-path-params": [
+          "invitation_token"
+        ],
+        "x-starweaver-access": "session",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/auth/v1/session": {
+      "get": {
+        "operationId": "platform_get_auth_v1_session_platform_auth_session_read",
+        "tags": [
+          "platform-auth"
+        ],
+        "summary": "GET /auth/v1/session",
+        "parameters": [],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.auth_session.read",
+        "x-starweaver-resource-kind": "AuthSession",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [],
+        "x-starweaver-access": "session",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/auth/v1/session/active-organization": {
+      "post": {
+        "operationId": "platform_post_auth_v1_session_active_organization_platform_auth_session_update",
+        "tags": [
+          "platform-auth"
+        ],
+        "summary": "POST /auth/v1/session/active-organization",
+        "parameters": [],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.auth_session.update",
+        "x-starweaver-resource-kind": "AuthSession",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [],
+        "x-starweaver-access": "session",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/auth/v1/session/active-project": {
+      "post": {
+        "operationId": "platform_post_auth_v1_session_active_project_platform_auth_session_update",
+        "tags": [
+          "platform-auth"
+        ],
+        "summary": "POST /auth/v1/session/active-project",
+        "parameters": [],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.auth_session.update",
+        "x-starweaver-resource-kind": "AuthSession",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [],
+        "x-starweaver-access": "session",
+        "x-starweaver-user-actor-required": true
+      }
+    },
+    "/auth/v1/logout": {
+      "post": {
+        "operationId": "platform_post_auth_v1_logout_platform_auth_session_revoke",
+        "tags": [
+          "platform-auth"
+        ],
+        "summary": "POST /auth/v1/logout",
+        "parameters": [],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "platform.auth_session.revoke",
+        "x-starweaver-resource-kind": "AuthSession",
+        "x-starweaver-resource-id-path-param": null,
+        "x-starweaver-scope-path-params": [],
+        "x-starweaver-access": "session",
+        "x-starweaver-user-actor-required": true
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "ErrorEnvelope": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "ResourceEnvelope": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  }
+}

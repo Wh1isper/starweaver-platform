@@ -2058,7 +2058,7 @@ const FOUNDATION_ROUTES: &[RouteMetadata] = &[
     },
 ];
 
-/// Foundation route matrix used before generated `OpenAPI` metadata exists.
+/// Foundation route matrix used by handlers, policy checks, and generated `OpenAPI`.
 #[must_use]
 pub const fn foundation_routes() -> &'static [RouteMetadata] {
     FOUNDATION_ROUTES

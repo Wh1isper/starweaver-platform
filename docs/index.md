@@ -13,6 +13,8 @@ policy, audit, usage, deployment, and hosted APIs.
 
 - [Install](install.md) - local setup and repository commands.
 - [Testing](testing.md) - local and CI validation.
+- [API Contracts](api-contracts.md) - generated OpenAPI artifacts and contract
+  gates.
 - [Service Boundary](architecture.md) - repository and service ownership.
 - [Agent Platform](agent-platform.md) - hosted agent control plane.
 - [LLM Gateway](gateway.md) - enterprise model egress plane.
