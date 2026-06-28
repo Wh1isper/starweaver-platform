@@ -28,7 +28,7 @@ manage configuration and inspect operational evidence.
 - Do not let runtime workers mutate long-lived configuration except through
   narrow health and usage write paths.
 - Do not become a generic identity provider. The gateway may act as a
-  configured login client for GitHub OAuth App or OIDC admin login and manages
+  configured login client for generic OIDC admin login and manages
   gateway-local principals, memberships, sessions, and authorization resources.
 - Do not expose raw upstream provider secrets after creation.
 

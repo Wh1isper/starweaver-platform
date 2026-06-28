@@ -373,6 +373,96 @@ platform_actions!(
         "EvidenceArchive",
         true
     ),
+    (
+        IdentityProviderRead,
+        "platform.identity_provider.read",
+        "IdentityProvider",
+        false
+    ),
+    (
+        IdentityProviderWrite,
+        "platform.identity_provider.write",
+        "IdentityProvider",
+        true
+    ),
+    (
+        AuthSessionRead,
+        "platform.auth_session.read",
+        "AuthSession",
+        true
+    ),
+    (
+        AuthSessionUpdate,
+        "platform.auth_session.update",
+        "AuthSession",
+        true
+    ),
+    (
+        AuthSessionRevoke,
+        "platform.auth_session.revoke",
+        "AuthSession",
+        true
+    ),
+    (
+        OrganizationMemberRead,
+        "platform.organization_member.read",
+        "OrganizationMember",
+        false
+    ),
+    (
+        OrganizationMemberWrite,
+        "platform.organization_member.write",
+        "OrganizationMember",
+        true
+    ),
+    (
+        OrganizationInvitationRead,
+        "platform.organization_invitation.read",
+        "OrganizationInvitation",
+        false
+    ),
+    (
+        OrganizationInvitationCreate,
+        "platform.organization_invitation.create",
+        "OrganizationInvitation",
+        true
+    ),
+    (
+        OrganizationInvitationManage,
+        "platform.organization_invitation.manage",
+        "OrganizationInvitation",
+        true
+    ),
+    (
+        OrganizationInvitationAccept,
+        "platform.organization_invitation.accept",
+        "OrganizationInvitation",
+        true
+    ),
+    (
+        ProjectMemberRead,
+        "platform.project_member.read",
+        "ProjectMember",
+        false
+    ),
+    (
+        ProjectMemberWrite,
+        "platform.project_member.write",
+        "ProjectMember",
+        true
+    ),
+    (
+        SecretRefRead,
+        "platform.secret_ref.read",
+        "SecretRef",
+        false
+    ),
+    (
+        SecretRefWrite,
+        "platform.secret_ref.write",
+        "SecretRef",
+        true
+    ),
 );
 
 const PLATFORM_OPERATOR_ACTIONS: &[PlatformAction] = &[
@@ -383,6 +473,12 @@ const PLATFORM_OPERATOR_ACTIONS: &[PlatformAction] = &[
     PlatformAction::EnvironmentAttachmentRead,
     PlatformAction::EnvironmentAttachmentHealthRead,
     PlatformAction::EvidenceArchiveRead,
+    PlatformAction::IdentityProviderRead,
+    PlatformAction::AuthSessionRead,
+    PlatformAction::OrganizationMemberRead,
+    PlatformAction::OrganizationInvitationRead,
+    PlatformAction::ProjectMemberRead,
+    PlatformAction::SecretRefRead,
 ];
 
 const ORGANIZATION_ADMIN_ACTIONS: &[PlatformAction] = &[
@@ -404,11 +500,49 @@ const ORGANIZATION_ADMIN_ACTIONS: &[PlatformAction] = &[
     PlatformAction::EnvironmentAttachmentRelease,
     PlatformAction::EnvironmentAttachmentHealthRead,
     PlatformAction::EvidenceArchiveRead,
+    PlatformAction::AuthSessionRead,
+    PlatformAction::AuthSessionUpdate,
+    PlatformAction::AuthSessionRevoke,
+    PlatformAction::OrganizationMemberRead,
+    PlatformAction::OrganizationMemberWrite,
+    PlatformAction::OrganizationInvitationRead,
+    PlatformAction::OrganizationInvitationCreate,
+    PlatformAction::OrganizationInvitationManage,
+    PlatformAction::OrganizationInvitationAccept,
+    PlatformAction::ProjectMemberRead,
+    PlatformAction::ProjectMemberWrite,
 ];
 
-const PROJECT_ADMIN_ACTIONS: &[PlatformAction] = ORGANIZATION_ADMIN_ACTIONS;
+const PROJECT_ADMIN_ACTIONS: &[PlatformAction] = &[
+    PlatformAction::AuthSessionRead,
+    PlatformAction::AuthSessionUpdate,
+    PlatformAction::AuthSessionRevoke,
+    PlatformAction::ConversationCreate,
+    PlatformAction::ConversationRead,
+    PlatformAction::ConversationUpdate,
+    PlatformAction::SessionCreate,
+    PlatformAction::SessionRead,
+    PlatformAction::RunCreate,
+    PlatformAction::RunRead,
+    PlatformAction::RunCancel,
+    PlatformAction::RunEventRead,
+    PlatformAction::ApprovalRead,
+    PlatformAction::ApprovalDecide,
+    PlatformAction::DeferredToolRead,
+    PlatformAction::DeferredToolResume,
+    PlatformAction::EnvironmentAttachmentCreate,
+    PlatformAction::EnvironmentAttachmentRead,
+    PlatformAction::EnvironmentAttachmentRelease,
+    PlatformAction::EnvironmentAttachmentHealthRead,
+    PlatformAction::EvidenceArchiveRead,
+    PlatformAction::ProjectMemberRead,
+    PlatformAction::ProjectMemberWrite,
+];
 
 const PROJECT_DEVELOPER_ACTIONS: &[PlatformAction] = &[
+    PlatformAction::AuthSessionRead,
+    PlatformAction::AuthSessionUpdate,
+    PlatformAction::AuthSessionRevoke,
     PlatformAction::ConversationCreate,
     PlatformAction::ConversationRead,
     PlatformAction::SessionCreate,
@@ -430,6 +564,9 @@ const PROJECT_DEVELOPER_ACTIONS: &[PlatformAction] = &[
 ];
 
 const PROJECT_VIEWER_ACTIONS: &[PlatformAction] = &[
+    PlatformAction::AuthSessionRead,
+    PlatformAction::AuthSessionUpdate,
+    PlatformAction::AuthSessionRevoke,
     PlatformAction::ConversationRead,
     PlatformAction::SessionRead,
     PlatformAction::RunRead,
@@ -442,6 +579,9 @@ const PROJECT_VIEWER_ACTIONS: &[PlatformAction] = &[
 ];
 
 const AUDITOR_ACTIONS: &[PlatformAction] = &[
+    PlatformAction::AuthSessionRead,
+    PlatformAction::AuthSessionUpdate,
+    PlatformAction::AuthSessionRevoke,
     PlatformAction::RunRead,
     PlatformAction::RunEventRead,
     PlatformAction::EvidenceArchiveRead,

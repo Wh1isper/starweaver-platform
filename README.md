@@ -70,20 +70,22 @@ Install local pre-commit hooks with:
 make install
 ```
 
-The gateway does not enable human login by default, and it does not create a
-GitHub OAuth App or OIDC provider automatically. For local or simple
-self-hosted bootstrap, enable the local single-user provider with:
+The platform service does not enable human login by default, and it does not
+create an OIDC provider automatically. For local or simple self-hosted
+bootstrap, enable the local single-user provider with:
 
 ```bash
-export STARWEAVER_GATEWAY_SINGLE_USER_USERNAME=admin
-export STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD='change-me'
+export STARWEAVER_PLATFORM_SINGLE_USER_USERNAME=admin
+export STARWEAVER_PLATFORM_SINGLE_USER_PASSWORD='change-me'
 ```
 
 When both values are configured, `/auth/v1/single-user/login` creates an opaque
 session and bootstraps the default tenant, organization, project, and owner
 grants. The login response includes CSRF metadata; browser clients must send the
-returned `x-gateway-csrf-token` value on session mutation APIs. GitHub OAuth App
-or OIDC login can be configured later through the admin identity-provider APIs.
+returned `x-starweaver-platform-csrf-token` value on session mutation APIs.
+Generic OIDC login can be configured later through the admin identity-provider
+APIs. Non-OIDC OAuth providers such as GitHub OAuth App need an OIDC broker or
+a separate OAuth adapter before they can be used directly.
 
 For local file-backed usage or audit exports, configure an absolute export
 object directory and request `storage_backend: file_object_storage`:

@@ -57,7 +57,7 @@ flowchart TD
 | `08-security-observability-operations.md` | secret safety, redaction, telemetry, Redis-compatible hot state, OTel export, and operations |
 | `09-validation-and-rollout.md`            | implementation phases, acceptance gates, migration policy, and test matrix                   |
 | `10-authorization-api-keys.md`            | API keys, REST API permissions, authorization engine, actions, and policy gates              |
-| `11-login-user-management.md`             | GitHub OAuth App login, OIDC login, sessions, user lifecycle, and memberships                |
+| `11-login-user-management.md`             | single-user bootstrap, generic OIDC login, sessions, user lifecycle, and memberships         |
 | `12-dashboards-observability-api.md`      | realtime operations dashboard, usage analytics, model observability, and aggregations        |
 | `memos/`                                  | implementation planning notes, including framework selection                                 |
 
@@ -73,8 +73,8 @@ flowchart TD
 - Usage notifications and webhook integration points for external billing or
   analytics systems.
 - Upstream provider OAuth support restricted to Codex.
-- Human login through configured login providers: GitHub OAuth App for bare
-  deployments and OIDC for enterprise SSO.
+- Human login through local single-user bootstrap and configured generic OIDC
+  providers.
 - User-owned and service-owned API keys that can call model APIs and authorized
   REST APIs.
 - Unified authorization for model ingress and admin/evidence REST APIs.

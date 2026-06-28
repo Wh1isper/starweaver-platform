@@ -7813,7 +7813,7 @@ fn validate_login_provider_request(
 }
 
 fn validate_login_provider_shape(request: &CreateLoginProviderRequest) -> Result<()> {
-    if !matches!(request.provider_kind.as_str(), "github_oauth_app" | "oidc") {
+    if request.provider_kind != "oidc" {
         return Err(GatewayError::BadRequest {
             message: "login_provider_kind_invalid".to_owned(),
         });

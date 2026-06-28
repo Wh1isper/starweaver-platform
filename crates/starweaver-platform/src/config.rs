@@ -1,6 +1,6 @@
 //! Startup configuration for the platform service.
 
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 
 use crate::service::PlatformRepositoryBackendKind;
 
@@ -21,6 +21,8 @@ pub struct PlatformConfig {
     pub database_url: Option<String>,
     /// Repository backend selected for request handling.
     pub repository_backend: PlatformRepositoryBackendKind,
+    /// Optional local single-user password login configuration.
+    pub single_user_auth: Option<PlatformSingleUserConfig>,
 }
 
 impl Default for PlatformConfig {
@@ -30,6 +32,7 @@ impl Default for PlatformConfig {
             environment: DEFAULT_PLATFORM_ENVIRONMENT.to_owned(),
             database_url: None,
             repository_backend: PlatformRepositoryBackendKind::InMemory,
+            single_user_auth: None,
         }
     }
 }
@@ -57,7 +60,78 @@ impl PlatformConfig {
                 config.repository_backend = backend;
             }
         }
+        config.single_user_auth = single_user_auth_from_env();
         config
+    }
+}
+
+/// Local single-user password login configuration.
+#[derive(Clone, Eq, PartialEq)]
+pub struct PlatformSingleUserConfig {
+    username: String,
+    password: String,
+    user_primary_email: Option<String>,
+    user_display_name: String,
+}
+
+impl Debug for PlatformSingleUserConfig {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PlatformSingleUserConfig")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("user_primary_email", &self.user_primary_email)
+            .field("user_display_name", &self.user_display_name)
+            .finish()
+    }
+}
+
+impl PlatformSingleUserConfig {
+    /// Builds a single-user config from required credentials.
+    #[must_use]
+    pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
+        let username = username.into();
+        Self {
+            user_display_name: username.clone(),
+            username,
+            password: password.into(),
+            user_primary_email: None,
+        }
+    }
+
+    /// Returns the configured login username.
+    #[must_use]
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+
+    /// Returns the optional primary email for the local user.
+    #[must_use]
+    pub fn user_primary_email(&self) -> Option<&str> {
+        self.user_primary_email.as_deref()
+    }
+
+    /// Returns the local user's display name.
+    #[must_use]
+    pub fn user_display_name(&self) -> &str {
+        &self.user_display_name
+    }
+
+    /// Returns whether the supplied credentials match the configured user.
+    #[must_use]
+    pub fn credentials_match(&self, username: &str, password: &str) -> bool {
+        constant_time_eq(self.username.as_bytes(), username.as_bytes())
+            & constant_time_eq(self.password.as_bytes(), password.as_bytes())
+    }
+
+    fn with_user_primary_email(mut self, user_primary_email: Option<String>) -> Self {
+        self.user_primary_email = user_primary_email;
+        self
+    }
+
+    fn with_user_display_name(mut self, user_display_name: String) -> Self {
+        self.user_display_name = user_display_name;
+        self
     }
 }
 
@@ -184,6 +258,39 @@ pub fn parse_platform_repository_backend(value: &str) -> Option<PlatformReposito
     }
 }
 
+fn single_user_auth_from_env() -> Option<PlatformSingleUserConfig> {
+    let username = std::env::var("STARWEAVER_PLATFORM_SINGLE_USER_USERNAME")
+        .ok()
+        .and_then(|value| non_empty_env(&value));
+    let password = std::env::var("STARWEAVER_PLATFORM_SINGLE_USER_PASSWORD")
+        .ok()
+        .and_then(|value| non_empty_env(&value));
+    let (Some(username), Some(password)) = (username, password) else {
+        return None;
+    };
+    let mut config = PlatformSingleUserConfig::new(username, password);
+    if let Ok(value) = std::env::var("STARWEAVER_PLATFORM_SINGLE_USER_EMAIL") {
+        config = config.with_user_primary_email(non_empty_env(&value));
+    }
+    if let Ok(value) = std::env::var("STARWEAVER_PLATFORM_SINGLE_USER_DISPLAY_NAME") {
+        if let Some(value) = non_empty_env(&value) {
+            config = config.with_user_display_name(value);
+        }
+    }
+    Some(config)
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let mut diff = left.len() ^ right.len();
+    let max_len = left.len().max(right.len());
+    for index in 0..max_len {
+        let left_byte = left.get(index).copied().unwrap_or(0);
+        let right_byte = right.get(index).copied().unwrap_or(0);
+        diff |= usize::from(left_byte ^ right_byte);
+    }
+    diff == 0
+}
+
 fn push_repository_backend_diagnostics(
     config: &PlatformConfig,
     diagnostics: &mut Vec<PlatformStartupDiagnostic>,
@@ -241,11 +348,15 @@ mod tests {
     };
     use crate::service::PlatformRepositoryBackendKind;
 
-    const ENV_KEYS: [&str; 4] = [
+    const ENV_KEYS: [&str; 8] = [
         "STARWEAVER_PLATFORM_LISTEN_ADDR",
         "STARWEAVER_PLATFORM_ENV",
         "STARWEAVER_PLATFORM_DATABASE_URL",
         "STARWEAVER_PLATFORM_REPOSITORY_BACKEND",
+        "STARWEAVER_PLATFORM_SINGLE_USER_USERNAME",
+        "STARWEAVER_PLATFORM_SINGLE_USER_PASSWORD",
+        "STARWEAVER_PLATFORM_SINGLE_USER_EMAIL",
+        "STARWEAVER_PLATFORM_SINGLE_USER_DISPLAY_NAME",
     ];
 
     fn env_lock() -> &'static Mutex<()> {
@@ -277,6 +388,7 @@ mod tests {
             config.repository_backend,
             PlatformRepositoryBackendKind::InMemory
         );
+        assert!(config.single_user_auth.is_none());
         assert!(validate_platform_config(&config).is_ok());
     }
 
@@ -325,6 +437,43 @@ mod tests {
         clear_platform_env();
 
         assert_eq!(config, PlatformConfig::default());
+    }
+
+    #[test]
+    fn from_env_enables_single_user_only_with_required_credentials() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|error| panic!("environment lock poisoned: {error}"));
+        clear_platform_env();
+
+        assert!(PlatformConfig::from_env().single_user_auth.is_none());
+
+        std::env::set_var("STARWEAVER_PLATFORM_SINGLE_USER_USERNAME", "admin");
+        assert!(PlatformConfig::from_env().single_user_auth.is_none());
+
+        std::env::set_var("STARWEAVER_PLATFORM_SINGLE_USER_PASSWORD", " ");
+        assert!(PlatformConfig::from_env().single_user_auth.is_none());
+
+        std::env::set_var("STARWEAVER_PLATFORM_SINGLE_USER_USERNAME", " admin ");
+        std::env::set_var("STARWEAVER_PLATFORM_SINGLE_USER_PASSWORD", " secret ");
+        std::env::set_var(
+            "STARWEAVER_PLATFORM_SINGLE_USER_EMAIL",
+            " admin@example.com ",
+        );
+        std::env::set_var("STARWEAVER_PLATFORM_SINGLE_USER_DISPLAY_NAME", " Admin ");
+
+        let single_user = PlatformConfig::from_env()
+            .single_user_auth
+            .unwrap_or_else(|| panic!("single-user config should be enabled"));
+        clear_platform_env();
+
+        assert_eq!(single_user.username(), "admin");
+        assert_eq!(single_user.user_primary_email(), Some("admin@example.com"));
+        assert_eq!(single_user.user_display_name(), "Admin");
+        assert!(single_user.credentials_match("admin", "secret"));
+        assert!(!single_user.credentials_match("admin", "wrong"));
+        assert!(!single_user.credentials_match("other", "secret"));
+        assert!(!format!("{single_user:?}").contains("secret"));
     }
 
     #[test]

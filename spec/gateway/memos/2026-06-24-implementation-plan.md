@@ -27,7 +27,7 @@ Included:
 - config snapshot publication and worker reload
 - built-in realtime dashboard backed by hot state
 - OpenTelemetry metrics export for user-owned dashboards
-- GitHub OAuth App login, generic OIDC login, users, organizations, and projects
+- generic OIDC login, users, organizations, and projects
 - Codex upstream OAuth credential lifecycle
 - notifications, exports, operational runbooks, and deployment packaging
 - final shared auth/authz layering review with the agent platform once both
@@ -350,9 +350,15 @@ Completed foundation slices:
   routes. Missing owner records and missing business records return `404` at
   the appropriate phase.
 - Human login documentation now treats generic OIDC as the standard external
-  login provider and GitHub OAuth App as a convenience adapter. OIDC remains
-  separate from upstream provider OAuth credentials and validates issuer,
-  audience, nonce, PKCE, expiry, and JWKS-backed ID token signatures.
+  login provider. Non-OIDC OAuth providers, including GitHub OAuth App, require
+  an OIDC broker or a separate OAuth adapter before direct login support is
+  exposed. OIDC remains separate from upstream provider OAuth credentials and
+  validates issuer, audience, nonce, PKCE, expiry, and JWKS-backed ID token
+  signatures.
+- Gateway human-login runtime now accepts only generic OIDC identity providers.
+  The direct GitHub OAuth App adapter, callback exchange path, test mock, and
+  schema allowance were removed; deployments that want GitHub identity must
+  configure an OIDC broker or wait for a separately reviewed OAuth adapter.
 - Agent platform durable schema foundation now embeds the first platform
   PostgreSQL migration and migration entrypoint. The schema covers tenant,
   organization, project, principal, membership, identity provider, generic OIDC
@@ -389,12 +395,92 @@ Completed foundation slices:
   PostgreSQL, runs embedded migrations, and constructs repository-backed service
   state before binding the HTTP listener. The binary also exposes `migrate run`
   and `migrate check` commands for the embedded platform schema.
+- Agent platform local single-user login foundation now parses
+  disabled-by-default environment credentials, redacts the configured password
+  from debug output, exposes `POST /auth/v1/single-user/login` only when
+  configured, returns an opaque bearer session token, stores only the session
+  hash through the existing platform session repository boundary, and grants the
+  default local user tenant-owner permissions through the platform-local
+  authorization engine.
+- Agent platform durable single-user bootstrap repair now seeds or repairs the
+  default tenant, organization, project, principal, user, memberships,
+  single-user identity provider, external identity, and tenant-owner role
+  binding before the PostgreSQL-backed HTTP listener is exposed.
+- Agent platform generic OIDC contract foundation now validates tenant-owned
+  provider shape and verified ID-token claim envelopes for issuer, audience,
+  nonce, subject, expiration, HTTPS endpoints, `openid` scopes, and active
+  provider status without sharing gateway HTTP handlers or repositories.
+- Agent platform OIDC login-attempt persistence now stores state, nonce, and
+  PKCE verifier hashes only, records status, expiry, redirect URI, and consumed
+  timestamps, and exposes repository lookup by hashing callback state before
+  querying PostgreSQL.
+- Agent platform OIDC login completion now has a durable transaction that
+  consumes an active unexpired attempt once, repairs the subject-derived local
+  user default organization/project, membership graph, organization-admin role,
+  external identity, and auth session, and fails closed if a provider subject is
+  already linked to a different local principal.
+- Agent platform generic OIDC validation now resolves explicit or discovered
+  provider metadata, rejects discovery issuer mismatches, accepts only
+  asymmetric ID-token signing algorithms, validates JWKS-backed ID-token
+  signatures, and enforces issuer, audience, nonce, subject, and expiration
+  before producing service-local verified claims.
+- Agent platform OIDC HTTP callback foundation now exposes
+  `POST /auth/v1/providers/{identity_provider_id}/callback`, loads provider
+  config and login attempts through the selected platform repository boundary,
+  compares callback nonce and PKCE verifier values against stored hashes before
+  token exchange, exchanges authorization codes with public PKCE client form
+  parameters, fetches JWKS through a testable HTTP transport boundary, validates
+  ID tokens, records the auth session, and rejects replayed attempts.
+- Agent platform identity-provider and secret-ref management now exposes
+  service-local admin/read APIs for generic OIDC provider config and platform
+  `SecretRef` metadata, writes resource-owner rows for authorization, rejects
+  raw provider client secrets, masks attached provider secret refs, keeps raw
+  secret values out of durable tables and read responses, and supports
+  confidential generic OIDC callbacks with `client_secret_basic` or
+  `client_secret_post` token endpoint authentication through the platform secret
+  repository boundary.
+- Agent platform auth provider discovery and generic OIDC login/start APIs now
+  expose safe public login projections, list the single-user password provider
+  only when configured, list active generic OIDC providers only for an explicit
+  tenant query, create one-time login attempts through the selected repository
+  backend, support both `GET /auth/v1/providers/{id}/login` and
+  `POST /auth/v1/providers/{id}/start`, and return authorization URLs with
+  PKCE S256 client state without leaking provider client secrets, secret refs,
+  authorization codes, ID tokens, provider access tokens, or refresh tokens.
+- Agent platform membership admin foundations now expose organization and
+  project membership list/get/status routes, canonical membership read/write
+  actions, optimistic concurrency on status mutation, in-memory and PostgreSQL
+  repository paths, and organization-member inactive-status cascade to child
+  project memberships so project access cannot outlive organization access.
+- Agent platform organization-member create/reactivate API now exposes
+  `POST /admin/v1/organizations/{organization_id}/members`. It validates
+  membership kind, uses canonical `platform.organization_member.write`, is
+  idempotent by organization/principal, reactivates suspended or removed
+  memberships, and supports in-memory and PostgreSQL repository backends.
+- Agent platform organization invitation foundations now expose admin
+  create/list/get/revoke routes plus public preview and authenticated accept
+  routes. Raw invitation tokens are returned only once, durable storage keeps
+  token hashes only, principal-target accept upserts organization and project
+  memberships, and email-target invitations are safe to create/preview without
+  granting access by email until a verified user-profile lookup contract exists.
+- Agent platform user session self-management now exposes current-session read,
+  logout, active-organization switch, and active-project switch APIs. These
+  APIs resolve only opaque user auth sessions, return session-bound CSRF
+  metadata on login and session read, require
+  `x-starweaver-platform-csrf-token` for session mutations and invitation
+  accept, validate active organization/project membership before context
+  switches, and never return session token hashes after login. Single-user and
+  generic OIDC logins now share this browser session contract.
+- Agent platform project-member create/reactivate API now exposes
+  `POST /admin/v1/projects/{project_id}/members`. It requires an active parent
+  organization membership, derives principal and membership kind from that
+  parent record, uses the canonical `platform.project_member.write` path,
+  supports in-memory and PostgreSQL repository backends, and rejects inactive
+  parents or cross-organization project assignment.
 
 Next implementation focus:
 
-- Add platform bootstrap paths for local single-user mode and first-tenant
-  organization/project initialization without weakening generic OIDC as the
-  standard external login provider shape.
+- Continue Stage 9 platform external identity and role-change flows.
 - Keep shared auth/authz extraction deferred behind the two-owner contract-test
   gate now that both gateway and platform have concrete auth evidence.
 - Continue hardening any required OTLP/gRPC transport only when the metrics
@@ -821,27 +907,24 @@ Work items:
     server-side session;
   - public auth provider discovery exposes the single-user password provider
     only when configured;
-  - admin identity-provider configuration supports GitHub OAuth App and
-    generic OIDC config documents with secret-reference redaction;
+  - admin identity-provider configuration supports tenant-owned generic OIDC
+    config documents with secret-reference redaction; non-OIDC OAuth providers
+    such as GitHub OAuth App are deferred behind an OIDC broker or a separate
+    OAuth adapter;
   - external login start builds OAuth/OIDC authorization URLs with state, OIDC
     nonce, and PKCE S256 code challenge without returning client secrets or
     code verifiers;
   - external login start now persists one-time login attempts with hashed
     state, nonce, and PKCE verifier evidence plus a short-lived verifier secret,
     and the local deterministic callback adapter consumes attempts exactly once;
-  - GitHub OAuth App callbacks now exchange authorization codes with the
-    short-lived PKCE verifier, use secret-backed client credentials, read the
-    configured GitHub user and email APIs, select a stable GitHub subject, keep
-    only verified email metadata, and avoid returning or auditing raw tokens;
   - generic OIDC callbacks now exchange authorization codes with PKCE verifiers,
     resolve issuer discovery when endpoints are not configured explicitly, fetch
     JWKS, validate asymmetric signed ID tokens, enforce issuer, audience, nonce,
     and expiry checks, and avoid returning or auditing raw tokens;
-  - local deterministic GitHub/OIDC callback tests create or link gateway-local
-    users and external identities, issue opaque sessions without granting
+  - local deterministic generic OIDC callback tests create or link local users
+    and external identities, issue opaque sessions without granting
     organization or project access by email alone, reject reused state, validate
-    OIDC issuer, audience, expiry, and nonce, and forbid the adapter in
-    production profiles;
+    OIDC issuer, audience, expiry, and nonce;
   - admin user list, get, and status update APIs are tenant scoped, audited, and
     revoke active sessions when a user is disabled or deleted;
   - admin user session list and revoke APIs are tenant scoped, item-authorized,
@@ -856,19 +939,17 @@ Work items:
     project assignment;
   - browser session login and read responses return session-bound CSRF metadata;
     logout, active/default context updates, and invitation accept reject missing
-    or wrong `x-gateway-csrf-token`.
-- Finish remaining membership mutation flows.
-- Implement organization invitations, invitation preview, invitation accept,
-  organization membership, project membership, role changes, suspension, and
-  removal.
+    or wrong service-specific CSRF headers.
+- Finish remaining user, external-identity, role-change, and organization
+  membership removal flows.
 - Wire `/auth/v1/*` actions to the canonical authorization matrix.
 
 Acceptance evidence:
 
-- Tests cover GitHub OAuth callback, OIDC callback, wrong state, wrong nonce,
-  wrong issuer, wrong audience, expired token, unknown signing key, disabled
-  user, logout, CSRF failure, invite accept, default organization repair, and
-  project membership visibility.
+- Tests cover generic OIDC callback, wrong state, wrong nonce, wrong issuer,
+  wrong audience, expired token, unknown signing key, disabled user, logout,
+  CSRF failure, invite accept, default organization repair, and project
+  membership visibility.
 - Browser session APIs never return ID tokens, access tokens, refresh tokens,
   client secrets, or raw invitation tokens.
 

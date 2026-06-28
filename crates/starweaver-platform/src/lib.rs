@@ -14,11 +14,23 @@ pub mod auth;
 /// Platform startup configuration.
 pub mod config;
 
+/// Platform-local identity provider contracts.
+pub mod identity;
+
+/// Platform-local organization invitation contracts.
+pub mod invitation;
+
+/// Platform-local membership contracts.
+pub mod membership;
+
 /// Platform route metadata.
 pub mod route;
 
 /// Platform business resource records.
 pub mod resource;
+
+/// Platform-local secret reference contracts.
+pub mod secret;
 
 /// Platform database migration entry points.
 pub mod migrations;

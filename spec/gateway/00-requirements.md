@@ -54,45 +54,45 @@ flowchart TD
 
 ## Functional Capability Matrix
 
-| ID    | Level    | Capability                                | Primary Owner                             | Supporting Specs                                                                                    | Completion Evidence                                             |
-| ----- | -------- | ----------------------------------------- | ----------------------------------------- | --------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| G-001 | required | HTTP protocol ingress                     | `05-runtime-protocol.md`                  | `01-llm-gateway.md`                                                                                 | handler tests for each enabled ingress family                   |
-| G-002 | required | Client credential authn                   | `10-authorization-api-keys.md`            | `02-tenancy-access.md`                                                                              | API key prefix/hash tests and disabled-key tests                |
-| G-003 | required | Unified authorization                     | `10-authorization-api-keys.md`            | none                                                                                                | action/resource tests and Cedar schema validation               |
-| G-004 | required | Tenant/org/project resolution             | `02-tenancy-access.md`                    | `10-authorization-api-keys.md`                                                                      | context-resolution tests for header, key, and delegation        |
-| G-005 | required | Provider grant closure                    | `02-tenancy-access.md`                    | `04-routing-router.md`                                                                              | route simulation proves allow/deny closure behavior             |
-| G-006 | required | Provider endpoint catalog                 | `03-provider-credential-catalog.md`       | none                                                                                                | catalog validation rejects incompatible resources               |
-| G-007 | required | Upstream credential safety                | `08-security-observability-operations.md` | `03-provider-credential-catalog.md`                                                                 | no read API returns raw secret material                         |
-| G-008 | required | Model alias resolution                    | `03-provider-credential-catalog.md`       | `05-runtime-protocol.md`                                                                            | alias extraction and protocol mismatch tests                    |
-| G-009 | required | Routing group execution                   | `04-routing-router.md`                    | none                                                                                                | deterministic route tests for enabled strategies                |
-| G-010 | required | Route decision evidence                   | `04-routing-router.md`                    | `08-security-observability-operations.md`                                                           | persisted decision and attempt event tests                      |
-| G-011 | required | Streaming passthrough                     | `05-runtime-protocol.md`                  | none                                                                                                | fake provider SSE/stream tests                                  |
-| G-012 | required | Streaming failover boundary               | `04-routing-router.md`                    | `05-runtime-protocol.md`                                                                            | tests prove no mixed-provider visible stream                    |
-| G-013 | required | Usage event recording                     | `06-usage-cost-budget-notifications.md`   | none                                                                                                | idempotent usage writes under retry                             |
-| G-014 | required | Cost estimate and ledger                  | `06-usage-cost-budget-notifications.md`   | `03-provider-credential-catalog.md`                                                                 | fixed-point cost tests with pricing version                     |
-| G-015 | required | Budget preflight and finalizer            | `06-usage-cost-budget-notifications.md`   | `08-security-observability-operations.md`                                                           | hard-budget stale-state and reservation tests                   |
-| G-016 | required | Rate and quota limits                     | `06-usage-cost-budget-notifications.md`   | `08-security-observability-operations.md`                                                           | limit window tests with cache loss behavior                     |
-| G-017 | required | Admin resource API                        | `07-admin-config-api.md`                  | `10-authorization-api-keys.md`                                                                      | route/action matrix tests and schema snapshots                  |
-| G-018 | required | Config snapshot publication               | `07-admin-config-api.md`                  | `08-security-observability-operations.md`                                                           | workers converge after DB polling and cache loss                |
-| G-019 | required | Audit evidence                            | `08-security-observability-operations.md` | `07-admin-config-api.md`                                                                            | mutation and runtime evidence is append-only                    |
-| G-020 | required | Redaction policy                          | `08-security-observability-operations.md` | none                                                                                                | fixture tests for logs, traces, webhooks, exports               |
-| G-021 | required | Hot-state cache discipline                | `08-security-observability-operations.md` | `04-routing-router.md`, `06-usage-cost-budget-notifications.md`                                     | key TTL, atomic script, and fail-mode tests                     |
-| G-022 | required | Database schema ownership                 | `08-security-observability-operations.md` | `07-admin-config-api.md`, `06-usage-cost-budget-notifications.md`                                   | migrations and constraints cover each resource family           |
-| G-023 | required | Local deterministic validation            | `09-validation-and-rollout.md`            | none                                                                                                | CI runs without live provider credentials                       |
-| G-024 | required | Human OAuth/OIDC login and session        | `11-login-user-management.md`             | `08-security-observability-operations.md`, `10-authorization-api-keys.md`                           | GitHub OAuth App, OIDC validation, and session tests            |
-| G-025 | required | User and membership management            | `11-login-user-management.md`             | `02-tenancy-access.md`, `07-admin-config-api.md`, `10-authorization-api-keys.md`                    | invite, membership, project-role, and default-org tests         |
-| G-026 | required | Usage dashboard APIs                      | `12-dashboards-observability-api.md`      | `06-usage-cost-budget-notifications.md`, `07-admin-config-api.md`, `10-authorization-api-keys.md`   | scoped dashboard tests by org, project, and member              |
-| G-027 | required | Realtime and model observability APIs     | `12-dashboards-observability-api.md`      | `08-security-observability-operations.md`, `10-authorization-api-keys.md`                           | realtime dashboard and OTel export tests                        |
-| G-028 | phased   | Notification delivery                     | `06-usage-cost-budget-notifications.md`   | `07-admin-config-api.md`                                                                            | outbox delivery and idempotent receiver contract tests          |
-| G-029 | phased   | Webhook subscriptions                     | `06-usage-cost-budget-notifications.md`   | `07-admin-config-api.md`, `08-security-observability-operations.md`                                 | signed delivery, retry, disable, and backlog tests              |
-| G-030 | phased   | Route simulation                          | `07-admin-config-api.md`                  | `02-tenancy-access.md`, `04-routing-router.md`                                                      | simulation explains filtered and selected targets               |
-| G-031 | phased   | Emergency disable and drain               | `07-admin-config-api.md`                  | `04-routing-router.md`, `08-security-observability-operations.md`                                   | endpoint/key/route drain tests with audit evidence              |
-| G-032 | phased   | Usage export                              | `06-usage-cost-budget-notifications.md`   | `08-security-observability-operations.md`                                                           | export pagination, retention, and redaction tests               |
-| G-033 | required | Codex upstream OAuth credential lifecycle | `03-provider-credential-catalog.md`       | `07-admin-config-api.md`, `08-security-observability-operations.md`, `10-authorization-api-keys.md` | Codex token lifecycle and redaction tests                       |
-| G-034 | optional | External authorization backend            | `10-authorization-api-keys.md`            | none                                                                                                | parity tests against in-process authorization                   |
-| G-035 | optional | Multi-region accounting                   | `06-usage-cost-budget-notifications.md`   | `08-security-observability-operations.md`                                                           | documented consistency model before implementation              |
-| G-036 | deferred | Commercial billing workflows              | none                                      | none                                                                                                | no invoice, plan, seat, or payment API in gateway specs         |
-| G-037 | deferred | Generic upstream OAuth providers          | none                                      | `03-provider-credential-catalog.md`                                                                 | provider discovery and arbitrary OAuth support remain out of v1 |
+| ID    | Level    | Capability                                | Primary Owner                             | Supporting Specs                                                                                    | Completion Evidence                                               |
+| ----- | -------- | ----------------------------------------- | ----------------------------------------- | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| G-001 | required | HTTP protocol ingress                     | `05-runtime-protocol.md`                  | `01-llm-gateway.md`                                                                                 | handler tests for each enabled ingress family                     |
+| G-002 | required | Client credential authn                   | `10-authorization-api-keys.md`            | `02-tenancy-access.md`                                                                              | API key prefix/hash tests and disabled-key tests                  |
+| G-003 | required | Unified authorization                     | `10-authorization-api-keys.md`            | none                                                                                                | action/resource tests and Cedar schema validation                 |
+| G-004 | required | Tenant/org/project resolution             | `02-tenancy-access.md`                    | `10-authorization-api-keys.md`                                                                      | context-resolution tests for header, key, and delegation          |
+| G-005 | required | Provider grant closure                    | `02-tenancy-access.md`                    | `04-routing-router.md`                                                                              | route simulation proves allow/deny closure behavior               |
+| G-006 | required | Provider endpoint catalog                 | `03-provider-credential-catalog.md`       | none                                                                                                | catalog validation rejects incompatible resources                 |
+| G-007 | required | Upstream credential safety                | `08-security-observability-operations.md` | `03-provider-credential-catalog.md`                                                                 | no read API returns raw secret material                           |
+| G-008 | required | Model alias resolution                    | `03-provider-credential-catalog.md`       | `05-runtime-protocol.md`                                                                            | alias extraction and protocol mismatch tests                      |
+| G-009 | required | Routing group execution                   | `04-routing-router.md`                    | none                                                                                                | deterministic route tests for enabled strategies                  |
+| G-010 | required | Route decision evidence                   | `04-routing-router.md`                    | `08-security-observability-operations.md`                                                           | persisted decision and attempt event tests                        |
+| G-011 | required | Streaming passthrough                     | `05-runtime-protocol.md`                  | none                                                                                                | fake provider SSE/stream tests                                    |
+| G-012 | required | Streaming failover boundary               | `04-routing-router.md`                    | `05-runtime-protocol.md`                                                                            | tests prove no mixed-provider visible stream                      |
+| G-013 | required | Usage event recording                     | `06-usage-cost-budget-notifications.md`   | none                                                                                                | idempotent usage writes under retry                               |
+| G-014 | required | Cost estimate and ledger                  | `06-usage-cost-budget-notifications.md`   | `03-provider-credential-catalog.md`                                                                 | fixed-point cost tests with pricing version                       |
+| G-015 | required | Budget preflight and finalizer            | `06-usage-cost-budget-notifications.md`   | `08-security-observability-operations.md`                                                           | hard-budget stale-state and reservation tests                     |
+| G-016 | required | Rate and quota limits                     | `06-usage-cost-budget-notifications.md`   | `08-security-observability-operations.md`                                                           | limit window tests with cache loss behavior                       |
+| G-017 | required | Admin resource API                        | `07-admin-config-api.md`                  | `10-authorization-api-keys.md`                                                                      | route/action matrix tests and schema snapshots                    |
+| G-018 | required | Config snapshot publication               | `07-admin-config-api.md`                  | `08-security-observability-operations.md`                                                           | workers converge after DB polling and cache loss                  |
+| G-019 | required | Audit evidence                            | `08-security-observability-operations.md` | `07-admin-config-api.md`                                                                            | mutation and runtime evidence is append-only                      |
+| G-020 | required | Redaction policy                          | `08-security-observability-operations.md` | none                                                                                                | fixture tests for logs, traces, webhooks, exports                 |
+| G-021 | required | Hot-state cache discipline                | `08-security-observability-operations.md` | `04-routing-router.md`, `06-usage-cost-budget-notifications.md`                                     | key TTL, atomic script, and fail-mode tests                       |
+| G-022 | required | Database schema ownership                 | `08-security-observability-operations.md` | `07-admin-config-api.md`, `06-usage-cost-budget-notifications.md`                                   | migrations and constraints cover each resource family             |
+| G-023 | required | Local deterministic validation            | `09-validation-and-rollout.md`            | none                                                                                                | CI runs without live provider credentials                         |
+| G-024 | required | Human OAuth/OIDC login and session        | `11-login-user-management.md`             | `08-security-observability-operations.md`, `10-authorization-api-keys.md`                           | single-user bootstrap, generic OIDC validation, and session tests |
+| G-025 | required | User and membership management            | `11-login-user-management.md`             | `02-tenancy-access.md`, `07-admin-config-api.md`, `10-authorization-api-keys.md`                    | invite, membership, project-role, and default-org tests           |
+| G-026 | required | Usage dashboard APIs                      | `12-dashboards-observability-api.md`      | `06-usage-cost-budget-notifications.md`, `07-admin-config-api.md`, `10-authorization-api-keys.md`   | scoped dashboard tests by org, project, and member                |
+| G-027 | required | Realtime and model observability APIs     | `12-dashboards-observability-api.md`      | `08-security-observability-operations.md`, `10-authorization-api-keys.md`                           | realtime dashboard and OTel export tests                          |
+| G-028 | phased   | Notification delivery                     | `06-usage-cost-budget-notifications.md`   | `07-admin-config-api.md`                                                                            | outbox delivery and idempotent receiver contract tests            |
+| G-029 | phased   | Webhook subscriptions                     | `06-usage-cost-budget-notifications.md`   | `07-admin-config-api.md`, `08-security-observability-operations.md`                                 | signed delivery, retry, disable, and backlog tests                |
+| G-030 | phased   | Route simulation                          | `07-admin-config-api.md`                  | `02-tenancy-access.md`, `04-routing-router.md`                                                      | simulation explains filtered and selected targets                 |
+| G-031 | phased   | Emergency disable and drain               | `07-admin-config-api.md`                  | `04-routing-router.md`, `08-security-observability-operations.md`                                   | endpoint/key/route drain tests with audit evidence                |
+| G-032 | phased   | Usage export                              | `06-usage-cost-budget-notifications.md`   | `08-security-observability-operations.md`                                                           | export pagination, retention, and redaction tests                 |
+| G-033 | required | Codex upstream OAuth credential lifecycle | `03-provider-credential-catalog.md`       | `07-admin-config-api.md`, `08-security-observability-operations.md`, `10-authorization-api-keys.md` | Codex token lifecycle and redaction tests                         |
+| G-034 | optional | External authorization backend            | `10-authorization-api-keys.md`            | none                                                                                                | parity tests against in-process authorization                     |
+| G-035 | optional | Multi-region accounting                   | `06-usage-cost-budget-notifications.md`   | `08-security-observability-operations.md`                                                           | documented consistency model before implementation                |
+| G-036 | deferred | Commercial billing workflows              | none                                      | none                                                                                                | no invoice, plan, seat, or payment API in gateway specs           |
+| G-037 | deferred | Generic upstream OAuth providers          | none                                      | `03-provider-credential-catalog.md`                                                                 | provider discovery and arbitrary OAuth support remain out of v1   |
 
 ## Ingress Requirements
 
@@ -147,10 +147,11 @@ Implementation evidence:
 Human admin and dashboard login uses configured login providers. Local
 single-user password login is the v1 bare-deploy bootstrap path and is disabled
 unless both `STARWEAVER_GATEWAY_SINGLE_USER_USERNAME` and
-`STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD` are configured. GitHub OAuth App is
-the recommended v1 bare-deploy external login provider. Generic OIDC is the
-required v1 enterprise SSO provider. This surface is separate from upstream
-provider OAuth credentials.
+`STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD` are configured. Generic OIDC is the
+standard v1 external login provider for self-hosted and enterprise SSO
+deployments. Non-OIDC OAuth providers, including GitHub OAuth App, require an
+OIDC broker or a separately reviewed OAuth adapter before direct login support
+is exposed. This surface is separate from upstream provider OAuth credentials.
 
 Required behavior:
 
@@ -159,10 +160,7 @@ Required behavior:
 - local single-user login bootstraps a default tenant, organization, project,
   user, membership graph, and tenant-owner grants before issuing a server-side
   session
-- login uses OAuth 2.0 authorization code flow with provider-specific
-  validation
-- GitHub OAuth App callbacks validate state, code exchange, stable GitHub user
-  id, and verified email lookup when email matching is required
+- login uses OIDC authorization code flow with state, nonce, and PKCE
 - OIDC callbacks validate state, nonce, PKCE, issuer, audience, signature, and
   expiration
 - external identities link to gateway-local user principals
@@ -175,8 +173,6 @@ Required behavior:
 Implementation evidence:
 
 - single-user disabled-by-default and successful bootstrap session tests
-- GitHub OAuth App login start and callback tests for valid and invalid state,
-  failed code exchange, missing stable user id, and verified email behavior
 - OIDC login start and callback tests for valid and invalid state/nonce/PKCE
 - ID token validation tests for wrong issuer, audience, expiry, and key id
 - session cookie flag and CSRF tests

@@ -69,9 +69,9 @@ flowchart TD
 - `gateway/10-authorization-api-keys.md` defines user-owned and service-owned
   API keys, REST API authorization, action/resource vocabulary, policy engine
   direction, and permission gates.
-- `gateway/11-login-user-management.md` defines GitHub OAuth App login, OIDC
-  login, sessions, external identities, invitations, default organizations, and
-  user management.
+- `gateway/11-login-user-management.md` defines local single-user bootstrap,
+  generic OIDC login, sessions, external identities, invitations, default
+  organizations, and user management.
 - `gateway/12-dashboards-observability-api.md` defines the Redis-compatible
   realtime operations dashboard, scoped dashboard APIs, usage analytics, model
   observability, and project member consumption views.

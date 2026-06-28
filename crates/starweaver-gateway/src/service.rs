@@ -279,10 +279,6 @@ const AUTH_LOGIN_PROVIDER_START_PATH: &str =
     concat!("/auth/v1/providers/", "{login_provider_id}", "/login");
 const AUTH_LOGIN_PROVIDER_CALLBACK_PATH: &str =
     concat!("/auth/v1/providers/", "{login_provider_id}", "/callback");
-const GITHUB_OAUTH_AUTHORIZATION_URL: &str = "https://github.com/login/oauth/authorize";
-const GITHUB_OAUTH_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
-const GITHUB_USER_API_URL: &str = "https://api.github.com/user";
-const GITHUB_USER_EMAILS_API_URL: &str = "https://api.github.com/user/emails";
 const ADMIN_DASHBOARD_ORGANIZATION_PATH: &str =
     concat!("/admin/v1/dashboards/organizations/", "{organization_id}");
 const ADMIN_DASHBOARD_PROJECT_PATH: &str =
@@ -2428,31 +2424,6 @@ struct OidcDiscoveryDocument {
 #[derive(Clone, Debug, Deserialize)]
 struct OidcTokenResponse {
     id_token: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct GitHubTokenResponse {
-    access_token: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct GitHubUserResponse {
-    id: Value,
-    #[serde(default)]
-    node_id: Option<String>,
-    #[serde(default)]
-    login: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct GitHubEmailResponse {
-    email: String,
-    #[serde(default)]
-    primary: bool,
-    #[serde(default)]
-    verified: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -16039,7 +16010,7 @@ fn login_provider_validation_errors(
     request: &AdminCreateLoginProviderRequest,
 ) -> Vec<Value> {
     let mut errors = Vec::new();
-    if !matches!(request.provider_kind.as_str(), "github_oauth_app" | "oidc") {
+    if request.provider_kind != "oidc" {
         errors.push(validation_error("provider_kind", "invalid_provider_kind"));
     }
     if request.display_name.trim().is_empty() || request.display_name.len() > 120 {
@@ -18135,10 +18106,6 @@ async fn external_login_callback_claims(
         return Ok(claims.clone());
     }
     match provider.provider_kind.as_str() {
-        "github_oauth_app" => {
-            resolve_github_oauth_app_callback_claims(state, provider, consumed_attempt, request)
-                .await
-        }
         "oidc" => {
             resolve_oidc_callback_claims(state, provider, consumed_attempt, request, now).await
         }
@@ -18159,13 +18126,10 @@ fn ensure_external_login_callback_adapter_available(
         return ensure_local_verified_claims_callback_allowed(state, provider);
     }
     match provider.provider_kind.as_str() {
-        "github_oauth_app" if request.verified_claims.is_some() => Err(GatewayError::BadRequest {
-            message: "verified_claims_not_accepted_for_github_callback".to_owned(),
-        }),
         "oidc" if request.verified_claims.is_some() => Err(GatewayError::BadRequest {
             message: "verified_claims_not_accepted_for_oidc_callback".to_owned(),
         }),
-        "github_oauth_app" | "oidc" => Ok(()),
+        "oidc" => Ok(()),
         _ => Err(GatewayError::BadRequest {
             message: "login_provider_callback_adapter_unavailable".to_owned(),
         }),
@@ -18339,192 +18303,6 @@ async fn resolve_oidc_callback_claims(
     Ok(claims)
 }
 
-async fn resolve_github_oauth_app_callback_claims(
-    state: &AppState,
-    provider: &LoginProviderRecord,
-    consumed_attempt: &ConsumedLoginAttempt,
-    request: &ExternalLoginCallbackRequest,
-) -> Result<ExternalLoginVerifiedClaims> {
-    let client = reqwest::Client::new();
-    let access_token =
-        exchange_github_authorization_code(state, provider, consumed_attempt, request, &client)
-            .await?;
-    let user_api_url = github_endpoint_url(state, provider, "user_api_url", GITHUB_USER_API_URL)?;
-    let user =
-        fetch_github_json::<GitHubUserResponse>(&client, &user_api_url, access_token.as_str())
-            .await?;
-    let email =
-        resolve_github_verified_email(state, provider, &client, access_token.as_str()).await?;
-    github_user_claims(&user, email)
-}
-
-async fn exchange_github_authorization_code(
-    state: &AppState,
-    provider: &LoginProviderRecord,
-    consumed_attempt: &ConsumedLoginAttempt,
-    request: &ExternalLoginCallbackRequest,
-    client: &reqwest::Client,
-) -> Result<String> {
-    let client_id = required_login_config_string(provider, "client_id")?;
-    let client_secret_ref = required_login_config_string(provider, "client_secret_ref")?;
-    let client_secret = state
-        .store
-        .secret_value(client_secret_ref)
-        .ok_or(GatewayError::Authentication)?;
-    let token_url = github_endpoint_url(state, provider, "token_url", GITHUB_OAUTH_TOKEN_URL)?;
-    let body = url::form_urlencoded::Serializer::new(String::new())
-        .extend_pairs([
-            ("client_id", client_id),
-            ("client_secret", client_secret.expose_secret()),
-            ("code", request.code.trim()),
-            (
-                "redirect_uri",
-                consumed_attempt.record.redirect_uri.as_str(),
-            ),
-            (
-                "code_verifier",
-                consumed_attempt.code_verifier.expose_secret(),
-            ),
-        ])
-        .finish();
-    let response = client
-        .post(token_url)
-        .timeout(Duration::from_secs(10))
-        .header(header::ACCEPT, "application/json")
-        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-        .header(header::USER_AGENT, SERVICE_NAME)
-        .body(body)
-        .send()
-        .await
-        .map_err(|_| GatewayError::Authentication)?;
-    if !response.status().is_success() {
-        return Err(GatewayError::Authentication);
-    }
-    let token_response = response_json_body::<GitHubTokenResponse>(response)
-        .await
-        .map_err(|_| GatewayError::Authentication)?;
-    if token_response.access_token.trim().is_empty() {
-        return Err(GatewayError::Authentication);
-    }
-    Ok(token_response.access_token)
-}
-
-async fn resolve_github_verified_email(
-    state: &AppState,
-    provider: &LoginProviderRecord,
-    client: &reqwest::Client,
-    access_token: &str,
-) -> Result<Option<String>> {
-    let emails_api_url = github_endpoint_url(
-        state,
-        provider,
-        "emails_api_url",
-        GITHUB_USER_EMAILS_API_URL,
-    )?;
-    let emails =
-        fetch_github_json::<Vec<GitHubEmailResponse>>(client, &emails_api_url, access_token)
-            .await?;
-    Ok(github_verified_email(&emails))
-}
-
-fn github_verified_email(emails: &[GitHubEmailResponse]) -> Option<String> {
-    emails
-        .iter()
-        .find(|email| email.primary && email.verified)
-        .or_else(|| emails.iter().find(|email| email.verified))
-        .and_then(|email| normalized_email(&email.email))
-}
-
-async fn fetch_github_json<T: DeserializeOwned>(
-    client: &reqwest::Client,
-    url: &str,
-    access_token: &str,
-) -> Result<T> {
-    let response = client
-        .get(url)
-        .timeout(Duration::from_secs(10))
-        .bearer_auth(access_token)
-        .header(header::ACCEPT, "application/vnd.github+json")
-        .header(header::USER_AGENT, SERVICE_NAME)
-        .send()
-        .await
-        .map_err(|_| GatewayError::Authentication)?;
-    if !response.status().is_success() {
-        return Err(GatewayError::Authentication);
-    }
-    response_json_body::<T>(response)
-        .await
-        .map_err(|_| GatewayError::Authentication)
-}
-
-fn github_user_claims(
-    user: &GitHubUserResponse,
-    email: Option<String>,
-) -> Result<ExternalLoginVerifiedClaims> {
-    let subject = github_user_subject(user)?;
-    let email_verified = email.is_some();
-    let display_name = user
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            user.login
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-        })
-        .unwrap_or(subject.as_str())
-        .to_owned();
-    Ok(ExternalLoginVerifiedClaims {
-        subject,
-        email,
-        email_verified,
-        display_name: Some(display_name),
-        nonce: None,
-        issuer: None,
-        audience: None,
-        expires_at: None,
-    })
-}
-
-fn github_user_subject(user: &GitHubUserResponse) -> Result<String> {
-    if let Some(node_id) = user
-        .node_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return Ok(node_id.to_owned());
-    }
-    if let Some(id) = user.id.as_u64() {
-        return Ok(id.to_string());
-    }
-    if let Some(id) = user.id.as_i64().filter(|id| *id >= 0) {
-        return Ok(id.to_string());
-    }
-    if let Some(id) = user.id.as_str().map(str::trim).filter(|id| !id.is_empty()) {
-        return Ok(id.to_owned());
-    }
-    Err(GatewayError::Authentication)
-}
-
-fn github_endpoint_url(
-    state: &AppState,
-    provider: &LoginProviderRecord,
-    field: &str,
-    default_url: &str,
-) -> Result<String> {
-    let url = login_config_string(&provider.config_document, field).unwrap_or(default_url);
-    if login_provider_url_is_safe_for_config(&state.config, url) {
-        Ok(url.to_owned())
-    } else {
-        Err(GatewayError::BadRequest {
-            message: format!("login_provider_{field}_invalid"),
-        })
-    }
-}
-
 async fn exchange_oidc_authorization_code(
     state: &AppState,
     provider: &LoginProviderRecord,
@@ -18679,7 +18457,6 @@ async fn login_provider_authorization_endpoint(
         return Ok(endpoint.to_owned());
     }
     match provider.provider_kind.as_str() {
-        "github_oauth_app" => Ok(GITHUB_OAUTH_AUTHORIZATION_URL.to_owned()),
         "oidc" => {
             let client = reqwest::Client::new();
             Ok(resolve_oidc_provider_metadata(state, provider, &client)
@@ -18908,16 +18685,10 @@ fn login_provider_scope_values(provider: &LoginProviderRecord) -> Vec<String> {
             return configured;
         }
     }
-    match provider.provider_kind.as_str() {
-        "oidc" => ["openid", "email", "profile"]
-            .into_iter()
-            .map(ToOwned::to_owned)
-            .collect(),
-        _ => ["read:user", "user:email"]
-            .into_iter()
-            .map(ToOwned::to_owned)
-            .collect(),
-    }
+    ["openid", "email", "profile"]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn random_login_token(prefix: &str) -> String {
@@ -26847,13 +26618,14 @@ mod tests {
             "/admin/v1/identity-providers:validate",
             json!({
                 "idempotency_key": "idem_login_provider_raw_secret",
-                "provider_kind": "github_oauth_app",
-                "display_name": "GitHub",
+                "provider_kind": "oidc",
+                "display_name": "Raw Secret OIDC",
                 "config_document": {
-                    "client_id": "github_client",
+                    "issuer": "https://login.example",
+                    "client_id": "oidc_client",
                     "client_secret": "raw secret",
-                    "client_secret_ref": "sec_login_github_secret",
-                    "redirect_uri": "https://app.example/auth/github/callback"
+                    "client_secret_ref": "sec_login_oidc_secret",
+                    "redirect_uri": "https://app.example/auth/oidc/callback"
                 }
             }),
         )
@@ -26898,7 +26670,7 @@ mod tests {
     #[tokio::test]
     async fn admin_login_provider_create_is_idempotent_redacted_and_public_discoverable() {
         let (store, raw_session) = gateway_store_with_admin_session();
-        let request = valid_github_login_provider_request("idem_login_provider_create");
+        let request = valid_oidc_login_provider_request("idem_login_provider_create");
 
         let first = post_admin_json(
             store.clone(),
@@ -26961,7 +26733,7 @@ mod tests {
         assert_eq!(public_get_status, StatusCode::OK);
         assert_eq!(start_status, StatusCode::OK);
         assert_eq!(first_body["resource"]["kind"], "identity_provider");
-        assert_eq!(first_body["resource"]["provider_kind"], "github_oauth_app");
+        assert_eq!(first_body["resource"]["provider_kind"], "oidc");
         assert_eq!(
             first_body["resource"]["config_document"]["client_secret_ref"],
             "sec_***"
@@ -26980,23 +26752,23 @@ mod tests {
             public_get_body["resource"]["login_url"],
             format!("/auth/v1/providers/{login_provider_id}/login")
         );
-        assert_github_login_start_response(&start_body, &login_provider_id);
-        assert!(!response_text.contains("sec_login_github_secret"));
-        assert!(!public_text.contains("sec_login_github_secret"));
-        assert!(!start_text.contains("sec_login_github_secret"));
+        assert_oidc_login_start_response(&start_body, &login_provider_id);
+        assert!(!response_text.contains("sec_login_oidc_secret"));
+        assert!(!public_text.contains("sec_login_oidc_secret"));
+        assert!(!start_text.contains("sec_login_oidc_secret"));
         assert!(!start_text.contains("code_verifier"));
         let audit_text = serde_json::to_string(&store.audit_events())
             .unwrap_or_else(|error| panic!("audit events should serialize: {error}"));
-        assert!(!audit_text.contains("sec_login_github_secret"));
+        assert!(!audit_text.contains("sec_login_oidc_secret"));
     }
 
     #[tokio::test]
     async fn external_login_callback_creates_user_session_and_rejects_state_replay() {
         let (store, raw_session) = gateway_store_with_admin_session();
-        let login_provider_id = create_github_callback_provider_over_http(
+        let login_provider_id = create_oidc_callback_provider_over_http(
             store.clone(),
             &raw_session,
-            "idem_github_callback_provider",
+            "idem_oidc_callback_provider",
         )
         .await;
         let start = get_public(
@@ -27006,8 +26778,15 @@ mod tests {
         .await;
         let start_body = response_json(start).await;
         let state_token = login_start_state(&start_body);
+        let nonce = login_start_nonce(&start_body);
 
-        let callback_body = github_callback_body(&state_token);
+        let callback_body = oidc_callback_body(
+            &state_token,
+            &nonce,
+            "https://login.example",
+            "oidc_client",
+            300,
+        );
         let callback = post_public_json_with_config(
             store.clone(),
             GatewayConfig::default(),
@@ -27057,7 +26836,7 @@ mod tests {
         );
         assert_eq!(
             callback_body_json["external_identity"]["provider_kind"],
-            "github_oauth_app"
+            "oidc"
         );
         assert!(callback_body_json["external_identity"]["email_hash"]
             .as_str()
@@ -27068,10 +26847,8 @@ mod tests {
                 .map_or(usize::MAX, Vec::len),
             0
         );
-        assert!(!callback_text.contains("github_authorization_code"));
-        assert!(!callback_text.contains("Owner@Example.COM"));
+        assert!(!callback_text.contains("oidc_authorization_code"));
         assert!(!callback_text.contains("owner@example.com"));
-        assert!(!session_text.contains("Owner@Example.COM"));
         assert!(!session_text.contains("owner@example.com"));
         assert!(!session_text.contains(&session_token));
         assert!(!session_text.contains("session_hash"));
@@ -27079,73 +26856,6 @@ mod tests {
             event.event_type == "gateway.auth.external_login"
                 && event.resource_kind == "User"
                 && event.redacted_diff["raw_tokens_included"] == false
-        }));
-    }
-
-    #[tokio::test]
-    async fn github_oauth_app_callback_exchanges_code_and_uses_verified_email() {
-        let (store, raw_session) = gateway_store_with_admin_session();
-        let github_provider = spawn_local_github_oauth_app_provider().await;
-        let client_secret_ref = seed_secret_ref_for_test(
-            &store,
-            None,
-            None,
-            "github oauth app client secret",
-            "github-client-secret-value",
-        );
-        let login_provider_id = create_github_login_provider_for_endpoints_over_http(
-            store.clone(),
-            &raw_session,
-            &github_provider,
-            &client_secret_ref,
-        )
-        .await;
-        let start = get_public(
-            store.clone(),
-            &format!("/auth/v1/providers/{login_provider_id}/login"),
-        )
-        .await;
-        let start_body = response_json(start).await;
-        let state_token = login_start_state(&start_body);
-
-        let callback = post_public_json_with_config(
-            store.clone(),
-            GatewayConfig::default(),
-            &format!("/auth/v1/providers/{login_provider_id}/callback"),
-            json!({
-                "state": state_token,
-                "code": "github_authorization_code"
-            }),
-        )
-        .await;
-        let callback_status = callback.status();
-        let callback_body = response_json(callback).await;
-        github_provider.handle.abort();
-        let callback_text = callback_body.to_string();
-
-        assert_eq!(callback_status, StatusCode::OK, "{callback_body:?}");
-        assert_eq!(
-            callback_body["external_identity"]["provider_subject"],
-            "github-node-id-456"
-        );
-        assert_eq!(
-            callback_body["external_identity"]["provider_kind"],
-            "github_oauth_app"
-        );
-        assert!(callback_body["external_identity"]["email_hash"]
-            .as_str()
-            .is_some_and(|hash| hash.starts_with("sha256:")));
-        assert!(callback_body["session"]["session_token"]
-            .as_str()
-            .is_some_and(|token| token.starts_with(SESSION_TOKEN_PREFIX)));
-        assert!(!callback_text.contains("github_authorization_code"));
-        assert!(!callback_text.contains("github-access-token-value"));
-        assert!(!callback_text.contains("github-client-secret-value"));
-        assert!(!callback_text.contains("owner@example.com"));
-        assert!(store.audit_events().iter().any(|event| {
-            event.event_type == "gateway.auth.external_login"
-                && event.redacted_diff["raw_tokens_included"] == false
-                && event.redacted_diff["authorization_code_included"] == false
         }));
     }
 
@@ -27291,10 +27001,10 @@ mod tests {
     #[tokio::test]
     async fn local_verified_claims_callback_adapter_is_fail_closed_outside_local_profiles() {
         let (store, raw_session) = gateway_store_with_admin_session();
-        let login_provider_id = create_github_callback_provider_over_http(
+        let login_provider_id = create_oidc_callback_provider_over_http(
             store.clone(),
             &raw_session,
-            "idem_github_callback_profile",
+            "idem_oidc_callback_profile",
         )
         .await;
         let start = get_public(
@@ -27304,6 +27014,14 @@ mod tests {
         .await;
         let start_body = response_json(start).await;
         let state_token = login_start_state(&start_body);
+        let nonce = login_start_nonce(&start_body);
+        let callback_body = oidc_callback_body(
+            &state_token,
+            &nonce,
+            "https://login.example",
+            "oidc_client",
+            300,
+        );
         let staging_callback = post_public_json_with_config(
             store.clone(),
             GatewayConfig {
@@ -27311,7 +27029,7 @@ mod tests {
                 ..GatewayConfig::default()
             },
             &format!("/auth/v1/providers/{login_provider_id}/callback"),
-            github_callback_body(&state_token),
+            callback_body.clone(),
         )
         .await;
         let staging_status = staging_callback.status();
@@ -27322,7 +27040,7 @@ mod tests {
                 ..GatewayConfig::default()
             },
             &format!("/auth/v1/providers/{login_provider_id}/callback"),
-            github_callback_body(&state_token),
+            callback_body,
         )
         .await;
         let status = callback.status();
@@ -27337,10 +27055,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn github_callback_rejects_verified_claims_without_local_adapter() {
+    async fn oidc_callback_rejects_verified_claims_without_local_adapter() {
         let (store, raw_session) = gateway_store_with_admin_session();
         let login_provider_id =
-            create_github_login_provider_over_http(store.clone(), &raw_session).await;
+            create_oidc_login_provider_over_http(store.clone(), &raw_session).await;
         let start = get_public(
             store.clone(),
             &format!("/auth/v1/providers/{login_provider_id}/login"),
@@ -27348,11 +27066,18 @@ mod tests {
         .await;
         let start_body = response_json(start).await;
         let state_token = login_start_state(&start_body);
+        let nonce = login_start_nonce(&start_body);
         let callback = post_public_json_with_config(
             store,
             GatewayConfig::default(),
             &format!("/auth/v1/providers/{login_provider_id}/callback"),
-            github_callback_body(&state_token),
+            oidc_callback_body(
+                &state_token,
+                &nonce,
+                "https://login.example",
+                "oidc_client",
+                300,
+            ),
         )
         .await;
         let status = callback.status();
@@ -27361,17 +27086,17 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(
             body["error"]["message"],
-            "bad request: verified_claims_not_accepted_for_github_callback"
+            "bad request: verified_claims_not_accepted_for_oidc_callback"
         );
     }
 
     #[tokio::test]
     async fn external_login_callback_rejects_unlinked_identity_without_reactivation() {
         let (store, raw_session) = gateway_store_with_admin_session();
-        let login_provider_id = create_github_callback_provider_over_http(
+        let login_provider_id = create_oidc_callback_provider_over_http(
             store.clone(),
             &raw_session,
-            "idem_github_callback_unlink",
+            "idem_oidc_callback_unlink",
         )
         .await;
         let first_start = get_public(
@@ -27380,11 +27105,19 @@ mod tests {
         )
         .await;
         let first_start_body = response_json(first_start).await;
+        let first_state = login_start_state(&first_start_body);
+        let first_nonce = login_start_nonce(&first_start_body);
         let first_callback = post_public_json_with_config(
             store.clone(),
             GatewayConfig::default(),
             &format!("/auth/v1/providers/{login_provider_id}/callback"),
-            github_callback_body(&login_start_state(&first_start_body)),
+            oidc_callback_body(
+                &first_state,
+                &first_nonce,
+                "https://login.example",
+                "oidc_client",
+                300,
+            ),
         )
         .await;
         let first_body = response_json(first_callback).await;
@@ -27413,11 +27146,19 @@ mod tests {
         )
         .await;
         let second_start_body = response_json(second_start).await;
+        let second_state = login_start_state(&second_start_body);
+        let second_nonce = login_start_nonce(&second_start_body);
         let rejected = post_public_json_with_config(
             store.clone(),
             GatewayConfig::default(),
             &format!("/auth/v1/providers/{login_provider_id}/callback"),
-            github_callback_body(&login_start_state(&second_start_body)),
+            oidc_callback_body(
+                &second_state,
+                &second_nonce,
+                "https://login.example",
+                "oidc_client",
+                300,
+            ),
         )
         .await;
         let rejected_status = rejected.status();
@@ -28334,6 +28075,7 @@ mod tests {
             &notification_sink_id,
         )
         .await;
+        wait_for_quota_fixed_window_margin().await;
         let first = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
         assert_eq!(first.status(), StatusCode::OK);
         let blocked = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
@@ -29578,9 +29320,11 @@ mod tests {
         assert!(!response_text.contains("sec_openai"));
     }
 
-    fn assert_github_login_start_response(body: &serde_json::Value, login_provider_id: &str) {
+    fn assert_oidc_login_start_response(body: &serde_json::Value, login_provider_id: &str) {
         assert_eq!(body["provider"]["id"], login_provider_id);
-        assert_eq!(body["authorization"]["nonce"], serde_json::Value::Null);
+        assert!(body["authorization"]["nonce"]
+            .as_str()
+            .is_some_and(|nonce| nonce.starts_with("gwnc_")));
         assert_eq!(
             body["authorization"]["pkce"]["code_challenge_method"],
             "S256"
@@ -29591,13 +29335,13 @@ mod tests {
         assert!(body["authorization"]["authorization_url"]
             .as_str()
             .is_some_and(|url| {
-                url.starts_with("https://github.com/login/oauth/authorize?")
-                    && url.contains("client_id=github_client")
-                    && url.contains(
-                        "redirect_uri=https%3A%2F%2Fapp.example%2Fauth%2Fgithub%2Fcallback",
-                    )
-                    && url.contains("scope=read%3Auser%20user%3Aemail")
+                url.starts_with("https://login.example/oauth2/v1/authorize?")
+                    && url.contains("client_id=oidc_client")
+                    && url
+                        .contains("redirect_uri=https%3A%2F%2Fapp.example%2Fauth%2Foidc%2Fcallback")
+                    && url.contains("scope=openid%20email%20profile")
                     && url.contains("code_challenge_method=S256")
+                    && url.contains("nonce=gwnc_")
             }));
     }
 
@@ -29662,9 +29406,9 @@ mod tests {
             external_identity_id: external_identity_id.clone(),
             tenant_id: TEST_TENANT_ID.to_owned(),
             principal_id: TEST_USER_ID.to_owned(),
-            login_provider_id: Some("lp_github".to_owned()),
-            provider_kind: "github_oauth_app".to_owned(),
-            provider_subject: "github-user-123".to_owned(),
+            login_provider_id: Some("lp_oidc".to_owned()),
+            provider_kind: "oidc".to_owned(),
+            provider_subject: "oidc-user-123".to_owned(),
             email: Some(email.to_owned()),
             email_verified: true,
             status: ResourceStatus::Active,
@@ -29813,49 +29557,6 @@ mod tests {
         })
     }
 
-    fn valid_github_login_provider_request(idempotency_key: &str) -> serde_json::Value {
-        json!({
-            "idempotency_key": idempotency_key,
-            "provider_kind": "github_oauth_app",
-            "display_name": "GitHub",
-            "config_document": {
-                "client_id": "github_client",
-                "client_secret_ref": "sec_login_github_secret",
-                "redirect_uri": "https://app.example/auth/github/callback",
-                "scopes": ["read:user", "user:email"]
-            }
-        })
-    }
-
-    fn valid_github_login_provider_request_for_endpoints(
-        idempotency_key: &str,
-        provider: &LocalGithubOauthAppProvider,
-        client_secret_ref: &str,
-    ) -> serde_json::Value {
-        json!({
-            "idempotency_key": idempotency_key,
-            "provider_kind": "github_oauth_app",
-            "display_name": "Local GitHub",
-            "config_document": {
-                "client_id": "github_client",
-                "client_secret_ref": client_secret_ref,
-                "redirect_uri": "https://app.example/auth/github/callback",
-                "authorization_url": provider.authorization_url,
-                "token_url": provider.token_url,
-                "user_api_url": provider.user_api_url,
-                "emails_api_url": provider.emails_api_url,
-                "scopes": ["read:user", "user:email"]
-            }
-        })
-    }
-
-    fn valid_github_callback_provider_request(idempotency_key: &str) -> serde_json::Value {
-        let mut request = valid_github_login_provider_request(idempotency_key);
-        request["config_document"]["callback_mode"] =
-            serde_json::Value::String("local_verified_claims".to_owned());
-        request
-    }
-
     fn valid_oidc_login_provider_request(idempotency_key: &str) -> serde_json::Value {
         json!({
             "idempotency_key": idempotency_key,
@@ -29895,19 +29596,6 @@ mod tests {
         request["config_document"]["callback_mode"] =
             serde_json::Value::String("local_verified_claims".to_owned());
         request
-    }
-
-    fn github_callback_body(state_token: &str) -> serde_json::Value {
-        json!({
-            "state": state_token,
-            "code": "github_authorization_code",
-            "verified_claims": {
-                "subject": "github-user-456",
-                "email": "Owner@Example.COM",
-                "email_verified": true,
-                "display_name": "Owner"
-            }
-        })
     }
 
     fn oidc_callback_body(
@@ -31064,110 +30752,6 @@ mod tests {
         assert!(!body_text.contains(collector_secret));
     }
 
-    struct LocalGithubOauthAppProvider {
-        authorization_url: String,
-        token_url: String,
-        user_api_url: String,
-        emails_api_url: String,
-        handle: tokio::task::JoinHandle<()>,
-    }
-
-    async fn spawn_local_github_oauth_app_provider() -> LocalGithubOauthAppProvider {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap_or_else(|error| panic!("github oauth listener should bind: {error}"));
-        let address = listener.local_addr().unwrap_or_else(|error| {
-            panic!("github oauth listener address should resolve: {error}")
-        });
-        let base_url = format!("http://{address}");
-        let app = Router::new()
-            .route(
-                "/login/oauth/authorize",
-                get(|| async { StatusCode::NO_CONTENT }),
-            )
-            .route(
-                "/login/oauth/access_token",
-                post(|headers: HeaderMap, body: Bytes| async move {
-                    let body_text = String::from_utf8(body.to_vec()).unwrap_or_else(|error| {
-                        panic!("github token body should be utf8: {error}")
-                    });
-                    assert_eq!(
-                        headers
-                            .get(header::ACCEPT)
-                            .and_then(|value| value.to_str().ok()),
-                        Some("application/json")
-                    );
-                    assert!(body_text.contains("client_id=github_client"));
-                    assert!(body_text.contains("client_secret=github-client-secret-value"));
-                    assert!(body_text.contains("code=github_authorization_code"));
-                    assert!(body_text.contains("code_verifier="));
-                    Json(json!({
-                        "access_token": "github-access-token-value",
-                        "token_type": "bearer",
-                        "scope": "read:user,user:email"
-                    }))
-                }),
-            )
-            .route(
-                "/api/user",
-                get(|headers: HeaderMap| async move {
-                    assert_github_bearer_header(&headers);
-                    Json(json!({
-                        "id": 123_456,
-                        "node_id": "github-node-id-456",
-                        "login": "octo-owner",
-                        "name": "GitHub Owner",
-                        "email": null
-                    }))
-                }),
-            )
-            .route(
-                "/api/user/emails",
-                get(|headers: HeaderMap| async move {
-                    assert_github_bearer_header(&headers);
-                    Json(json!([
-                        {
-                            "email": "secondary@example.com",
-                            "primary": false,
-                            "verified": true
-                        },
-                        {
-                            "email": "Owner@Example.COM",
-                            "primary": true,
-                            "verified": true
-                        }
-                    ]))
-                }),
-            );
-        let handle = tokio::spawn(async move {
-            if let Err(error) = axum::serve(listener, app).await {
-                panic!("github oauth provider should serve requests: {error}");
-            }
-        });
-        LocalGithubOauthAppProvider {
-            authorization_url: format!("{base_url}/login/oauth/authorize"),
-            token_url: format!("{base_url}/login/oauth/access_token"),
-            user_api_url: format!("{base_url}/api/user"),
-            emails_api_url: format!("{base_url}/api/user/emails"),
-            handle,
-        }
-    }
-
-    fn assert_github_bearer_header(headers: &HeaderMap) {
-        assert_eq!(
-            headers
-                .get(header::AUTHORIZATION)
-                .and_then(|value| value.to_str().ok()),
-            Some("Bearer github-access-token-value")
-        );
-        assert_eq!(
-            headers
-                .get(header::ACCEPT)
-                .and_then(|value| value.to_str().ok()),
-            Some("application/vnd.github+json")
-        );
-    }
-
     struct LocalOidcProvider {
         issuer_url: String,
         nonce: Arc<Mutex<Option<String>>>,
@@ -31640,73 +31224,6 @@ oFnGY0OFksX/ye0/XGpy2SFxYRwGU98HPYeBvAQQrVjdkzfy7BmXQQ==
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["resource"]["signing_secret_ref_id"], "sec_***");
         assert!(!response_text.contains(signing_secret_ref_id));
-    }
-
-    async fn create_github_callback_provider_over_http(
-        store: InMemoryGatewayStore,
-        raw_session: &str,
-        idempotency_key: &str,
-    ) -> String {
-        let response = post_admin_json(
-            store,
-            raw_session,
-            "/admin/v1/identity-providers",
-            valid_github_callback_provider_request(idempotency_key),
-        )
-        .await;
-        let status = response.status();
-        let body = response_json(response).await;
-        assert_eq!(status, StatusCode::OK, "{body:?}");
-        body["resource"]["id"]
-            .as_str()
-            .unwrap_or_else(|| panic!("login provider id should be present"))
-            .to_owned()
-    }
-
-    async fn create_github_login_provider_over_http(
-        store: InMemoryGatewayStore,
-        raw_session: &str,
-    ) -> String {
-        let response = post_admin_json(
-            store,
-            raw_session,
-            "/admin/v1/identity-providers",
-            valid_github_login_provider_request(&new_prefixed_id("idem")),
-        )
-        .await;
-        let status = response.status();
-        let body = response_json(response).await;
-        assert_eq!(status, StatusCode::OK, "{body:?}");
-        body["resource"]["id"]
-            .as_str()
-            .unwrap_or_else(|| panic!("login provider id should be present"))
-            .to_owned()
-    }
-
-    async fn create_github_login_provider_for_endpoints_over_http(
-        store: InMemoryGatewayStore,
-        raw_session: &str,
-        provider: &LocalGithubOauthAppProvider,
-        client_secret_ref: &str,
-    ) -> String {
-        let response = post_admin_json(
-            store,
-            raw_session,
-            "/admin/v1/identity-providers",
-            valid_github_login_provider_request_for_endpoints(
-                &new_prefixed_id("idem"),
-                provider,
-                client_secret_ref,
-            ),
-        )
-        .await;
-        let status = response.status();
-        let body = response_json(response).await;
-        assert_eq!(status, StatusCode::OK, "{body:?}");
-        body["resource"]["id"]
-            .as_str()
-            .unwrap_or_else(|| panic!("login provider id should be present"))
-            .to_owned()
     }
 
     async fn create_oidc_callback_provider_over_http(

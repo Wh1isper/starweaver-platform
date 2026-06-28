@@ -158,11 +158,12 @@ CREATE TABLE IF NOT EXISTS platform_identity_providers (
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
     CHECK (identity_provider_id LIKE 'idp_%'),
-    CHECK (provider_kind IN ('oidc', 'github_oauth_app', 'single_user')),
+    CHECK (provider_kind IN ('oidc', 'single_user')),
     CHECK (provider_kind <> 'oidc' OR issuer_url IS NOT NULL),
-    CHECK (provider_kind <> 'oidc' OR jwks_uri IS NOT NULL),
+    CHECK (provider_kind <> 'oidc' OR client_id IS NOT NULL),
+    CHECK (provider_kind <> 'oidc' OR redirect_uri IS NOT NULL),
+    CHECK (provider_kind <> 'oidc' OR requested_scopes ? 'openid'),
     CHECK (provider_kind <> 'oidc' OR jsonb_array_length(oidc_audiences) > 0),
-    CHECK (provider_kind <> 'github_oauth_app' OR client_id IS NOT NULL),
     CHECK (provider_kind <> 'single_user' OR client_secret_ref IS NULL),
     CHECK (status IN ('active', 'disabled', 'deleted'))
 );
@@ -185,7 +186,7 @@ CREATE TABLE IF NOT EXISTS platform_external_identities (
     updated_at TIMESTAMPTZ NOT NULL,
     UNIQUE (tenant_id, identity_provider_id, provider_subject),
     CHECK (external_identity_id LIKE 'xid_%'),
-    CHECK (provider_kind IN ('oidc', 'github_oauth_app', 'single_user')),
+    CHECK (provider_kind IN ('oidc', 'single_user')),
     CHECK (status IN ('active', 'disabled', 'deleted'))
 );
 

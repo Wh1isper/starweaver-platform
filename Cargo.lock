@@ -2695,11 +2695,17 @@ name = "starweaver-platform"
 version = "0.0.1"
 dependencies = [
  "axum",
+ "base64",
+ "jsonwebtoken",
+ "rand_core 0.6.4",
+ "reqwest",
+ "serde",
  "serde_json",
  "sha2",
  "sqlx",
  "tokio",
  "tower",
+ "url",
 ]
 
 [[package]]

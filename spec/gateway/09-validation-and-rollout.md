@@ -188,7 +188,7 @@ Capabilities:
 - admin API for primary resources
 - organization invitations and membership APIs
 - project membership APIs
-- GitHub OAuth App and OIDC login provider and session APIs
+- generic OIDC login provider and session APIs
 - dashboard and model observability read APIs
 - idempotent mutations
 - optimistic concurrency
@@ -203,8 +203,6 @@ Exit criteria:
 - every mutation writes an audit event
 - read APIs never return raw secret values
 - route simulation works without upstream calls
-- GitHub OAuth App login validates state, code exchange, stable user id, and
-  verified email behavior
 - OIDC login validates state, nonce, PKCE, issuer, audience, signature, and
   expiry
 - user disable and session revocation block future admin/dashboard access
@@ -348,30 +346,24 @@ Membership and dashboard tests should cover:
 
 Login and user management tests should cover:
 
-| Case                          | Expected Result                                       |
-| ----------------------------- | ----------------------------------------------------- |
-| GitHub OAuth App login start  | state and optional PKCE verifier are created          |
-| GitHub OAuth App callback     | code exchange and user API identity lookup succeed    |
-| GitHub no verified email      | email-targeted invitation and domain allowlist reject |
-| GitHub subject stability      | email/login changes do not create a second identity   |
-| GitHub Enterprise Server URLs | configured auth, token, user, and email APIs are used |
-| GitHub token persistence      | login access token is discarded after identity lookup |
-| OIDC login start              | state, nonce, and PKCE verifier are created           |
-| callback with wrong state     | login rejected and attempt consumed or invalidated    |
-| callback with wrong nonce     | login rejected                                        |
-| callback with wrong issuer    | login rejected                                        |
-| callback with wrong audience  | login rejected                                        |
-| callback with expired token   | login rejected                                        |
-| unknown signing key           | JWKS refresh attempted, then login rejected if absent |
-| first bootstrap login         | tenant owner, default organization, and project exist |
-| invite-only unknown user      | login enters denied or pending setup state            |
-| invitation accepted           | principal, org member, default org, project roles set |
-| user disabled                 | active sessions revoked and new sessions rejected     |
-| logout                        | current session revoked                               |
-| session cookie flags          | HttpOnly, Secure, and SameSite policy applied         |
-| CSRF missing on mutation      | browser mutation rejected                             |
-| account link                  | fresh auth required and external identity linked      |
-| account link by email only    | rejected unless explicit verified-email policy        |
+| Case                         | Expected Result                                       |
+| ---------------------------- | ----------------------------------------------------- |
+| OIDC login start             | state, nonce, and PKCE verifier are created           |
+| callback with wrong state    | login rejected and attempt consumed or invalidated    |
+| callback with wrong nonce    | login rejected                                        |
+| callback with wrong issuer   | login rejected                                        |
+| callback with wrong audience | login rejected                                        |
+| callback with expired token  | login rejected                                        |
+| unknown signing key          | JWKS refresh attempted, then login rejected if absent |
+| first bootstrap login        | tenant owner, default organization, and project exist |
+| invite-only unknown user     | login enters denied or pending setup state            |
+| invitation accepted          | principal, org member, default org, project roles set |
+| user disabled                | active sessions revoked and new sessions rejected     |
+| logout                       | current session revoked                               |
+| session cookie flags         | HttpOnly, Secure, and SameSite policy applied         |
+| CSRF missing on mutation     | browser mutation rejected                             |
+| account link                 | fresh auth required and external identity linked      |
+| account link by email only   | rejected unless explicit verified-email policy        |
 
 ## Model Observability Test Matrix
 
@@ -640,8 +632,8 @@ The minimum complete gateway is not the smallest proxy. It must include:
 
 - tenant and organization resource boundaries
 - default organization, organization membership, and project membership
-- GitHub OAuth App login, OIDC login, opaque server-side sessions, and user
-  management APIs
+- local single-user bootstrap, generic OIDC login, opaque server-side sessions,
+  and user management APIs
 - API key authentication
 - upstream credential references
 - provider endpoint and model target catalog
@@ -668,11 +660,12 @@ not as the gateway.
   and uses gateway-owned terminology and resource boundaries.
 - Multi-tenancy, organization provider grants, admin-managed credentials,
   user-owned and service-owned API keys, REST API permissions, routing groups,
-  router strategies, cost-only budgets, GitHub OAuth App login, OIDC login,
-  user management, organization/project membership, project member usage
-  attribution, scoped dashboards, Redis-compatible realtime operations dashboard,
-  OpenTelemetry metrics export, model observability, Codex-only upstream OAuth,
-  and notifications are all covered by implementation phases and tests.
+  router strategies, cost-only budgets, local single-user bootstrap, generic
+  OIDC login, user management, organization/project membership, project member
+  usage attribution, scoped dashboards, Redis-compatible realtime operations
+  dashboard, OpenTelemetry metrics export, model observability, Codex-only
+  upstream OAuth, and notifications are all covered by implementation phases and
+  tests.
 - CI can validate docs, schemas, and Rust crates without live provider secrets.
 - Each phase has objective exit criteria.
 - Security and operational gates are explicit before production deployment.

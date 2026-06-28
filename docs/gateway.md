@@ -76,8 +76,8 @@ both `STARWEAVER_GATEWAY_SINGLE_USER_USERNAME` and
 include CSRF metadata for browser session mutations. Generic OIDC is the
 standard external login path and supports issuer discovery, explicit pinned
 endpoints, PKCE, nonce validation, token exchange, and JWKS-backed ID token
-validation. GitHub OAuth App remains a convenience adapter for deployments that
-want GitHub login without an OIDC broker.
+validation. Non-OIDC OAuth providers, including GitHub OAuth App, require an
+OIDC broker or a separate OAuth adapter before direct login support is exposed.
 
 ## Detailed Specs
 
@@ -105,8 +105,7 @@ Architecture decisions live in the repository under `spec/gateway/`:
   review gates.
 - `10-authorization-api-keys.md` - API keys, REST API permissions,
   authorization engine direction, action vocabulary, and policy gates.
-- `11-login-user-management.md` - GitHub OAuth App login, OIDC login,
-  sessions, invitations, default organizations, project membership, and user
-  management.
+- `11-login-user-management.md` - generic OIDC login, sessions, invitations,
+  default organizations, project membership, and user management.
 - `12-dashboards-observability-api.md` - realtime operations dashboard,
   usage analytics, model observability, and project member consumption views.

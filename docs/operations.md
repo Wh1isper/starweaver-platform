@@ -30,7 +30,7 @@ compose gateway uses live readiness probes for PostgreSQL migration status and
 Redis-compatible hot-state connectivity.
 
 The compose gateway does not enable login by default and does not auto-create
-GitHub OAuth App or OIDC login providers. Set
+OIDC login providers. Set
 `STARWEAVER_GATEWAY_SINGLE_USER_USERNAME` and
 `STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD` before `make compose-up` when a local
 password bootstrap login is needed. Compose also passes through
@@ -39,9 +39,9 @@ password bootstrap login is needed. Compose also passes through
 `STARWEAVER_GATEWAY_SINGLE_USER_SESSION_TTL_SECONDS` when they are set.
 External login providers are created through the admin identity-provider API.
 Generic OIDC is the standard external login provider and can use issuer
-discovery or explicit authorization, token, and JWKS endpoints. GitHub OAuth App
-remains a separate convenience provider kind for operators that want GitHub
-login without an OIDC broker.
+discovery or explicit authorization, token, and JWKS endpoints. Non-OIDC OAuth
+providers such as GitHub OAuth App require an OIDC broker or a separate OAuth
+adapter before direct login support is exposed.
 Compose also mounts `gateway-export-objects` at `/data/gateway-exports` and
 sets `STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_DIR` to that path by default for
 `storage_backend: file_object_storage` export jobs.

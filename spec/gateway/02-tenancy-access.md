@@ -188,8 +188,8 @@ Principal kinds:
 | `bootstrap`       | initial setup actor used only during install or migration    |
 
 Principal identity should be external-id friendly. The gateway can act as a
-GitHub OAuth App or OIDC login client for human login, but it should not become
-an identity provider. Login and user lifecycle details are defined in
+generic OIDC login client for human login, but it should not become an identity
+provider. Login and user lifecycle details are defined in
 `11-login-user-management.md`.
 
 Principal fields:

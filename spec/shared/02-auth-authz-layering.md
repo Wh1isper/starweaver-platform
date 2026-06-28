@@ -182,3 +182,44 @@ build either deterministic in-memory foundation state or a migrated PostgreSQL
 repository-backed state before binding the HTTP listener. Shared extraction
 remains gated on contract tests from both services that prove the same actor and
 scope semantics without widening service-specific permissions.
+
+The platform also has a local single-user bootstrap login foundation. It is
+disabled unless environment credentials are configured, writes opaque session
+tokens through the platform session boundary, and grants the default local user
+tenant-owner permissions through the platform-local authorization engine. When
+the durable repository backend is selected, startup also repairs the default
+tenant, organization, project, principal, membership, identity-provider,
+external-identity, and role-binding rows before accepting HTTP traffic. This
+does not change the shared extraction decision: generic OIDC remains the
+standard external login shape, and single-user bootstrap behavior must not
+become a shared crate until both services need an identical contract.
+
+The platform generic OIDC foundation is also service-local. It validates
+tenant-owned provider shape, resolves issuer discovery metadata, accepts only
+asymmetric ID-token signing algorithms, selects JWKS keys by `kid`, signing use,
+and algorithm, and validates issuer, audience, nonce, subject, and expiration
+before producing verified claim envelopes. It also has public auth provider
+discovery, generic OIDC login/start, durable login-attempt storage for state,
+nonce, and PKCE verifier hashes, a pre-auth HTTP callback route that exchanges
+authorization codes only after nonce and verifier hash checks pass, and a
+durable completion transaction that consumes an active attempt, repairs the
+subject-derived local user, default organization/project, external identity,
+membership graph, organization-admin role binding, and auth session atomically.
+Confidential-client `client_secret_ref` support remains service-local:
+platform-owned secret-ref APIs manage safe metadata, provider admin/read APIs
+mask attached refs, callback handling enforces tenant ownership, and token
+exchange resolves raw secret material only through the configured platform
+secret backend. The platform membership admin foundation is also service-local:
+organization and project membership status mutations use platform actions,
+optimistic concurrency, and organization-to-project cascade semantics over the
+platform repository boundary. Organization invitation handling is service-local
+as well: admin create/list/get/revoke routes and public preview/authenticated
+accept routes store only token hashes, return raw tokens once, and use the
+invitation itself as the join authorization evidence for the invited principal.
+Email-target invitations intentionally do not grant access by email alone until
+a verified user-profile lookup contract exists in both selected repository
+backends. The platform still does not extract shared OIDC, invitation, or
+membership code from the gateway. Shared identity extraction remains blocked
+until both services prove the same provider/start/callback/session,
+invitation, and membership contracts without sharing HTTP handlers or
+repository ownership prematurely.

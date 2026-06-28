@@ -148,7 +148,7 @@ CREATE TABLE IF NOT EXISTS gateway_external_identities (
     updated_at TIMESTAMPTZ NOT NULL,
     UNIQUE (tenant_id, login_provider_id, provider_kind, provider_subject),
     CHECK (external_identity_id LIKE 'xid_%'),
-    CHECK (provider_kind IN ('github_oauth_app', 'oidc')),
+    CHECK (provider_kind = 'oidc'),
     CHECK (status IN ('active', 'disabled', 'deleted'))
 );
 
@@ -907,7 +907,7 @@ CREATE TABLE IF NOT EXISTS gateway_login_providers (
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
     CHECK (login_provider_id LIKE 'lp_%'),
-    CHECK (provider_kind IN ('github_oauth_app', 'oidc')),
+    CHECK (provider_kind = 'oidc'),
     CHECK (status IN ('active', 'disabled', 'deleted'))
 );
 
@@ -927,7 +927,7 @@ CREATE TABLE IF NOT EXISTS gateway_login_attempts (
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
     CHECK (login_attempt_id LIKE 'lat_%'),
-    CHECK (provider_kind IN ('github_oauth_app', 'oidc')),
+    CHECK (provider_kind = 'oidc'),
     CHECK (state_hash LIKE 'sha256:%'),
     CHECK (nonce_hash IS NULL OR nonce_hash LIKE 'sha256:%'),
     CHECK (code_verifier_hash LIKE 'sha256:%'),

@@ -405,6 +405,91 @@ impl InMemoryPlatformAuthSessionStore {
     pub fn auth_sessions(&self) -> Vec<PlatformAuthSessionRecord> {
         read_lock(&self.sessions).values().cloned().collect()
     }
+
+    /// Resolves a raw bearer token to an active auth session record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError`] when the bearer token is missing, unknown, revoked,
+    /// expired, or tied to a disabled principal.
+    pub fn auth_session_for_bearer(&self, raw_bearer: &str) -> Result<PlatformAuthSessionRecord> {
+        let raw_bearer = raw_bearer.trim();
+        if raw_bearer.is_empty() {
+            return Err(AuthError::EmptyBearerToken);
+        }
+        let token_hash = hash_session_token(raw_bearer);
+        let Some(record) = read_lock(&self.sessions).get(&token_hash).cloned() else {
+            return Err(AuthError::SessionNotFound);
+        };
+        active_session_record(record)
+    }
+
+    /// Revokes an active auth session by raw bearer token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError`] when the bearer token does not resolve to an active
+    /// session.
+    pub fn revoke_auth_session_by_bearer(
+        &self,
+        raw_bearer: &str,
+    ) -> Result<PlatformAuthSessionRecord> {
+        let raw_bearer = raw_bearer.trim();
+        if raw_bearer.is_empty() {
+            return Err(AuthError::EmptyBearerToken);
+        }
+        let token_hash = hash_session_token(raw_bearer);
+        let mut sessions = write_lock(&self.sessions);
+        let record = sessions
+            .get_mut(&token_hash)
+            .ok_or(AuthError::SessionNotFound)?;
+        match record.status {
+            PlatformAuthSessionStatus::Active => {
+                record.status = PlatformAuthSessionStatus::Revoked;
+                let revoked = record.clone();
+                drop(sessions);
+                Ok(revoked)
+            }
+            PlatformAuthSessionStatus::Revoked => Err(AuthError::SessionRevoked),
+            PlatformAuthSessionStatus::Expired => Err(AuthError::SessionExpired),
+            PlatformAuthSessionStatus::PrincipalDisabled => Err(AuthError::PrincipalDisabled),
+        }
+    }
+
+    /// Updates an active session's organization and project context.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError`] when the bearer token does not resolve to an active
+    /// session.
+    pub fn update_auth_session_context_by_bearer(
+        &self,
+        raw_bearer: &str,
+        organization_id: Option<String>,
+        project_id: Option<String>,
+    ) -> Result<PlatformAuthSessionRecord> {
+        let raw_bearer = raw_bearer.trim();
+        if raw_bearer.is_empty() {
+            return Err(AuthError::EmptyBearerToken);
+        }
+        let token_hash = hash_session_token(raw_bearer);
+        let mut sessions = write_lock(&self.sessions);
+        let record = sessions
+            .get_mut(&token_hash)
+            .ok_or(AuthError::SessionNotFound)?;
+        match record.status {
+            PlatformAuthSessionStatus::Active => {
+                record.actor.organization_id = organization_id;
+                record.actor.project_id = project_id;
+                let updated = record.clone();
+                drop(sessions);
+                Ok(updated)
+            }
+            PlatformAuthSessionStatus::Revoked => Err(AuthError::SessionRevoked),
+            PlatformAuthSessionStatus::Expired => Err(AuthError::SessionExpired),
+            PlatformAuthSessionStatus::PrincipalDisabled => Err(AuthError::PrincipalDisabled),
+        }
+    }
 }
 
 impl PlatformAuthSessionRepository for InMemoryPlatformAuthSessionStore {
@@ -415,20 +500,8 @@ impl PlatformAuthSessionRepository for InMemoryPlatformAuthSessionStore {
     }
 
     fn authenticated_actor_for_bearer(&self, raw_bearer: &str) -> Result<AuthenticatedActor> {
-        let raw_bearer = raw_bearer.trim();
-        if raw_bearer.is_empty() {
-            return Err(AuthError::EmptyBearerToken);
-        }
-        let token_hash = hash_session_token(raw_bearer);
-        let Some(record) = read_lock(&self.sessions).get(&token_hash).cloned() else {
-            return Err(AuthError::SessionNotFound);
-        };
-        match record.status {
-            PlatformAuthSessionStatus::Active => Ok(record.actor),
-            PlatformAuthSessionStatus::Revoked => Err(AuthError::SessionRevoked),
-            PlatformAuthSessionStatus::Expired => Err(AuthError::SessionExpired),
-            PlatformAuthSessionStatus::PrincipalDisabled => Err(AuthError::PrincipalDisabled),
-        }
+        self.auth_session_for_bearer(raw_bearer)
+            .map(|record| record.actor)
     }
 }
 
@@ -552,6 +625,15 @@ fn validate_session_record(record: &PlatformAuthSessionRecord) -> Result<()> {
         return Err(AuthError::EmptyTokenHash);
     }
     Ok(())
+}
+
+fn active_session_record(record: PlatformAuthSessionRecord) -> Result<PlatformAuthSessionRecord> {
+    match record.status {
+        PlatformAuthSessionStatus::Active => Ok(record),
+        PlatformAuthSessionStatus::Revoked => Err(AuthError::SessionRevoked),
+        PlatformAuthSessionStatus::Expired => Err(AuthError::SessionExpired),
+        PlatformAuthSessionStatus::PrincipalDisabled => Err(AuthError::PrincipalDisabled),
+    }
 }
 
 fn validate_bearer_credential_record(record: &PlatformBearerCredentialRecord) -> Result<()> {

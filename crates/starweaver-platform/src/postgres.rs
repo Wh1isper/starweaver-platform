@@ -5,15 +5,35 @@ use std::fmt::{Display, Formatter};
 use sqlx::postgres::{PgPool, PgRow};
 use sqlx::{Postgres, Row, Transaction};
 
-use crate::action::{ActorKind, AuthenticatedActor};
+use crate::action::{ActorKind, AuthenticatedActor, BuiltInRole};
 use crate::auth::{
     hash_bearer_credential_token, hash_session_token, AuthError, PlatformAuthSessionRecord,
-    PlatformBearerCredentialRecord, PlatformMtlsIdentityRecord,
+    PlatformAuthSessionStatus, PlatformBearerCredentialRecord, PlatformMtlsIdentityRecord,
+};
+use crate::identity::{
+    hash_oidc_login_state, validate_oidc_login_attempt_record, validate_oidc_login_provider_base,
+    OidcLoginAttemptRecord, OidcLoginAttemptStatus, OidcLoginProviderRecord,
+    OidcLoginProviderStatus, OidcTokenEndpointAuthMethod, OidcValidationError,
+};
+use crate::invitation::{
+    validate_organization_invitation, AcceptPlatformOrganizationInvitationRequest,
+    PlatformInvitationError, PlatformInvitationStatus, PlatformOrganizationInvitationRecord,
+};
+use crate::membership::{
+    validate_organization_member, validate_project_member, PlatformMembershipError,
+    PlatformMembershipStatus, PlatformOrganizationMembershipRecord,
+    PlatformOrganizationMembershipUpsert, PlatformProjectMembershipRecord,
+    PlatformProjectMembershipUpsert,
 };
 use crate::resource::{
     ApprovalRecord, ConversationRecord, DeferredToolRecord, EnvironmentAttachmentRecord,
     EvidenceArchiveRecord, PlatformResourceData, PlatformResourceError, PlatformResourceRecord,
     RunRecord,
+};
+use crate::secret::{
+    resolve_environment_secret, validate_secret_ref_record, PlatformSecretError,
+    PlatformSecretRefRecord, PlatformSecretRefStatus, PlatformSecretValue,
+    ENVIRONMENT_SECRET_BACKEND,
 };
 use crate::storage::{ResourceOwnerRecord, StoreError};
 
@@ -58,6 +78,63 @@ SELECT
     (expires_at IS NOT NULL AND expires_at <= now()) AS token_expired
 FROM platform_auth_sessions
 WHERE token_hash = $1
+";
+
+const SELECT_AUTH_SESSION_RECORD_BY_TOKEN_SQL: &str = r"
+SELECT
+    auth_session_id,
+    token_hash,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    actor_kind,
+    status,
+    (expires_at IS NOT NULL AND expires_at <= now()) AS token_expired
+FROM platform_auth_sessions
+WHERE token_hash = $1
+";
+
+const REVOKE_AUTH_SESSION_BY_TOKEN_SQL: &str = r"
+UPDATE platform_auth_sessions
+SET
+    status = 'revoked',
+    revoked_at = now(),
+    resource_version = resource_version + 1,
+    updated_at = now()
+WHERE token_hash = $1
+  AND status = 'active'
+RETURNING
+    auth_session_id,
+    token_hash,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    actor_kind,
+    status,
+    (expires_at IS NOT NULL AND expires_at <= now()) AS token_expired
+";
+
+const UPDATE_AUTH_SESSION_CONTEXT_BY_TOKEN_SQL: &str = r"
+UPDATE platform_auth_sessions
+SET
+    organization_id = $2,
+    project_id = $3,
+    resource_version = resource_version + 1,
+    updated_at = now()
+WHERE token_hash = $1
+  AND status = 'active'
+RETURNING
+    auth_session_id,
+    token_hash,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    actor_kind,
+    status,
+    (expires_at IS NOT NULL AND expires_at <= now()) AS token_expired
 ";
 
 const RECORD_BEARER_CREDENTIAL_SQL: &str = r"
@@ -144,6 +221,1085 @@ SELECT
     (expires_at IS NOT NULL AND expires_at <= now()) AS identity_expired
 FROM platform_mtls_identities
 WHERE subject = $1
+";
+
+const SELECT_OIDC_LOGIN_PROVIDER_SQL: &str = r"
+SELECT
+    identity_provider_id,
+    tenant_id,
+    display_name,
+    COALESCE(issuer_url, '') AS issuer_url,
+    COALESCE(authorization_endpoint, '') AS authorization_endpoint,
+    COALESCE(token_endpoint, '') AS token_endpoint,
+    COALESCE(jwks_uri, '') AS jwks_uri,
+    COALESCE(client_id, '') AS client_id,
+    client_secret_ref,
+    COALESCE(token_endpoint_auth_method, 'none') AS token_endpoint_auth_method,
+    COALESCE(redirect_uri, '') AS redirect_uri,
+    requested_scopes,
+    oidc_audiences,
+    status
+FROM platform_identity_providers
+WHERE identity_provider_id = $1
+	  AND provider_kind = 'oidc'
+	";
+
+const LIST_OIDC_LOGIN_PROVIDERS_SQL: &str = r"
+SELECT
+    identity_provider_id,
+    tenant_id,
+    display_name,
+    COALESCE(issuer_url, '') AS issuer_url,
+    COALESCE(authorization_endpoint, '') AS authorization_endpoint,
+    COALESCE(token_endpoint, '') AS token_endpoint,
+    COALESCE(jwks_uri, '') AS jwks_uri,
+    COALESCE(client_id, '') AS client_id,
+    client_secret_ref,
+    COALESCE(token_endpoint_auth_method, 'none') AS token_endpoint_auth_method,
+    COALESCE(redirect_uri, '') AS redirect_uri,
+    requested_scopes,
+    oidc_audiences,
+    status
+FROM platform_identity_providers
+WHERE tenant_id = $1
+  AND provider_kind = 'oidc'
+  AND status <> 'deleted'
+ORDER BY identity_provider_id
+";
+
+const UPSERT_OIDC_LOGIN_PROVIDER_SQL: &str = r"
+INSERT INTO platform_identity_providers (
+    identity_provider_id,
+    tenant_id,
+    provider_kind,
+    display_name,
+    issuer_url,
+    authorization_endpoint,
+    token_endpoint,
+    jwks_uri,
+    client_id,
+    client_secret_ref,
+    token_endpoint_auth_method,
+    redirect_uri,
+    requested_scopes,
+    oidc_audiences,
+    status,
+    created_by,
+    created_at,
+    updated_at
+)
+VALUES (
+    $1,
+    $2,
+    'oidc',
+    $3,
+    $4,
+    NULLIF($5, ''),
+    NULLIF($6, ''),
+    NULLIF($7, ''),
+    $8,
+    $9,
+    $10,
+    $11,
+    $12,
+    $13,
+    $14,
+    $15,
+    now(),
+    now()
+)
+ON CONFLICT (identity_provider_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    provider_kind = 'oidc',
+    display_name = EXCLUDED.display_name,
+    issuer_url = EXCLUDED.issuer_url,
+    authorization_endpoint = EXCLUDED.authorization_endpoint,
+    token_endpoint = EXCLUDED.token_endpoint,
+    jwks_uri = EXCLUDED.jwks_uri,
+    client_id = EXCLUDED.client_id,
+    client_secret_ref = EXCLUDED.client_secret_ref,
+    token_endpoint_auth_method = EXCLUDED.token_endpoint_auth_method,
+    redirect_uri = EXCLUDED.redirect_uri,
+    requested_scopes = EXCLUDED.requested_scopes,
+    oidc_audiences = EXCLUDED.oidc_audiences,
+    status = EXCLUDED.status,
+    resource_version = platform_identity_providers.resource_version + 1,
+    updated_at = now()
+";
+
+const UPSERT_SECRET_REF_SQL: &str = r"
+INSERT INTO platform_secret_refs (
+    secret_ref_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    purpose,
+    backend_kind,
+    backend_locator,
+    display_mask,
+    fingerprint,
+    status,
+    created_by,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now(), now())
+ON CONFLICT (secret_ref_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    organization_id = EXCLUDED.organization_id,
+    project_id = EXCLUDED.project_id,
+    purpose = EXCLUDED.purpose,
+    backend_kind = EXCLUDED.backend_kind,
+    backend_locator = EXCLUDED.backend_locator,
+    display_mask = EXCLUDED.display_mask,
+    fingerprint = EXCLUDED.fingerprint,
+    status = EXCLUDED.status,
+    resource_version = platform_secret_refs.resource_version + 1,
+    updated_at = now()
+";
+
+const SELECT_SECRET_REF_SQL: &str = r"
+SELECT
+    secret_ref_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    purpose,
+    backend_kind,
+    backend_locator,
+    display_mask,
+    fingerprint,
+    status
+FROM platform_secret_refs
+WHERE secret_ref_id = $1
+";
+
+const LIST_SECRET_REFS_SQL: &str = r"
+SELECT
+    secret_ref_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    purpose,
+    backend_kind,
+    backend_locator,
+    display_mask,
+    fingerprint,
+    status
+FROM platform_secret_refs
+WHERE tenant_id = $1
+  AND status <> 'deleted'
+ORDER BY secret_ref_id
+";
+
+const LIST_ORGANIZATION_MEMBERS_SQL: &str = r"
+SELECT
+    organization_member_id,
+    tenant_id,
+    organization_id,
+    principal_id,
+    membership_kind,
+    status,
+    resource_version
+FROM platform_organization_memberships
+WHERE organization_id = $1
+ORDER BY organization_member_id
+";
+
+const SELECT_ORGANIZATION_MEMBER_SQL: &str = r"
+SELECT
+    organization_member_id,
+    tenant_id,
+    organization_id,
+    principal_id,
+    membership_kind,
+    status,
+    resource_version
+FROM platform_organization_memberships
+WHERE organization_member_id = $1
+";
+
+const UPDATE_ORGANIZATION_MEMBER_STATUS_SQL: &str = r"
+UPDATE platform_organization_memberships
+SET
+    status = $2,
+    resource_version = resource_version + 1,
+    updated_at = now()
+WHERE organization_member_id = $1
+  AND resource_version = $3
+RETURNING
+    organization_member_id,
+    tenant_id,
+    organization_id,
+    principal_id,
+    membership_kind,
+    status,
+    resource_version
+";
+
+const UPSERT_ORGANIZATION_MEMBER_SQL: &str = r"
+INSERT INTO platform_organization_memberships (
+    organization_member_id,
+    tenant_id,
+    organization_id,
+    principal_id,
+    membership_kind,
+    status,
+    created_by,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, $5, 'active', $6, now(), now())
+ON CONFLICT (organization_id, principal_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    membership_kind = EXCLUDED.membership_kind,
+    status = 'active',
+    resource_version = platform_organization_memberships.resource_version + 1,
+    updated_at = now()
+RETURNING
+    organization_member_id,
+    tenant_id,
+    organization_id,
+    principal_id,
+    membership_kind,
+    status,
+    resource_version
+";
+
+const LIST_PROJECT_MEMBERS_SQL: &str = r"
+SELECT
+    project_member_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    organization_member_id,
+    membership_kind,
+    status,
+    resource_version
+FROM platform_project_memberships
+WHERE project_id = $1
+ORDER BY project_member_id
+";
+
+const SELECT_PROJECT_MEMBER_SQL: &str = r"
+SELECT
+    project_member_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    organization_member_id,
+    membership_kind,
+    status,
+    resource_version
+FROM platform_project_memberships
+WHERE project_member_id = $1
+";
+
+const UPDATE_PROJECT_MEMBER_STATUS_SQL: &str = r"
+UPDATE platform_project_memberships
+SET
+    status = $2,
+    resource_version = resource_version + 1,
+    updated_at = now()
+WHERE project_member_id = $1
+  AND resource_version = $3
+RETURNING
+    project_member_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    organization_member_id,
+    membership_kind,
+    status,
+    resource_version
+";
+
+const UPSERT_PROJECT_MEMBER_SQL: &str = r"
+INSERT INTO platform_project_memberships (
+    project_member_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    organization_member_id,
+    membership_kind,
+    status,
+    created_by,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8, now(), now())
+ON CONFLICT (project_id, principal_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    organization_id = EXCLUDED.organization_id,
+    organization_member_id = EXCLUDED.organization_member_id,
+    membership_kind = EXCLUDED.membership_kind,
+    status = 'active',
+    resource_version = platform_project_memberships.resource_version + 1,
+    updated_at = now()
+RETURNING
+    project_member_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    organization_member_id,
+    membership_kind,
+    status,
+    resource_version
+";
+
+const CASCADE_PROJECT_MEMBERS_FOR_ORGANIZATION_MEMBER_SQL: &str = r"
+UPDATE platform_project_memberships
+SET
+    status = $4,
+    resource_version = resource_version + 1,
+    updated_at = now()
+WHERE tenant_id = $1
+  AND organization_id = $2
+  AND principal_id = $3
+  AND (
+      ($4 = 'suspended' AND status = 'active')
+      OR ($4 = 'removed' AND status <> 'removed')
+  )
+RETURNING project_member_id
+";
+
+const INSERT_ORGANIZATION_INVITATION_SQL: &str = r"
+INSERT INTO platform_organization_invitations (
+    invitation_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    invited_email,
+    invited_principal_id,
+    invitation_token_hash,
+    role_id,
+    status,
+    expires_at,
+    accepted_at,
+    created_by,
+    resource_version,
+    created_at,
+    updated_at
+)
+VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    $8,
+    $9,
+    to_timestamp($10),
+    NULL,
+    $11,
+    $12,
+    to_timestamp($13),
+    to_timestamp($14)
+)
+";
+
+const LIST_ORGANIZATION_INVITATIONS_SQL: &str = r"
+SELECT
+    invitation_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    invited_email,
+    invited_principal_id,
+    invitation_token_hash,
+    role_id,
+    status,
+    extract(epoch from expires_at)::bigint AS expires_at_unix,
+    extract(epoch from accepted_at)::bigint AS accepted_at_unix,
+    created_by,
+    resource_version,
+    extract(epoch from created_at)::bigint AS created_at_unix,
+    extract(epoch from updated_at)::bigint AS updated_at_unix
+FROM platform_organization_invitations
+WHERE tenant_id = $1
+  AND organization_id = $2
+ORDER BY created_at DESC, invitation_id
+";
+
+const SELECT_ORGANIZATION_INVITATION_SQL: &str = r"
+SELECT
+    invitation_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    invited_email,
+    invited_principal_id,
+    invitation_token_hash,
+    role_id,
+    status,
+    extract(epoch from expires_at)::bigint AS expires_at_unix,
+    extract(epoch from accepted_at)::bigint AS accepted_at_unix,
+    created_by,
+    resource_version,
+    extract(epoch from created_at)::bigint AS created_at_unix,
+    extract(epoch from updated_at)::bigint AS updated_at_unix
+FROM platform_organization_invitations
+WHERE invitation_id = $1
+";
+
+const SELECT_ORGANIZATION_INVITATION_BY_TOKEN_HASH_SQL: &str = r"
+SELECT
+    invitation_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    invited_email,
+    invited_principal_id,
+    invitation_token_hash,
+    role_id,
+    status,
+    extract(epoch from expires_at)::bigint AS expires_at_unix,
+    extract(epoch from accepted_at)::bigint AS accepted_at_unix,
+    created_by,
+    resource_version,
+    extract(epoch from created_at)::bigint AS created_at_unix,
+    extract(epoch from updated_at)::bigint AS updated_at_unix
+FROM platform_organization_invitations
+WHERE invitation_token_hash = $1
+";
+
+const REVOKE_ORGANIZATION_INVITATION_SQL: &str = r"
+UPDATE platform_organization_invitations
+SET
+    status = 'revoked',
+    resource_version = resource_version + 1,
+    updated_at = to_timestamp($3)
+WHERE invitation_id = $1
+  AND resource_version = $2
+  AND status = 'pending'
+RETURNING
+    invitation_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    invited_email,
+    invited_principal_id,
+    invitation_token_hash,
+    role_id,
+    status,
+    extract(epoch from expires_at)::bigint AS expires_at_unix,
+    extract(epoch from accepted_at)::bigint AS accepted_at_unix,
+    created_by,
+    resource_version,
+    extract(epoch from created_at)::bigint AS created_at_unix,
+    extract(epoch from updated_at)::bigint AS updated_at_unix
+";
+
+const ACCEPT_ORGANIZATION_INVITATION_SQL: &str = r"
+UPDATE platform_organization_invitations
+SET
+    status = 'accepted',
+    accepted_at = to_timestamp($2),
+    resource_version = resource_version + 1,
+    updated_at = to_timestamp($2)
+WHERE invitation_id = $1
+  AND status = 'pending'
+RETURNING
+    invitation_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    invited_email,
+    invited_principal_id,
+    invitation_token_hash,
+    role_id,
+    status,
+    extract(epoch from expires_at)::bigint AS expires_at_unix,
+    extract(epoch from accepted_at)::bigint AS accepted_at_unix,
+    created_by,
+    resource_version,
+    extract(epoch from created_at)::bigint AS created_at_unix,
+    extract(epoch from updated_at)::bigint AS updated_at_unix
+";
+
+const UPSERT_INVITED_ORGANIZATION_MEMBER_SQL: &str = r"
+INSERT INTO platform_organization_memberships (
+    organization_member_id,
+    tenant_id,
+    organization_id,
+    principal_id,
+    membership_kind,
+    status,
+    created_by,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, 'user', 'active', $4, to_timestamp($5), to_timestamp($5))
+ON CONFLICT (organization_id, principal_id)
+DO UPDATE SET
+    membership_kind = 'user',
+    status = 'active',
+    resource_version = platform_organization_memberships.resource_version + 1,
+    updated_at = to_timestamp($5)
+RETURNING
+    organization_member_id,
+    tenant_id,
+    organization_id,
+    principal_id,
+    membership_kind,
+    status,
+    resource_version
+";
+
+const UPSERT_INVITED_PROJECT_MEMBER_SQL: &str = r"
+INSERT INTO platform_project_memberships (
+    project_member_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    organization_member_id,
+    membership_kind,
+    status,
+    created_by,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, 'user', 'active', $5, to_timestamp($7), to_timestamp($7))
+ON CONFLICT (project_id, principal_id)
+DO UPDATE SET
+    organization_member_id = EXCLUDED.organization_member_id,
+    membership_kind = 'user',
+    status = 'active',
+    resource_version = platform_project_memberships.resource_version + 1,
+    updated_at = to_timestamp($7)
+RETURNING
+    project_member_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    organization_member_id,
+    membership_kind,
+    status,
+    resource_version
+";
+
+const RECORD_OIDC_LOGIN_ATTEMPT_SQL: &str = r"
+INSERT INTO platform_oidc_login_attempts (
+    oidc_login_attempt_id,
+    tenant_id,
+    identity_provider_id,
+    state_hash,
+    nonce_hash,
+    pkce_verifier_hash,
+    redirect_uri,
+    status,
+    expires_at,
+    consumed_at,
+    created_at,
+    updated_at
+)
+VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    $8,
+    to_timestamp($9),
+    CASE WHEN $10::BIGINT IS NULL THEN NULL ELSE to_timestamp($10) END,
+    now(),
+    now()
+)
+ON CONFLICT (oidc_login_attempt_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    identity_provider_id = EXCLUDED.identity_provider_id,
+    state_hash = EXCLUDED.state_hash,
+    nonce_hash = EXCLUDED.nonce_hash,
+    pkce_verifier_hash = EXCLUDED.pkce_verifier_hash,
+    redirect_uri = EXCLUDED.redirect_uri,
+    status = EXCLUDED.status,
+    expires_at = EXCLUDED.expires_at,
+    consumed_at = EXCLUDED.consumed_at,
+    resource_version = platform_oidc_login_attempts.resource_version + 1,
+    updated_at = now()
+";
+
+const SELECT_OIDC_LOGIN_ATTEMPT_BY_STATE_SQL: &str = r"
+SELECT
+    oidc_login_attempt_id,
+    tenant_id,
+    identity_provider_id,
+    state_hash,
+    nonce_hash,
+    pkce_verifier_hash,
+    redirect_uri,
+    status,
+    extract(epoch from expires_at)::bigint AS expires_at_unix,
+    CASE
+        WHEN consumed_at IS NULL THEN NULL
+        ELSE extract(epoch from consumed_at)::bigint
+    END AS consumed_at_unix
+FROM platform_oidc_login_attempts
+WHERE state_hash = $1
+";
+
+const CONSUME_OIDC_LOGIN_ATTEMPT_SQL: &str = r"
+UPDATE platform_oidc_login_attempts
+SET
+    status = 'consumed',
+    consumed_at = to_timestamp($2),
+    resource_version = platform_oidc_login_attempts.resource_version + 1,
+    updated_at = now()
+WHERE oidc_login_attempt_id = $1
+  AND tenant_id = $3
+  AND identity_provider_id = $4
+  AND status = 'active'
+  AND expires_at > now()
+";
+
+const UPSERT_OIDC_USER_ORGANIZATION_SQL: &str = r"
+INSERT INTO platform_organizations (
+    organization_id,
+    tenant_id,
+    display_name,
+    status,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, 'active', now(), now())
+ON CONFLICT (organization_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    display_name = EXCLUDED.display_name,
+    status = 'active',
+    resource_version = platform_organizations.resource_version + 1,
+    updated_at = now()
+";
+
+const UPSERT_OIDC_USER_PROJECT_SQL: &str = r"
+INSERT INTO platform_projects (
+    project_id,
+    tenant_id,
+    organization_id,
+    display_name,
+    status,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, 'active', now(), now())
+ON CONFLICT (project_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    organization_id = EXCLUDED.organization_id,
+    display_name = EXCLUDED.display_name,
+    status = 'active',
+    resource_version = platform_projects.resource_version + 1,
+    updated_at = now()
+";
+
+const UPSERT_OIDC_USER_PRINCIPAL_SQL: &str = r"
+INSERT INTO platform_principals (
+    principal_id,
+    tenant_id,
+    principal_kind,
+    display_name,
+    status,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, 'user', $3, 'active', now(), now())
+ON CONFLICT (principal_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    principal_kind = 'user',
+    display_name = EXCLUDED.display_name,
+    status = 'active',
+    resource_version = platform_principals.resource_version + 1,
+    updated_at = now()
+";
+
+const UPSERT_OIDC_USER_SQL: &str = r"
+INSERT INTO platform_users (
+    user_id,
+    tenant_id,
+    default_organization_id,
+    default_project_id,
+    primary_email,
+    display_name,
+    status,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, 'active', now(), now())
+ON CONFLICT (user_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    default_organization_id = EXCLUDED.default_organization_id,
+    default_project_id = EXCLUDED.default_project_id,
+    primary_email = EXCLUDED.primary_email,
+    display_name = EXCLUDED.display_name,
+    status = 'active',
+    resource_version = platform_users.resource_version + 1,
+    updated_at = now()
+";
+
+const UPSERT_OIDC_ORGANIZATION_MEMBERSHIP_SQL: &str = r"
+INSERT INTO platform_organization_memberships (
+    organization_member_id,
+    tenant_id,
+    organization_id,
+    principal_id,
+    membership_kind,
+    status,
+    created_by,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, 'user', 'active', $4, now(), now())
+ON CONFLICT (organization_id, principal_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    membership_kind = 'user',
+    status = 'active',
+    resource_version = platform_organization_memberships.resource_version + 1,
+    updated_at = now()
+";
+
+const UPSERT_OIDC_PROJECT_MEMBERSHIP_SQL: &str = r"
+INSERT INTO platform_project_memberships (
+    project_member_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    organization_member_id,
+    membership_kind,
+    status,
+    created_by,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, 'user', 'active', $5, now(), now())
+ON CONFLICT (project_id, principal_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    organization_id = EXCLUDED.organization_id,
+    organization_member_id = EXCLUDED.organization_member_id,
+    membership_kind = 'user',
+    status = 'active',
+    resource_version = platform_project_memberships.resource_version + 1,
+    updated_at = now()
+";
+
+const UPSERT_OIDC_EXTERNAL_IDENTITY_SQL: &str = r"
+INSERT INTO platform_external_identities (
+    external_identity_id,
+    tenant_id,
+    principal_id,
+    identity_provider_id,
+    provider_kind,
+    provider_subject,
+    email,
+    email_verified,
+    status,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, 'oidc', $5, $6, $7, 'active', now(), now())
+ON CONFLICT (tenant_id, identity_provider_id, provider_subject)
+DO UPDATE SET
+    email = EXCLUDED.email,
+    email_verified = EXCLUDED.email_verified,
+    status = 'active',
+    updated_at = now()
+WHERE platform_external_identities.principal_id = EXCLUDED.principal_id
+";
+
+const UPSERT_OIDC_ORGANIZATION_ADMIN_ROLE_SQL: &str = r"
+INSERT INTO platform_role_bindings (
+    role_binding_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    role_id,
+    status,
+    created_by,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, NULL, $4, $5, 'active', $4, now(), now())
+ON CONFLICT (role_binding_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    organization_id = EXCLUDED.organization_id,
+    project_id = NULL,
+    principal_id = EXCLUDED.principal_id,
+    role_id = EXCLUDED.role_id,
+    status = 'active',
+    resource_version = platform_role_bindings.resource_version + 1,
+    updated_at = now()
+";
+
+const RECORD_OIDC_AUTH_SESSION_SQL: &str = r"
+INSERT INTO platform_auth_sessions (
+    auth_session_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    actor_kind,
+    identity_provider_id,
+    token_hash,
+    status,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, $5, 'user', $6, $7, $8, now(), now())
+ON CONFLICT (auth_session_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    organization_id = EXCLUDED.organization_id,
+    project_id = EXCLUDED.project_id,
+    principal_id = EXCLUDED.principal_id,
+    actor_kind = 'user',
+    identity_provider_id = EXCLUDED.identity_provider_id,
+    token_hash = EXCLUDED.token_hash,
+    status = EXCLUDED.status,
+    resource_version = platform_auth_sessions.resource_version + 1,
+    updated_at = now()
+";
+
+const BOOTSTRAP_SINGLE_USER_TENANT_SQL: &str = r"
+INSERT INTO platform_tenants (
+    tenant_id,
+    display_name,
+    status,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, 'active', now(), now())
+ON CONFLICT (tenant_id)
+DO UPDATE SET
+    display_name = EXCLUDED.display_name,
+    status = 'active',
+    resource_version = platform_tenants.resource_version + 1,
+    updated_at = now()
+";
+
+const BOOTSTRAP_SINGLE_USER_ORGANIZATION_SQL: &str = r"
+INSERT INTO platform_organizations (
+    organization_id,
+    tenant_id,
+    display_name,
+    status,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, 'active', now(), now())
+ON CONFLICT (organization_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    display_name = EXCLUDED.display_name,
+    status = 'active',
+    resource_version = platform_organizations.resource_version + 1,
+    updated_at = now()
+";
+
+const BOOTSTRAP_SINGLE_USER_PROJECT_SQL: &str = r"
+INSERT INTO platform_projects (
+    project_id,
+    tenant_id,
+    organization_id,
+    display_name,
+    status,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, 'active', now(), now())
+ON CONFLICT (project_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    organization_id = EXCLUDED.organization_id,
+    display_name = EXCLUDED.display_name,
+    status = 'active',
+    resource_version = platform_projects.resource_version + 1,
+    updated_at = now()
+";
+
+const BOOTSTRAP_SINGLE_USER_PRINCIPAL_SQL: &str = r"
+INSERT INTO platform_principals (
+    principal_id,
+    tenant_id,
+    principal_kind,
+    display_name,
+    status,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, 'user', $3, 'active', now(), now())
+ON CONFLICT (principal_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    principal_kind = 'user',
+    display_name = EXCLUDED.display_name,
+    status = 'active',
+    resource_version = platform_principals.resource_version + 1,
+    updated_at = now()
+";
+
+const BOOTSTRAP_SINGLE_USER_USER_SQL: &str = r"
+INSERT INTO platform_users (
+    user_id,
+    tenant_id,
+    default_organization_id,
+    default_project_id,
+    primary_email,
+    display_name,
+    status,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, 'active', now(), now())
+ON CONFLICT (user_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    default_organization_id = EXCLUDED.default_organization_id,
+    default_project_id = EXCLUDED.default_project_id,
+    primary_email = EXCLUDED.primary_email,
+    display_name = EXCLUDED.display_name,
+    status = 'active',
+    resource_version = platform_users.resource_version + 1,
+    updated_at = now()
+";
+
+const BOOTSTRAP_SINGLE_USER_ORGANIZATION_MEMBERSHIP_SQL: &str = r"
+INSERT INTO platform_organization_memberships (
+    organization_member_id,
+    tenant_id,
+    organization_id,
+    principal_id,
+    membership_kind,
+    status,
+    created_by,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, 'user', 'active', $4, now(), now())
+ON CONFLICT (organization_id, principal_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    membership_kind = 'user',
+    status = 'active',
+    resource_version = platform_organization_memberships.resource_version + 1,
+    updated_at = now()
+";
+
+const BOOTSTRAP_SINGLE_USER_PROJECT_MEMBERSHIP_SQL: &str = r"
+INSERT INTO platform_project_memberships (
+    project_member_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    organization_member_id,
+    membership_kind,
+    status,
+    created_by,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, 'user', 'active', $5, now(), now())
+ON CONFLICT (project_id, principal_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    organization_id = EXCLUDED.organization_id,
+    organization_member_id = EXCLUDED.organization_member_id,
+    membership_kind = 'user',
+    status = 'active',
+    resource_version = platform_project_memberships.resource_version + 1,
+    updated_at = now()
+";
+
+const BOOTSTRAP_SINGLE_USER_IDENTITY_PROVIDER_SQL: &str = r"
+INSERT INTO platform_identity_providers (
+    identity_provider_id,
+    tenant_id,
+    provider_kind,
+    display_name,
+    status,
+    created_by,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, 'single_user', $3, 'active', $4, now(), now())
+ON CONFLICT (identity_provider_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    provider_kind = 'single_user',
+    display_name = EXCLUDED.display_name,
+    status = 'active',
+    resource_version = platform_identity_providers.resource_version + 1,
+    updated_at = now()
+";
+
+const BOOTSTRAP_SINGLE_USER_EXTERNAL_IDENTITY_SQL: &str = r"
+INSERT INTO platform_external_identities (
+    external_identity_id,
+    tenant_id,
+    principal_id,
+    identity_provider_id,
+    provider_kind,
+    provider_subject,
+    email,
+    email_verified,
+    status,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, 'single_user', $5, $6, false, 'active', now(), now())
+ON CONFLICT (tenant_id, identity_provider_id, provider_subject)
+DO UPDATE SET
+    principal_id = EXCLUDED.principal_id,
+    provider_kind = 'single_user',
+    email = EXCLUDED.email,
+    status = 'active',
+    updated_at = now()
+";
+
+const BOOTSTRAP_SINGLE_USER_ROLE_BINDING_SQL: &str = r"
+INSERT INTO platform_role_bindings (
+    role_binding_id,
+    tenant_id,
+    principal_id,
+    role_id,
+    status,
+    created_by,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, 'active', $3, now(), now())
+ON CONFLICT (role_binding_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    organization_id = NULL,
+    project_id = NULL,
+    principal_id = EXCLUDED.principal_id,
+    role_id = EXCLUDED.role_id,
+    status = 'active',
+    resource_version = platform_role_bindings.resource_version + 1,
+    updated_at = now()
 ";
 
 const RECORD_RESOURCE_OWNER_SQL: &str = r"
@@ -353,10 +1509,18 @@ WHERE evidence_archive_id = $1
 pub enum PlatformRepositoryError {
     /// Authentication record validation or status resolution failed.
     Auth(AuthError),
+    /// Identity-provider validation failed.
+    Identity(OidcValidationError),
     /// Resource ownership validation failed.
     Store(StoreError),
     /// Business resource validation failed.
     Resource(PlatformResourceError),
+    /// Membership validation failed.
+    Membership(PlatformMembershipError),
+    /// Invitation validation failed.
+    Invitation(PlatformInvitationError),
+    /// Secret-reference validation or resolution failed.
+    Secret(PlatformSecretError),
     /// Database operation failed.
     Database(String),
     /// Actor kind stored in `PostgreSQL` is not recognized.
@@ -367,6 +1531,22 @@ pub enum PlatformRepositoryError {
     UnknownCredentialStatus(String),
     /// mTLS identity status stored in `PostgreSQL` is not recognized.
     UnknownMtlsIdentityStatus(String),
+    /// `OIDC` login-provider status stored in `PostgreSQL` is not recognized.
+    UnknownOidcLoginProviderStatus(String),
+    /// `OIDC` login-attempt status stored in `PostgreSQL` is not recognized.
+    UnknownOidcLoginAttemptStatus(String),
+    /// Secret-reference status stored in `PostgreSQL` is not recognized.
+    UnknownSecretRefStatus(String),
+    /// Membership status stored in `PostgreSQL` is not recognized.
+    UnknownMembershipStatus(String),
+    /// Invitation status stored in `PostgreSQL` is not recognized.
+    UnknownInvitationStatus(String),
+    /// `OIDC` login attempt cannot be consumed.
+    OidcLoginAttemptUnavailable(String),
+    /// `OIDC` external identity already points at a different principal.
+    OidcExternalIdentityPrincipalMismatch(String),
+    /// `OIDC` issued session actor does not match the linked local user.
+    OidcSessionActorMismatch(String),
     /// Business resource requires project scope but owner metadata is not project-scoped.
     ProjectScopeRequired(String),
 }
@@ -377,13 +1557,27 @@ impl PlatformRepositoryError {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Auth(error) => error.as_str(),
+            Self::Identity(error) => error.as_str(),
             Self::Store(error) => error.as_str(),
             Self::Resource(error) => error.as_str(),
+            Self::Membership(error) => error.as_str(),
+            Self::Invitation(error) => error.as_str(),
+            Self::Secret(error) => error.as_str(),
             Self::Database(_) => "database_error",
             Self::UnknownActorKind(_) => "unknown_actor_kind",
             Self::UnknownSessionStatus(_) => "unknown_session_status",
             Self::UnknownCredentialStatus(_) => "unknown_credential_status",
             Self::UnknownMtlsIdentityStatus(_) => "unknown_mtls_identity_status",
+            Self::UnknownOidcLoginProviderStatus(_) => "unknown_oidc_login_provider_status",
+            Self::UnknownOidcLoginAttemptStatus(_) => "unknown_oidc_login_attempt_status",
+            Self::UnknownSecretRefStatus(_) => "unknown_secret_ref_status",
+            Self::UnknownMembershipStatus(_) => "unknown_membership_status",
+            Self::UnknownInvitationStatus(_) => "unknown_invitation_status",
+            Self::OidcLoginAttemptUnavailable(_) => "oidc_login_attempt_unavailable",
+            Self::OidcExternalIdentityPrincipalMismatch(_) => {
+                "oidc_external_identity_principal_mismatch"
+            }
+            Self::OidcSessionActorMismatch(_) => "oidc_session_actor_mismatch",
             Self::ProjectScopeRequired(_) => "project_scope_required",
         }
     }
@@ -393,10 +1587,16 @@ impl Display for PlatformRepositoryError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Auth(error) => write!(formatter, "authentication repository error: {error:?}"),
+            Self::Identity(error) => write!(formatter, "identity repository error: {error:?}"),
             Self::Store(error) => write!(formatter, "resource owner repository error: {error:?}"),
             Self::Resource(error) => {
                 write!(formatter, "business resource repository error: {error:?}")
             }
+            Self::Membership(error) => write!(formatter, "membership repository error: {error:?}"),
+            Self::Invitation(error) => {
+                write!(formatter, "invitation repository error: {error:?}")
+            }
+            Self::Secret(error) => write!(formatter, "secret repository error: {error:?}"),
             Self::Database(message) => write!(formatter, "database repository error: {message}"),
             Self::UnknownActorKind(value) => write!(formatter, "unknown actor kind: {value}"),
             Self::UnknownSessionStatus(value) => {
@@ -407,6 +1607,33 @@ impl Display for PlatformRepositoryError {
             }
             Self::UnknownMtlsIdentityStatus(value) => {
                 write!(formatter, "unknown mTLS identity status: {value}")
+            }
+            Self::UnknownOidcLoginProviderStatus(value) => {
+                write!(formatter, "unknown OIDC login-provider status: {value}")
+            }
+            Self::UnknownOidcLoginAttemptStatus(value) => {
+                write!(formatter, "unknown OIDC login-attempt status: {value}")
+            }
+            Self::UnknownSecretRefStatus(value) => {
+                write!(formatter, "unknown secret-ref status: {value}")
+            }
+            Self::UnknownMembershipStatus(value) => {
+                write!(formatter, "unknown membership status: {value}")
+            }
+            Self::UnknownInvitationStatus(value) => {
+                write!(formatter, "unknown invitation status: {value}")
+            }
+            Self::OidcLoginAttemptUnavailable(value) => {
+                write!(formatter, "OIDC login attempt unavailable: {value}")
+            }
+            Self::OidcExternalIdentityPrincipalMismatch(value) => {
+                write!(
+                    formatter,
+                    "OIDC external identity principal mismatch: {value}"
+                )
+            }
+            Self::OidcSessionActorMismatch(value) => {
+                write!(formatter, "OIDC session actor mismatch: {value}")
             }
             Self::ProjectScopeRequired(kind) => {
                 write!(formatter, "resource kind requires project scope: {kind}")
@@ -429,6 +1656,12 @@ impl From<AuthError> for PlatformRepositoryError {
     }
 }
 
+impl From<OidcValidationError> for PlatformRepositoryError {
+    fn from(error: OidcValidationError) -> Self {
+        Self::Identity(error)
+    }
+}
+
 impl From<StoreError> for PlatformRepositoryError {
     fn from(error: StoreError) -> Self {
         Self::Store(error)
@@ -441,10 +1674,104 @@ impl From<PlatformResourceError> for PlatformRepositoryError {
     }
 }
 
+impl From<PlatformMembershipError> for PlatformRepositoryError {
+    fn from(error: PlatformMembershipError) -> Self {
+        Self::Membership(error)
+    }
+}
+
+impl From<PlatformInvitationError> for PlatformRepositoryError {
+    fn from(error: PlatformInvitationError) -> Self {
+        Self::Invitation(error)
+    }
+}
+
+impl From<PlatformSecretError> for PlatformRepositoryError {
+    fn from(error: PlatformSecretError) -> Self {
+        Self::Secret(error)
+    }
+}
+
 /// PostgreSQL-backed repository adapter for platform durable state.
 #[derive(Clone, Debug)]
 pub struct PostgresPlatformRepository {
     pool: PgPool,
+}
+
+/// Durable default resources for local single-user bootstrap.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SingleUserBootstrapRecord {
+    /// Default tenant id.
+    pub tenant_id: String,
+    /// Default organization id.
+    pub organization_id: String,
+    /// Default project id.
+    pub project_id: String,
+    /// Default user principal id.
+    pub user_id: String,
+    /// Local single-user identity provider id.
+    pub identity_provider_id: String,
+    /// External identity row id.
+    pub external_identity_id: String,
+    /// Organization membership id.
+    pub organization_member_id: String,
+    /// Project membership id.
+    pub project_member_id: String,
+    /// Tenant-owner role binding id.
+    pub role_binding_id: String,
+    /// Login username used as the local provider subject.
+    pub username: String,
+    /// User display name.
+    pub user_display_name: String,
+    /// Optional primary email.
+    pub user_primary_email: Option<String>,
+    /// Tenant display name.
+    pub tenant_display_name: String,
+    /// Organization display name.
+    pub organization_display_name: String,
+    /// Project display name.
+    pub project_display_name: String,
+}
+
+/// Durable local user/session mutation produced by a verified `OIDC` callback.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OidcLoginCompletionRecord {
+    /// Consumed login attempt id.
+    pub login_attempt_id: String,
+    /// Owning tenant id.
+    pub tenant_id: String,
+    /// Default organization id repaired for the local user.
+    pub organization_id: String,
+    /// Default project id repaired for the local user.
+    pub project_id: String,
+    /// Local user principal id.
+    pub user_id: String,
+    /// `OIDC` identity provider id.
+    pub identity_provider_id: String,
+    /// External identity row id.
+    pub external_identity_id: String,
+    /// Organization membership id.
+    pub organization_member_id: String,
+    /// Project membership id.
+    pub project_member_id: String,
+    /// Organization-admin role binding id for the user's default organization.
+    pub organization_role_binding_id: String,
+    /// Provider subject from verified `OIDC` claims.
+    pub provider_subject: String,
+    /// Optional verified email metadata.
+    pub email: Option<String>,
+    /// Whether the email was provider-verified.
+    pub email_verified: bool,
+    /// User display name repaired from verified claims or operator policy.
+    pub user_display_name: String,
+    /// Default organization display name.
+    pub organization_display_name: String,
+    /// Default project display name.
+    pub project_display_name: String,
+    /// Auth session issued for the completed login.
+    pub session: PlatformAuthSessionRecord,
+    /// Completion time as a Unix timestamp in seconds.
+    pub consumed_at_unix: i64,
 }
 
 impl PostgresPlatformRepository {
@@ -458,6 +1785,90 @@ impl PostgresPlatformRepository {
     #[must_use]
     pub const fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Idempotently seeds or repairs durable local single-user resources.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` rejects one of the
+    /// bootstrap writes.
+    pub async fn bootstrap_single_user(&self, record: &SingleUserBootstrapRecord) -> Result<()> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(BOOTSTRAP_SINGLE_USER_TENANT_SQL)
+            .bind(&record.tenant_id)
+            .bind(&record.tenant_display_name)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(BOOTSTRAP_SINGLE_USER_ORGANIZATION_SQL)
+            .bind(&record.organization_id)
+            .bind(&record.tenant_id)
+            .bind(&record.organization_display_name)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(BOOTSTRAP_SINGLE_USER_PROJECT_SQL)
+            .bind(&record.project_id)
+            .bind(&record.tenant_id)
+            .bind(&record.organization_id)
+            .bind(&record.project_display_name)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(BOOTSTRAP_SINGLE_USER_PRINCIPAL_SQL)
+            .bind(&record.user_id)
+            .bind(&record.tenant_id)
+            .bind(&record.user_display_name)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(BOOTSTRAP_SINGLE_USER_USER_SQL)
+            .bind(&record.user_id)
+            .bind(&record.tenant_id)
+            .bind(&record.organization_id)
+            .bind(&record.project_id)
+            .bind(record.user_primary_email.as_deref())
+            .bind(&record.user_display_name)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(BOOTSTRAP_SINGLE_USER_ORGANIZATION_MEMBERSHIP_SQL)
+            .bind(&record.organization_member_id)
+            .bind(&record.tenant_id)
+            .bind(&record.organization_id)
+            .bind(&record.user_id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(BOOTSTRAP_SINGLE_USER_PROJECT_MEMBERSHIP_SQL)
+            .bind(&record.project_member_id)
+            .bind(&record.tenant_id)
+            .bind(&record.organization_id)
+            .bind(&record.project_id)
+            .bind(&record.user_id)
+            .bind(&record.organization_member_id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(BOOTSTRAP_SINGLE_USER_IDENTITY_PROVIDER_SQL)
+            .bind(&record.identity_provider_id)
+            .bind(&record.tenant_id)
+            .bind("Local single-user password")
+            .bind(&record.user_id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(BOOTSTRAP_SINGLE_USER_EXTERNAL_IDENTITY_SQL)
+            .bind(&record.external_identity_id)
+            .bind(&record.tenant_id)
+            .bind(&record.user_id)
+            .bind(&record.identity_provider_id)
+            .bind(&record.username)
+            .bind(record.user_primary_email.as_deref())
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(BOOTSTRAP_SINGLE_USER_ROLE_BINDING_SQL)
+            .bind(&record.role_binding_id)
+            .bind(&record.tenant_id)
+            .bind(&record.user_id)
+            .bind(BuiltInRole::TenantOwner.as_str())
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// Records or replaces an auth session.
@@ -512,6 +1923,74 @@ impl PostgresPlatformRepository {
             "principal_disabled" => Err(AuthError::PrincipalDisabled.into()),
             _ => Err(PlatformRepositoryError::UnknownSessionStatus(status)),
         }
+    }
+
+    /// Resolves a raw bearer token to an active durable auth session record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when the bearer token is empty,
+    /// unknown, revoked, expired, tied to a disabled principal, or when
+    /// `PostgreSQL` cannot be queried.
+    pub async fn auth_session_for_bearer(
+        &self,
+        raw_bearer: &str,
+    ) -> Result<PlatformAuthSessionRecord> {
+        let token_hash = session_token_hash_for_lookup(raw_bearer)?;
+        let Some(row) = sqlx::query(SELECT_AUTH_SESSION_RECORD_BY_TOKEN_SQL)
+            .bind(token_hash)
+            .fetch_optional(&self.pool)
+            .await?
+        else {
+            return Err(AuthError::SessionNotFound.into());
+        };
+        active_auth_session_from_row(&row)
+    }
+
+    /// Revokes an active durable auth session by raw bearer token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when the bearer token does not
+    /// resolve to an active session or when `PostgreSQL` cannot be queried.
+    pub async fn revoke_auth_session_by_bearer(
+        &self,
+        raw_bearer: &str,
+    ) -> Result<PlatformAuthSessionRecord> {
+        let token_hash = session_token_hash_for_lookup(raw_bearer)?;
+        let Some(row) = sqlx::query(REVOKE_AUTH_SESSION_BY_TOKEN_SQL)
+            .bind(token_hash)
+            .fetch_optional(&self.pool)
+            .await?
+        else {
+            return Err(AuthError::SessionRevoked.into());
+        };
+        auth_session_from_row(&row)
+    }
+
+    /// Updates active organization and project context for a durable auth session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when the bearer token does not
+    /// resolve to an active session or when `PostgreSQL` cannot be queried.
+    pub async fn update_auth_session_context_by_bearer(
+        &self,
+        raw_bearer: &str,
+        organization_id: Option<&str>,
+        project_id: Option<&str>,
+    ) -> Result<PlatformAuthSessionRecord> {
+        let token_hash = session_token_hash_for_lookup(raw_bearer)?;
+        let Some(row) = sqlx::query(UPDATE_AUTH_SESSION_CONTEXT_BY_TOKEN_SQL)
+            .bind(token_hash)
+            .bind(organization_id)
+            .bind(project_id)
+            .fetch_optional(&self.pool)
+            .await?
+        else {
+            return Err(AuthError::SessionRevoked.into());
+        };
+        active_auth_session_from_row(&row)
     }
 
     /// Records or replaces an API key or service-token bearer credential.
@@ -629,6 +2108,721 @@ impl PostgresPlatformRepository {
             "principal_disabled" => Err(AuthError::PrincipalDisabled.into()),
             _ => Err(PlatformRepositoryError::UnknownMtlsIdentityStatus(status)),
         }
+    }
+
+    /// Loads an active or inactive `OIDC` login provider by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried,
+    /// the provider status is not recognized, or the stored provider shape is
+    /// invalid.
+    pub async fn oidc_login_provider(
+        &self,
+        identity_provider_id: &str,
+    ) -> Result<Option<OidcLoginProviderRecord>> {
+        let row = sqlx::query(SELECT_OIDC_LOGIN_PROVIDER_SQL)
+            .bind(identity_provider_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| oidc_login_provider_from_row(&row))
+            .transpose()
+    }
+
+    /// Lists non-deleted `OIDC` login providers for one tenant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried or
+    /// a stored provider shape is invalid.
+    pub async fn oidc_login_providers_for_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<OidcLoginProviderRecord>> {
+        let rows = sqlx::query(LIST_OIDC_LOGIN_PROVIDERS_SQL)
+            .bind(tenant_id)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(oidc_login_provider_from_row).collect()
+    }
+
+    /// Creates or replaces an `OIDC` login provider and its authorization owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when validation fails or `PostgreSQL`
+    /// rejects the write.
+    pub async fn upsert_oidc_login_provider(
+        &self,
+        record: &OidcLoginProviderRecord,
+        created_by: &str,
+    ) -> Result<()> {
+        validate_oidc_login_provider_base(record)?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(UPSERT_OIDC_LOGIN_PROVIDER_SQL)
+            .bind(&record.identity_provider_id)
+            .bind(&record.tenant_id)
+            .bind(&record.display_name)
+            .bind(&record.issuer_url)
+            .bind(&record.authorization_endpoint)
+            .bind(&record.token_endpoint)
+            .bind(&record.jwks_uri)
+            .bind(&record.client_id)
+            .bind(record.client_secret_ref.as_deref())
+            .bind(record.token_endpoint_auth_method.as_str())
+            .bind(&record.redirect_uri)
+            .bind(serde_json::json!(&record.requested_scopes))
+            .bind(serde_json::json!(&record.accepted_audiences))
+            .bind(record.status.as_str())
+            .bind(created_by)
+            .execute(&mut *transaction)
+            .await?;
+        record_resource_owner_in_transaction(
+            &mut transaction,
+            &ResourceOwnerRecord::tenant(
+                "IdentityProvider",
+                &record.identity_provider_id,
+                &record.tenant_id,
+            ),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Creates or replaces safe secret-reference metadata and its authorization owner.
+    ///
+    /// Raw secret values are never stored by this repository. Only
+    /// environment-backed refs are accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when validation fails or `PostgreSQL`
+    /// rejects the write.
+    pub async fn upsert_secret_ref(
+        &self,
+        record: &PlatformSecretRefRecord,
+        created_by: &str,
+    ) -> Result<()> {
+        validate_secret_ref_record(record)?;
+        if record.backend_kind != ENVIRONMENT_SECRET_BACKEND {
+            return Err(PlatformSecretError::UnsupportedBackendKind.into());
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(UPSERT_SECRET_REF_SQL)
+            .bind(&record.secret_ref_id)
+            .bind(&record.tenant_id)
+            .bind(record.organization_id.as_deref())
+            .bind(record.project_id.as_deref())
+            .bind(&record.purpose)
+            .bind(&record.backend_kind)
+            .bind(&record.backend_locator)
+            .bind(&record.display_mask)
+            .bind(&record.fingerprint)
+            .bind(record.status.as_str())
+            .bind(created_by)
+            .execute(&mut *transaction)
+            .await?;
+        record_resource_owner_in_transaction(
+            &mut transaction,
+            &ResourceOwnerRecord::tenant("SecretRef", &record.secret_ref_id, &record.tenant_id),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Loads safe secret-reference metadata by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried or
+    /// a stored record shape is invalid.
+    pub async fn secret_ref(&self, secret_ref_id: &str) -> Result<Option<PlatformSecretRefRecord>> {
+        let row = sqlx::query(SELECT_SECRET_REF_SQL)
+            .bind(secret_ref_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| secret_ref_from_row(&row)).transpose()
+    }
+
+    /// Lists non-deleted secret-reference metadata for one tenant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried or
+    /// a stored record shape is invalid.
+    pub async fn secret_refs_for_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<PlatformSecretRefRecord>> {
+        let rows = sqlx::query(LIST_SECRET_REFS_SQL)
+            .bind(tenant_id)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(secret_ref_from_row).collect()
+    }
+
+    /// Resolves raw secret material through a stored environment-backed ref.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when the ref is unknown, inactive,
+    /// unsupported, missing from the environment, or fingerprint-mismatched.
+    pub async fn resolve_secret(&self, secret_ref_id: &str) -> Result<PlatformSecretValue> {
+        let record = self
+            .secret_ref(secret_ref_id)
+            .await?
+            .ok_or(PlatformSecretError::UnknownSecretRef)?;
+        resolve_environment_secret(&record).map_err(Into::into)
+    }
+
+    /// Lists organization memberships for one organization.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried or
+    /// a stored record shape is invalid.
+    pub async fn organization_members_for_organization(
+        &self,
+        organization_id: &str,
+    ) -> Result<Vec<PlatformOrganizationMembershipRecord>> {
+        let rows = sqlx::query(LIST_ORGANIZATION_MEMBERS_SQL)
+            .bind(organization_id)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(organization_member_from_row).collect()
+    }
+
+    /// Loads an organization membership by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried or
+    /// a stored record shape is invalid.
+    pub async fn organization_member(
+        &self,
+        organization_member_id: &str,
+    ) -> Result<Option<PlatformOrganizationMembershipRecord>> {
+        let row = sqlx::query(SELECT_ORGANIZATION_MEMBER_SQL)
+            .bind(organization_member_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| organization_member_from_row(&row))
+            .transpose()
+    }
+
+    /// Updates an organization membership status with optimistic concurrency.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when validation fails, the expected
+    /// version is stale, or `PostgreSQL` rejects the write.
+    pub async fn update_organization_member_status(
+        &self,
+        organization_member_id: &str,
+        expected_resource_version: i64,
+        status: PlatformMembershipStatus,
+    ) -> Result<PlatformOrganizationMembershipRecord> {
+        let row = sqlx::query(UPDATE_ORGANIZATION_MEMBER_STATUS_SQL)
+            .bind(organization_member_id)
+            .bind(status.as_str())
+            .bind(expected_resource_version)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else {
+            return Err(PlatformMembershipError::StaleResourceVersion.into());
+        };
+        organization_member_from_row(&row)
+    }
+
+    /// Creates or reactivates an organization membership.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when validation fails or `PostgreSQL`
+    /// rejects the write.
+    pub async fn upsert_organization_member(
+        &self,
+        request: PlatformOrganizationMembershipUpsert<'_>,
+    ) -> Result<PlatformOrganizationMembershipRecord> {
+        let candidate = PlatformOrganizationMembershipRecord {
+            organization_member_id: request.organization_member_id.to_owned(),
+            tenant_id: request.tenant_id.to_owned(),
+            organization_id: request.organization_id.to_owned(),
+            principal_id: request.principal_id.to_owned(),
+            membership_kind: request.membership_kind.to_owned(),
+            status: PlatformMembershipStatus::Active,
+            resource_version: 1,
+        };
+        validate_organization_member(&candidate)?;
+        let row = sqlx::query(UPSERT_ORGANIZATION_MEMBER_SQL)
+            .bind(request.organization_member_id)
+            .bind(request.tenant_id)
+            .bind(request.organization_id)
+            .bind(request.principal_id)
+            .bind(request.membership_kind)
+            .bind(request.created_by)
+            .fetch_one(&self.pool)
+            .await?;
+        organization_member_from_row(&row)
+    }
+
+    /// Lists project memberships for one project.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried or
+    /// a stored record shape is invalid.
+    pub async fn project_members_for_project(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<PlatformProjectMembershipRecord>> {
+        let rows = sqlx::query(LIST_PROJECT_MEMBERS_SQL)
+            .bind(project_id)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(project_member_from_row).collect()
+    }
+
+    /// Loads a project membership by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried or
+    /// a stored record shape is invalid.
+    pub async fn project_member(
+        &self,
+        project_member_id: &str,
+    ) -> Result<Option<PlatformProjectMembershipRecord>> {
+        let row = sqlx::query(SELECT_PROJECT_MEMBER_SQL)
+            .bind(project_member_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| project_member_from_row(&row)).transpose()
+    }
+
+    /// Updates a project membership status with optimistic concurrency.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when validation fails, the expected
+    /// version is stale, or `PostgreSQL` rejects the write.
+    pub async fn update_project_member_status(
+        &self,
+        project_member_id: &str,
+        expected_resource_version: i64,
+        status: PlatformMembershipStatus,
+    ) -> Result<PlatformProjectMembershipRecord> {
+        let row = sqlx::query(UPDATE_PROJECT_MEMBER_STATUS_SQL)
+            .bind(project_member_id)
+            .bind(status.as_str())
+            .bind(expected_resource_version)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else {
+            return Err(PlatformMembershipError::StaleResourceVersion.into());
+        };
+        project_member_from_row(&row)
+    }
+
+    /// Creates or reactivates a project membership from an active organization membership.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when validation fails or `PostgreSQL`
+    /// rejects the write.
+    pub async fn upsert_project_member(
+        &self,
+        request: PlatformProjectMembershipUpsert<'_>,
+    ) -> Result<PlatformProjectMembershipRecord> {
+        let candidate = PlatformProjectMembershipRecord {
+            project_member_id: request.project_member_id.to_owned(),
+            tenant_id: request.tenant_id.to_owned(),
+            organization_id: request.organization_id.to_owned(),
+            project_id: request.project_id.to_owned(),
+            principal_id: request.principal_id.to_owned(),
+            organization_member_id: Some(request.organization_member_id.to_owned()),
+            membership_kind: request.membership_kind.to_owned(),
+            status: PlatformMembershipStatus::Active,
+            resource_version: 1,
+        };
+        validate_project_member(&candidate)?;
+        let row = sqlx::query(UPSERT_PROJECT_MEMBER_SQL)
+            .bind(request.project_member_id)
+            .bind(request.tenant_id)
+            .bind(request.organization_id)
+            .bind(request.project_id)
+            .bind(request.principal_id)
+            .bind(request.organization_member_id)
+            .bind(request.membership_kind)
+            .bind(request.created_by)
+            .fetch_one(&self.pool)
+            .await?;
+        project_member_from_row(&row)
+    }
+
+    /// Cascades organization membership suspension/removal to child project memberships.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried.
+    pub async fn cascade_project_memberships_for_organization_member(
+        &self,
+        organization_member: &PlatformOrganizationMembershipRecord,
+        status: PlatformMembershipStatus,
+    ) -> Result<usize> {
+        if status == PlatformMembershipStatus::Active {
+            return Ok(0);
+        }
+        let rows = sqlx::query(CASCADE_PROJECT_MEMBERS_FOR_ORGANIZATION_MEMBER_SQL)
+            .bind(&organization_member.tenant_id)
+            .bind(&organization_member.organization_id)
+            .bind(&organization_member.principal_id)
+            .bind(status.as_str())
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.len())
+    }
+
+    /// Creates an organization invitation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when validation fails or `PostgreSQL`
+    /// rejects the write.
+    pub async fn create_organization_invitation(
+        &self,
+        invitation: &PlatformOrganizationInvitationRecord,
+    ) -> Result<PlatformOrganizationInvitationRecord> {
+        validate_organization_invitation(invitation)?;
+        sqlx::query(INSERT_ORGANIZATION_INVITATION_SQL)
+            .bind(&invitation.invitation_id)
+            .bind(&invitation.tenant_id)
+            .bind(&invitation.organization_id)
+            .bind(invitation.project_id.as_deref())
+            .bind(invitation.invited_email.as_deref())
+            .bind(invitation.invited_principal_id.as_deref())
+            .bind(&invitation.invitation_token_hash)
+            .bind(&invitation.role_id)
+            .bind(invitation.status.as_str())
+            .bind(invitation.expires_at_unix)
+            .bind(&invitation.created_by)
+            .bind(invitation.resource_version)
+            .bind(invitation.created_at_unix)
+            .bind(invitation.updated_at_unix)
+            .execute(&self.pool)
+            .await?;
+        Ok(invitation.clone())
+    }
+
+    /// Lists organization invitations for one organization.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried or
+    /// a stored record shape is invalid.
+    pub async fn organization_invitations(
+        &self,
+        tenant_id: &str,
+        organization_id: &str,
+    ) -> Result<Vec<PlatformOrganizationInvitationRecord>> {
+        let rows = sqlx::query(LIST_ORGANIZATION_INVITATIONS_SQL)
+            .bind(tenant_id)
+            .bind(organization_id)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(organization_invitation_from_row).collect()
+    }
+
+    /// Loads an organization invitation by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried or
+    /// a stored record shape is invalid.
+    pub async fn organization_invitation(
+        &self,
+        invitation_id: &str,
+    ) -> Result<Option<PlatformOrganizationInvitationRecord>> {
+        let row = sqlx::query(SELECT_ORGANIZATION_INVITATION_SQL)
+            .bind(invitation_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| organization_invitation_from_row(&row))
+            .transpose()
+    }
+
+    /// Loads an organization invitation by raw-token hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried or
+    /// a stored record shape is invalid.
+    pub async fn organization_invitation_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<PlatformOrganizationInvitationRecord>> {
+        let row = sqlx::query(SELECT_ORGANIZATION_INVITATION_BY_TOKEN_HASH_SQL)
+            .bind(token_hash)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| organization_invitation_from_row(&row))
+            .transpose()
+    }
+
+    /// Revokes a pending organization invitation with optimistic concurrency.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when the invitation is stale,
+    /// non-pending, or `PostgreSQL` rejects the write.
+    pub async fn revoke_organization_invitation(
+        &self,
+        invitation_id: &str,
+        expected_resource_version: i64,
+        now_unix: i64,
+    ) -> Result<PlatformOrganizationInvitationRecord> {
+        let row = sqlx::query(REVOKE_ORGANIZATION_INVITATION_SQL)
+            .bind(invitation_id)
+            .bind(expected_resource_version)
+            .bind(now_unix)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else {
+            return Err(PlatformInvitationError::StaleResourceVersion.into());
+        };
+        organization_invitation_from_row(&row)
+    }
+
+    /// Accepts an invitation and upserts the resulting memberships in one transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when the invitation is unavailable,
+    /// expired, mismatched, or `PostgreSQL` rejects any write.
+    pub async fn accept_organization_invitation(
+        &self,
+        request: &AcceptPlatformOrganizationInvitationRequest,
+    ) -> Result<(
+        PlatformOrganizationInvitationRecord,
+        PlatformOrganizationMembershipRecord,
+        Option<PlatformProjectMembershipRecord>,
+    )> {
+        let mut transaction = self.pool.begin().await?;
+        let before = sqlx::query(SELECT_ORGANIZATION_INVITATION_SQL)
+            .bind(&request.invitation_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .map(|row| organization_invitation_from_row(&row))
+            .transpose()?
+            .ok_or(PlatformInvitationError::InvalidInvitationId)?;
+        if !before
+            .status
+            .accepts_at(before.expires_at_unix, request.accepted_at_unix)
+        {
+            return Err(PlatformInvitationError::InvitationNotAccepting.into());
+        }
+        if before.invited_principal_id.as_deref() != Some(request.principal_id.as_str()) {
+            return Err(PlatformInvitationError::InvitationPrincipalMismatch.into());
+        }
+        let accepted = sqlx::query(ACCEPT_ORGANIZATION_INVITATION_SQL)
+            .bind(&request.invitation_id)
+            .bind(request.accepted_at_unix)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(PlatformRepositoryError::from)?
+            .map(|row| organization_invitation_from_row(&row))
+            .transpose()?
+            .ok_or(PlatformInvitationError::InvitationNotAccepting)?;
+        let organization_member = sqlx::query(UPSERT_INVITED_ORGANIZATION_MEMBER_SQL)
+            .bind(&request.organization_member_id)
+            .bind(&accepted.tenant_id)
+            .bind(&accepted.organization_id)
+            .bind(&request.principal_id)
+            .bind(request.accepted_at_unix)
+            .fetch_one(&mut *transaction)
+            .await
+            .map(|row| organization_member_from_row(&row))??;
+        let project_member = if let Some(project_id) = accepted.project_id.as_deref() {
+            let project_member_id = request
+                .project_member_id
+                .as_deref()
+                .ok_or(PlatformMembershipError::InvalidMembershipId)?;
+            Some(
+                sqlx::query(UPSERT_INVITED_PROJECT_MEMBER_SQL)
+                    .bind(project_member_id)
+                    .bind(&accepted.tenant_id)
+                    .bind(&accepted.organization_id)
+                    .bind(project_id)
+                    .bind(&request.principal_id)
+                    .bind(&organization_member.organization_member_id)
+                    .bind(request.accepted_at_unix)
+                    .fetch_one(&mut *transaction)
+                    .await
+                    .map(|row| project_member_from_row(&row))??,
+            )
+        } else {
+            None
+        };
+        transaction.commit().await?;
+        Ok((accepted, organization_member, project_member))
+    }
+
+    /// Records or replaces an `OIDC` login attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when validation fails or `PostgreSQL`
+    /// rejects the write.
+    pub async fn record_oidc_login_attempt(&self, record: &OidcLoginAttemptRecord) -> Result<()> {
+        validate_oidc_login_attempt_record(record)?;
+        sqlx::query(RECORD_OIDC_LOGIN_ATTEMPT_SQL)
+            .bind(&record.login_attempt_id)
+            .bind(&record.tenant_id)
+            .bind(&record.identity_provider_id)
+            .bind(&record.state_hash)
+            .bind(&record.nonce_hash)
+            .bind(&record.pkce_verifier_hash)
+            .bind(&record.redirect_uri)
+            .bind(oidc_login_attempt_status_as_str(record.status))
+            .bind(record.expires_at_unix)
+            .bind(record.consumed_at_unix)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Looks up an `OIDC` login attempt by raw OAuth state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when the state is empty,
+    /// `PostgreSQL` cannot be queried, or a stored record has an invalid shape.
+    pub async fn oidc_login_attempt_for_state(
+        &self,
+        raw_state: &str,
+    ) -> Result<Option<OidcLoginAttemptRecord>> {
+        let state_hash = oidc_state_hash_for_lookup(raw_state)?;
+        let row = sqlx::query(SELECT_OIDC_LOGIN_ATTEMPT_BY_STATE_SQL)
+            .bind(state_hash)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| oidc_login_attempt_from_row(&row)).transpose()
+    }
+
+    /// Completes a verified `OIDC` login in one durable transaction.
+    ///
+    /// The transaction consumes the one-time login attempt, repairs the local
+    /// user default organization and project, links the external identity, and
+    /// records the issued session. It does not verify token signatures; callers
+    /// must pass only already-verified claims and a pre-hashed session record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when validation fails, the attempt is
+    /// unavailable, the external identity already belongs to another principal,
+    /// or `PostgreSQL` rejects one of the writes.
+    pub async fn complete_oidc_login(&self, record: &OidcLoginCompletionRecord) -> Result<()> {
+        validate_oidc_login_completion_record(record)?;
+        let mut transaction = self.pool.begin().await?;
+
+        let consume = sqlx::query(CONSUME_OIDC_LOGIN_ATTEMPT_SQL)
+            .bind(&record.login_attempt_id)
+            .bind(record.consumed_at_unix)
+            .bind(&record.tenant_id)
+            .bind(&record.identity_provider_id)
+            .execute(&mut *transaction)
+            .await?;
+        if consume.rows_affected() != 1 {
+            return Err(PlatformRepositoryError::OidcLoginAttemptUnavailable(
+                record.login_attempt_id.clone(),
+            ));
+        }
+
+        sqlx::query(UPSERT_OIDC_USER_ORGANIZATION_SQL)
+            .bind(&record.organization_id)
+            .bind(&record.tenant_id)
+            .bind(&record.organization_display_name)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(UPSERT_OIDC_USER_PROJECT_SQL)
+            .bind(&record.project_id)
+            .bind(&record.tenant_id)
+            .bind(&record.organization_id)
+            .bind(&record.project_display_name)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(UPSERT_OIDC_USER_PRINCIPAL_SQL)
+            .bind(&record.user_id)
+            .bind(&record.tenant_id)
+            .bind(&record.user_display_name)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(UPSERT_OIDC_USER_SQL)
+            .bind(&record.user_id)
+            .bind(&record.tenant_id)
+            .bind(&record.organization_id)
+            .bind(&record.project_id)
+            .bind(record.email.as_deref())
+            .bind(&record.user_display_name)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(UPSERT_OIDC_ORGANIZATION_MEMBERSHIP_SQL)
+            .bind(&record.organization_member_id)
+            .bind(&record.tenant_id)
+            .bind(&record.organization_id)
+            .bind(&record.user_id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(UPSERT_OIDC_PROJECT_MEMBERSHIP_SQL)
+            .bind(&record.project_member_id)
+            .bind(&record.tenant_id)
+            .bind(&record.organization_id)
+            .bind(&record.project_id)
+            .bind(&record.user_id)
+            .bind(&record.organization_member_id)
+            .execute(&mut *transaction)
+            .await?;
+        let external_identity = sqlx::query(UPSERT_OIDC_EXTERNAL_IDENTITY_SQL)
+            .bind(&record.external_identity_id)
+            .bind(&record.tenant_id)
+            .bind(&record.user_id)
+            .bind(&record.identity_provider_id)
+            .bind(&record.provider_subject)
+            .bind(record.email.as_deref())
+            .bind(record.email_verified)
+            .execute(&mut *transaction)
+            .await?;
+        if external_identity.rows_affected() != 1 {
+            return Err(
+                PlatformRepositoryError::OidcExternalIdentityPrincipalMismatch(
+                    record.provider_subject.clone(),
+                ),
+            );
+        }
+        sqlx::query(UPSERT_OIDC_ORGANIZATION_ADMIN_ROLE_SQL)
+            .bind(&record.organization_role_binding_id)
+            .bind(&record.tenant_id)
+            .bind(&record.organization_id)
+            .bind(&record.user_id)
+            .bind(BuiltInRole::OrganizationAdmin.as_str())
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(RECORD_OIDC_AUTH_SESSION_SQL)
+            .bind(&record.session.session_id)
+            .bind(&record.tenant_id)
+            .bind(&record.organization_id)
+            .bind(&record.project_id)
+            .bind(&record.user_id)
+            .bind(&record.identity_provider_id)
+            .bind(&record.session.token_hash)
+            .bind(record.session.status.as_str())
+            .execute(&mut *transaction)
+            .await?;
+
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// Records or replaces resource ownership metadata.
@@ -946,6 +3140,90 @@ fn validate_mtls_identity_record(record: &PlatformMtlsIdentityRecord) -> Result<
     Ok(())
 }
 
+fn validate_oidc_login_completion_record(record: &OidcLoginCompletionRecord) -> Result<()> {
+    validate_prefixed_id(
+        &record.login_attempt_id,
+        "ola_",
+        OidcValidationError::InvalidLoginAttemptId,
+    )?;
+    validate_prefixed_id(
+        &record.tenant_id,
+        "ten_",
+        OidcValidationError::InvalidTenantId,
+    )?;
+    validate_prefixed_id(
+        &record.organization_id,
+        "org_",
+        OidcValidationError::InvalidOrganizationId,
+    )?;
+    validate_prefixed_id(
+        &record.project_id,
+        "prj_",
+        OidcValidationError::InvalidProjectId,
+    )?;
+    validate_prefixed_id(&record.user_id, "usr_", OidcValidationError::InvalidUserId)?;
+    validate_prefixed_id(
+        &record.identity_provider_id,
+        "idp_",
+        OidcValidationError::InvalidProviderId,
+    )?;
+    validate_prefixed_id(
+        &record.external_identity_id,
+        "xid_",
+        OidcValidationError::InvalidExternalIdentityId,
+    )?;
+    validate_prefixed_id(
+        &record.organization_member_id,
+        "om_",
+        OidcValidationError::InvalidMembershipId,
+    )?;
+    validate_prefixed_id(
+        &record.project_member_id,
+        "pm_",
+        OidcValidationError::InvalidMembershipId,
+    )?;
+    validate_prefixed_id(
+        &record.organization_role_binding_id,
+        "rb_",
+        OidcValidationError::InvalidRoleBindingId,
+    )?;
+    if record.provider_subject.trim().is_empty() {
+        return Err(OidcValidationError::SubjectRequired.into());
+    }
+    if record.user_display_name.trim().is_empty()
+        || record.organization_display_name.trim().is_empty()
+        || record.project_display_name.trim().is_empty()
+    {
+        return Err(OidcValidationError::DisplayNameRequired.into());
+    }
+    if record.consumed_at_unix <= 0 {
+        return Err(OidcValidationError::InvalidAttemptExpiry.into());
+    }
+    validate_auth_session_record(&record.session)?;
+    if record.session.status != PlatformAuthSessionStatus::Active {
+        return Err(AuthError::SessionExpired.into());
+    }
+    if record.session.actor.tenant_id != record.tenant_id
+        || record.session.actor.organization_id.as_deref() != Some(record.organization_id.as_str())
+        || record.session.actor.project_id.as_deref() != Some(record.project_id.as_str())
+        || record.session.actor.principal_id != record.user_id
+        || record.session.actor.actor_kind != ActorKind::User
+    {
+        return Err(PlatformRepositoryError::OidcSessionActorMismatch(
+            record.session.session_id.clone(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_prefixed_id(value: &str, prefix: &str, error: OidcValidationError) -> Result<()> {
+    if value.starts_with(prefix) {
+        Ok(())
+    } else {
+        Err(error.into())
+    }
+}
+
 fn validate_resource_owner_record(record: &ResourceOwnerRecord) -> Result<()> {
     if record.resource_kind.trim().is_empty() {
         return Err(StoreError::EmptyResourceKind.into());
@@ -994,6 +3272,14 @@ fn mtls_subject_for_lookup(subject: &str) -> Result<String> {
     Ok(subject.to_owned())
 }
 
+fn oidc_state_hash_for_lookup(raw_state: &str) -> Result<String> {
+    let raw_state = raw_state.trim();
+    if raw_state.is_empty() {
+        return Err(OidcValidationError::EmptyState.into());
+    }
+    Ok(hash_oidc_login_state(raw_state))
+}
+
 const fn actor_kind_as_str(actor_kind: ActorKind) -> &'static str {
     match actor_kind {
         ActorKind::User => "user",
@@ -1011,6 +3297,73 @@ fn actor_kind_from_str(value: &str) -> Result<ActorKind> {
     }
 }
 
+fn auth_session_status_from_str(value: &str) -> Result<PlatformAuthSessionStatus> {
+    match value {
+        "active" => Ok(PlatformAuthSessionStatus::Active),
+        "revoked" => Ok(PlatformAuthSessionStatus::Revoked),
+        "expired" => Ok(PlatformAuthSessionStatus::Expired),
+        "principal_disabled" => Ok(PlatformAuthSessionStatus::PrincipalDisabled),
+        _ => Err(PlatformRepositoryError::UnknownSessionStatus(
+            value.to_owned(),
+        )),
+    }
+}
+
+fn oidc_login_provider_status_from_str(value: &str) -> Result<OidcLoginProviderStatus> {
+    match value {
+        "active" => Ok(OidcLoginProviderStatus::Active),
+        "disabled" => Ok(OidcLoginProviderStatus::Disabled),
+        "deleted" => Ok(OidcLoginProviderStatus::Deleted),
+        _ => Err(PlatformRepositoryError::UnknownOidcLoginProviderStatus(
+            value.to_owned(),
+        )),
+    }
+}
+
+fn oidc_token_endpoint_auth_method_from_str(value: &str) -> Result<OidcTokenEndpointAuthMethod> {
+    OidcTokenEndpointAuthMethod::from_id(value).ok_or(PlatformRepositoryError::Identity(
+        OidcValidationError::InvalidTokenEndpointAuthMethod,
+    ))
+}
+
+const fn oidc_login_attempt_status_as_str(status: OidcLoginAttemptStatus) -> &'static str {
+    status.as_str()
+}
+
+fn oidc_login_attempt_status_from_str(value: &str) -> Result<OidcLoginAttemptStatus> {
+    match value {
+        "active" => Ok(OidcLoginAttemptStatus::Active),
+        "consumed" => Ok(OidcLoginAttemptStatus::Consumed),
+        "expired" => Ok(OidcLoginAttemptStatus::Expired),
+        "abandoned" => Ok(OidcLoginAttemptStatus::Abandoned),
+        _ => Err(PlatformRepositoryError::UnknownOidcLoginAttemptStatus(
+            value.to_owned(),
+        )),
+    }
+}
+
+fn secret_ref_status_from_str(value: &str) -> Result<PlatformSecretRefStatus> {
+    match value {
+        "active" => Ok(PlatformSecretRefStatus::Active),
+        "rotating" => Ok(PlatformSecretRefStatus::Rotating),
+        "disabled" => Ok(PlatformSecretRefStatus::Disabled),
+        "deleted" => Ok(PlatformSecretRefStatus::Deleted),
+        _ => Err(PlatformRepositoryError::UnknownSecretRefStatus(
+            value.to_owned(),
+        )),
+    }
+}
+
+fn membership_status_from_str(value: &str) -> Result<PlatformMembershipStatus> {
+    PlatformMembershipStatus::from_id(value)
+        .ok_or_else(|| PlatformRepositoryError::UnknownMembershipStatus(value.to_owned()))
+}
+
+fn invitation_status_from_str(value: &str) -> Result<PlatformInvitationStatus> {
+    PlatformInvitationStatus::from_id(value)
+        .ok_or_else(|| PlatformRepositoryError::UnknownInvitationStatus(value.to_owned()))
+}
+
 fn actor_from_row(row: &PgRow) -> Result<AuthenticatedActor> {
     let actor_kind = actor_kind_from_str(&row.try_get::<String, _>("actor_kind")?)?;
     Ok(AuthenticatedActor {
@@ -1020,6 +3373,164 @@ fn actor_from_row(row: &PgRow) -> Result<AuthenticatedActor> {
         principal_id: row.try_get("principal_id")?,
         actor_kind,
     })
+}
+
+fn auth_session_from_row(row: &PgRow) -> Result<PlatformAuthSessionRecord> {
+    let token_expired = row.try_get::<bool, _>("token_expired")?;
+    let status = if token_expired {
+        PlatformAuthSessionStatus::Expired
+    } else {
+        auth_session_status_from_str(&row.try_get::<String, _>("status")?)?
+    };
+    let record = PlatformAuthSessionRecord {
+        session_id: row.try_get("auth_session_id")?,
+        token_hash: row.try_get("token_hash")?,
+        actor: actor_from_row(row)?,
+        status,
+    };
+    validate_auth_session_record(&record)?;
+    Ok(record)
+}
+
+fn active_auth_session_from_row(row: &PgRow) -> Result<PlatformAuthSessionRecord> {
+    let record = auth_session_from_row(row)?;
+    match record.status {
+        PlatformAuthSessionStatus::Active => Ok(record),
+        PlatformAuthSessionStatus::Revoked => Err(AuthError::SessionRevoked.into()),
+        PlatformAuthSessionStatus::Expired => Err(AuthError::SessionExpired.into()),
+        PlatformAuthSessionStatus::PrincipalDisabled => Err(AuthError::PrincipalDisabled.into()),
+    }
+}
+
+fn oidc_login_provider_from_row(row: &PgRow) -> Result<OidcLoginProviderRecord> {
+    let status = oidc_login_provider_status_from_str(&row.try_get::<String, _>("status")?)?;
+    let token_endpoint_auth_method = oidc_token_endpoint_auth_method_from_str(
+        &row.try_get::<String, _>("token_endpoint_auth_method")?,
+    )?;
+    let requested_scopes = row.try_get::<serde_json::Value, _>("requested_scopes")?;
+    let oidc_audiences = row.try_get::<serde_json::Value, _>("oidc_audiences")?;
+    let record = OidcLoginProviderRecord {
+        identity_provider_id: row.try_get("identity_provider_id")?,
+        tenant_id: row.try_get("tenant_id")?,
+        display_name: row.try_get("display_name")?,
+        issuer_url: row.try_get("issuer_url")?,
+        authorization_endpoint: row.try_get("authorization_endpoint")?,
+        token_endpoint: row.try_get("token_endpoint")?,
+        jwks_uri: row.try_get("jwks_uri")?,
+        client_id: row.try_get("client_id")?,
+        client_secret_ref: row.try_get("client_secret_ref")?,
+        token_endpoint_auth_method,
+        redirect_uri: row.try_get("redirect_uri")?,
+        requested_scopes: json_string_array(&requested_scopes),
+        accepted_audiences: json_string_array(&oidc_audiences),
+        status,
+    };
+    validate_oidc_login_provider_base(&record)?;
+    Ok(record)
+}
+
+fn secret_ref_from_row(row: &PgRow) -> Result<PlatformSecretRefRecord> {
+    let status = secret_ref_status_from_str(&row.try_get::<String, _>("status")?)?;
+    let record = PlatformSecretRefRecord {
+        secret_ref_id: row.try_get("secret_ref_id")?,
+        tenant_id: row.try_get("tenant_id")?,
+        organization_id: row.try_get("organization_id")?,
+        project_id: row.try_get("project_id")?,
+        purpose: row.try_get("purpose")?,
+        backend_kind: row.try_get("backend_kind")?,
+        backend_locator: row.try_get("backend_locator")?,
+        display_mask: row.try_get("display_mask")?,
+        fingerprint: row.try_get("fingerprint")?,
+        status,
+    };
+    validate_secret_ref_record(&record)?;
+    Ok(record)
+}
+
+fn organization_member_from_row(row: &PgRow) -> Result<PlatformOrganizationMembershipRecord> {
+    let status = membership_status_from_str(&row.try_get::<String, _>("status")?)?;
+    let record = PlatformOrganizationMembershipRecord {
+        organization_member_id: row.try_get("organization_member_id")?,
+        tenant_id: row.try_get("tenant_id")?,
+        organization_id: row.try_get("organization_id")?,
+        principal_id: row.try_get("principal_id")?,
+        membership_kind: row.try_get("membership_kind")?,
+        status,
+        resource_version: row.try_get("resource_version")?,
+    };
+    validate_organization_member(&record)?;
+    Ok(record)
+}
+
+fn project_member_from_row(row: &PgRow) -> Result<PlatformProjectMembershipRecord> {
+    let status = membership_status_from_str(&row.try_get::<String, _>("status")?)?;
+    let record = PlatformProjectMembershipRecord {
+        project_member_id: row.try_get("project_member_id")?,
+        tenant_id: row.try_get("tenant_id")?,
+        organization_id: row.try_get("organization_id")?,
+        project_id: row.try_get("project_id")?,
+        principal_id: row.try_get("principal_id")?,
+        organization_member_id: row.try_get("organization_member_id")?,
+        membership_kind: row.try_get("membership_kind")?,
+        status,
+        resource_version: row.try_get("resource_version")?,
+    };
+    validate_project_member(&record)?;
+    Ok(record)
+}
+
+fn organization_invitation_from_row(row: &PgRow) -> Result<PlatformOrganizationInvitationRecord> {
+    let status = invitation_status_from_str(&row.try_get::<String, _>("status")?)?;
+    let record = PlatformOrganizationInvitationRecord {
+        invitation_id: row.try_get("invitation_id")?,
+        tenant_id: row.try_get("tenant_id")?,
+        organization_id: row.try_get("organization_id")?,
+        project_id: row.try_get("project_id")?,
+        invited_email: row.try_get("invited_email")?,
+        invited_principal_id: row.try_get("invited_principal_id")?,
+        invitation_token_hash: row.try_get("invitation_token_hash")?,
+        role_id: row.try_get("role_id")?,
+        status,
+        expires_at_unix: row.try_get("expires_at_unix")?,
+        accepted_at_unix: row.try_get("accepted_at_unix")?,
+        created_by: row.try_get("created_by")?,
+        resource_version: row.try_get("resource_version")?,
+        created_at_unix: row.try_get("created_at_unix")?,
+        updated_at_unix: row.try_get("updated_at_unix")?,
+    };
+    validate_organization_invitation(&record)?;
+    Ok(record)
+}
+
+fn json_string_array(value: &serde_json::Value) -> Vec<String> {
+    let Some(items) = value.as_array() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn oidc_login_attempt_from_row(row: &PgRow) -> Result<OidcLoginAttemptRecord> {
+    let status = oidc_login_attempt_status_from_str(&row.try_get::<String, _>("status")?)?;
+    let record = OidcLoginAttemptRecord {
+        login_attempt_id: row.try_get("oidc_login_attempt_id")?,
+        tenant_id: row.try_get("tenant_id")?,
+        identity_provider_id: row.try_get("identity_provider_id")?,
+        state_hash: row.try_get("state_hash")?,
+        nonce_hash: row.try_get("nonce_hash")?,
+        pkce_verifier_hash: row.try_get("pkce_verifier_hash")?,
+        redirect_uri: row.try_get("redirect_uri")?,
+        status,
+        expires_at_unix: row.try_get("expires_at_unix")?,
+        consumed_at_unix: row.try_get("consumed_at_unix")?,
+    };
+    validate_oidc_login_attempt_record(&record)?;
+    Ok(record)
 }
 
 fn resource_owner_from_row(row: &PgRow) -> Result<ResourceOwnerRecord> {
@@ -1066,15 +3577,40 @@ mod tests {
         PlatformAuthSessionStatus, PlatformBearerCredentialKind, PlatformBearerCredentialRecord,
         PlatformBearerCredentialStatus, PlatformMtlsIdentityRecord, PlatformMtlsIdentityStatus,
     };
+    use crate::identity::{
+        hash_oidc_login_state, validate_oidc_login_attempt_record, OidcLoginAttemptRecord,
+        OidcLoginAttemptStart, OidcLoginAttemptStatus, OidcValidationError,
+    };
     use crate::postgres::{
         actor_kind_as_str, actor_kind_from_str, bearer_credential_hash_for_lookup,
-        business_resource_table, mtls_subject_for_lookup, project_scope,
+        business_resource_table, mtls_subject_for_lookup, oidc_login_attempt_status_as_str,
+        oidc_login_attempt_status_from_str, oidc_state_hash_for_lookup, project_scope,
         session_token_hash_for_lookup, validate_auth_session_record,
         validate_bearer_credential_record, validate_mtls_identity_record,
-        validate_platform_resource_record, PlatformRepositoryError, RECORD_AUTH_SESSION_SQL,
-        RECORD_BEARER_CREDENTIAL_SQL, RECORD_MTLS_IDENTITY_SQL, RECORD_RESOURCE_OWNER_SQL,
+        validate_oidc_login_completion_record, validate_platform_resource_record,
+        OidcLoginCompletionRecord, PlatformRepositoryError, ACCEPT_ORGANIZATION_INVITATION_SQL,
+        BOOTSTRAP_SINGLE_USER_EXTERNAL_IDENTITY_SQL, BOOTSTRAP_SINGLE_USER_IDENTITY_PROVIDER_SQL,
+        BOOTSTRAP_SINGLE_USER_ORGANIZATION_MEMBERSHIP_SQL, BOOTSTRAP_SINGLE_USER_ORGANIZATION_SQL,
+        BOOTSTRAP_SINGLE_USER_PRINCIPAL_SQL, BOOTSTRAP_SINGLE_USER_PROJECT_MEMBERSHIP_SQL,
+        BOOTSTRAP_SINGLE_USER_PROJECT_SQL, BOOTSTRAP_SINGLE_USER_ROLE_BINDING_SQL,
+        BOOTSTRAP_SINGLE_USER_TENANT_SQL, BOOTSTRAP_SINGLE_USER_USER_SQL,
+        CASCADE_PROJECT_MEMBERS_FOR_ORGANIZATION_MEMBER_SQL, CONSUME_OIDC_LOGIN_ATTEMPT_SQL,
+        INSERT_ORGANIZATION_INVITATION_SQL, LIST_OIDC_LOGIN_PROVIDERS_SQL,
+        LIST_ORGANIZATION_INVITATIONS_SQL, LIST_ORGANIZATION_MEMBERS_SQL, LIST_PROJECT_MEMBERS_SQL,
+        LIST_SECRET_REFS_SQL, RECORD_AUTH_SESSION_SQL, RECORD_BEARER_CREDENTIAL_SQL,
+        RECORD_MTLS_IDENTITY_SQL, RECORD_OIDC_AUTH_SESSION_SQL, RECORD_OIDC_LOGIN_ATTEMPT_SQL,
+        RECORD_RESOURCE_OWNER_SQL, REVOKE_ORGANIZATION_INVITATION_SQL,
         SELECT_AUTH_SESSION_BY_TOKEN_SQL, SELECT_BEARER_CREDENTIAL_BY_TOKEN_SQL,
-        SELECT_MTLS_IDENTITY_BY_SUBJECT_SQL,
+        SELECT_MTLS_IDENTITY_BY_SUBJECT_SQL, SELECT_OIDC_LOGIN_ATTEMPT_BY_STATE_SQL,
+        SELECT_OIDC_LOGIN_PROVIDER_SQL, SELECT_ORGANIZATION_INVITATION_BY_TOKEN_HASH_SQL,
+        SELECT_ORGANIZATION_INVITATION_SQL, SELECT_ORGANIZATION_MEMBER_SQL,
+        SELECT_PROJECT_MEMBER_SQL, SELECT_SECRET_REF_SQL, UPDATE_ORGANIZATION_MEMBER_STATUS_SQL,
+        UPDATE_PROJECT_MEMBER_STATUS_SQL, UPSERT_INVITED_ORGANIZATION_MEMBER_SQL,
+        UPSERT_INVITED_PROJECT_MEMBER_SQL, UPSERT_OIDC_EXTERNAL_IDENTITY_SQL,
+        UPSERT_OIDC_LOGIN_PROVIDER_SQL, UPSERT_OIDC_ORGANIZATION_ADMIN_ROLE_SQL,
+        UPSERT_OIDC_ORGANIZATION_MEMBERSHIP_SQL, UPSERT_OIDC_PROJECT_MEMBERSHIP_SQL,
+        UPSERT_OIDC_USER_ORGANIZATION_SQL, UPSERT_OIDC_USER_PRINCIPAL_SQL,
+        UPSERT_OIDC_USER_PROJECT_SQL, UPSERT_OIDC_USER_SQL, UPSERT_SECRET_REF_SQL,
     };
     use crate::resource::{
         ApprovalRecord, ConversationRecord, DeferredToolRecord, EnvironmentAttachmentRecord,
@@ -1114,10 +3650,207 @@ mod tests {
     }
 
     #[test]
+    fn oidc_login_attempt_queries_use_hashes_without_raw_material() {
+        for query in [
+            RECORD_OIDC_LOGIN_ATTEMPT_SQL,
+            SELECT_OIDC_LOGIN_ATTEMPT_BY_STATE_SQL,
+        ] {
+            let lower = query.to_ascii_lowercase();
+            assert!(!lower.contains("raw_state"));
+            assert!(!lower.contains("raw_nonce"));
+            assert!(!lower.contains("raw_pkce"));
+            assert!(!lower.contains("state text"));
+            assert!(!lower.contains("nonce text"));
+            assert!(!lower.contains("pkce_verifier text"));
+            assert!(!lower.contains("code_verifier text"));
+        }
+
+        assert!(RECORD_OIDC_LOGIN_ATTEMPT_SQL.contains("state_hash"));
+        assert!(RECORD_OIDC_LOGIN_ATTEMPT_SQL.contains("nonce_hash"));
+        assert!(RECORD_OIDC_LOGIN_ATTEMPT_SQL.contains("pkce_verifier_hash"));
+        assert!(RECORD_OIDC_LOGIN_ATTEMPT_SQL.contains("ON CONFLICT (oidc_login_attempt_id)"));
+        assert!(SELECT_OIDC_LOGIN_ATTEMPT_BY_STATE_SQL.contains("WHERE state_hash = $1"));
+    }
+
+    #[test]
+    fn oidc_login_provider_query_supports_discovery_and_secret_refs() {
+        for query in [
+            SELECT_OIDC_LOGIN_PROVIDER_SQL,
+            LIST_OIDC_LOGIN_PROVIDERS_SQL,
+            UPSERT_OIDC_LOGIN_PROVIDER_SQL,
+        ] {
+            assert!(query.contains("provider_kind = 'oidc'") || query.contains("'oidc'"));
+            assert!(query.contains("token_endpoint_auth_method"));
+            assert!(query.contains("client_secret_ref"));
+            assert!(query.contains("requested_scopes"));
+            assert!(query.contains("oidc_audiences"));
+            assert!(!query.contains("client_secret "));
+            assert!(!query.contains("raw_secret"));
+        }
+        assert!(SELECT_OIDC_LOGIN_PROVIDER_SQL.contains("COALESCE(authorization_endpoint, '')"));
+        assert!(SELECT_OIDC_LOGIN_PROVIDER_SQL.contains("COALESCE(token_endpoint, '')"));
+        assert!(SELECT_OIDC_LOGIN_PROVIDER_SQL.contains("COALESCE(jwks_uri, '')"));
+    }
+
+    #[test]
+    fn secret_ref_queries_store_safe_metadata_only() {
+        for query in [
+            UPSERT_SECRET_REF_SQL,
+            SELECT_SECRET_REF_SQL,
+            LIST_SECRET_REFS_SQL,
+        ] {
+            assert!(query.contains("secret_ref_id"));
+            assert!(query.contains("backend_locator"));
+            assert!(query.contains("display_mask"));
+            assert!(query.contains("fingerprint"));
+            assert!(!query.contains("secret_value"));
+            assert!(!query.contains("raw_secret"));
+        }
+        assert!(UPSERT_SECRET_REF_SQL.contains("ON CONFLICT (secret_ref_id)"));
+    }
+
+    #[test]
+    fn membership_queries_support_status_update_and_cascade() {
+        for query in [
+            LIST_ORGANIZATION_MEMBERS_SQL,
+            SELECT_ORGANIZATION_MEMBER_SQL,
+            UPDATE_ORGANIZATION_MEMBER_STATUS_SQL,
+        ] {
+            assert!(query.contains("platform_organization_memberships"));
+            assert!(query.contains("organization_member_id"));
+            assert!(query.contains("resource_version"));
+        }
+        for query in [
+            LIST_PROJECT_MEMBERS_SQL,
+            SELECT_PROJECT_MEMBER_SQL,
+            UPDATE_PROJECT_MEMBER_STATUS_SQL,
+            CASCADE_PROJECT_MEMBERS_FOR_ORGANIZATION_MEMBER_SQL,
+        ] {
+            assert!(query.contains("platform_project_memberships"));
+            assert!(query.contains("project_member_id"));
+            assert!(query.contains("resource_version"));
+        }
+        assert!(UPDATE_ORGANIZATION_MEMBER_STATUS_SQL.contains("resource_version = $3"));
+        assert!(UPDATE_PROJECT_MEMBER_STATUS_SQL.contains("resource_version = $3"));
+        assert!(CASCADE_PROJECT_MEMBERS_FOR_ORGANIZATION_MEMBER_SQL.contains("status = 'active'"));
+        assert!(CASCADE_PROJECT_MEMBERS_FOR_ORGANIZATION_MEMBER_SQL.contains("status <> 'removed'"));
+    }
+
+    #[test]
+    fn organization_invitation_queries_store_hash_only_and_upsert_memberships() {
+        for query in [
+            INSERT_ORGANIZATION_INVITATION_SQL,
+            LIST_ORGANIZATION_INVITATIONS_SQL,
+            SELECT_ORGANIZATION_INVITATION_SQL,
+            SELECT_ORGANIZATION_INVITATION_BY_TOKEN_HASH_SQL,
+            REVOKE_ORGANIZATION_INVITATION_SQL,
+            ACCEPT_ORGANIZATION_INVITATION_SQL,
+        ] {
+            assert!(query.contains("platform_organization_invitations"));
+            assert!(query.contains("invitation_token_hash"));
+            assert!(!query.contains("raw_token"));
+            assert!(!query.contains("invitation_token text"));
+        }
+        assert!(SELECT_ORGANIZATION_INVITATION_BY_TOKEN_HASH_SQL
+            .contains("WHERE invitation_token_hash = $1"));
+        assert!(REVOKE_ORGANIZATION_INVITATION_SQL.contains("resource_version = $2"));
+        assert!(REVOKE_ORGANIZATION_INVITATION_SQL.contains("status = 'pending'"));
+        assert!(ACCEPT_ORGANIZATION_INVITATION_SQL.contains("accepted_at = to_timestamp($2)"));
+        assert!(UPSERT_INVITED_ORGANIZATION_MEMBER_SQL
+            .contains("ON CONFLICT (organization_id, principal_id)"));
+        assert!(
+            UPSERT_INVITED_PROJECT_MEMBER_SQL.contains("ON CONFLICT (project_id, principal_id)")
+        );
+        assert!(UPSERT_INVITED_PROJECT_MEMBER_SQL.contains("organization_member_id"));
+    }
+
+    #[test]
+    fn oidc_login_completion_queries_are_replay_safe_and_subject_bound() {
+        assert!(CONSUME_OIDC_LOGIN_ATTEMPT_SQL.contains("status = 'active'"));
+        assert!(CONSUME_OIDC_LOGIN_ATTEMPT_SQL.contains("expires_at > now()"));
+        assert!(CONSUME_OIDC_LOGIN_ATTEMPT_SQL.contains("identity_provider_id = $4"));
+
+        assert!(UPSERT_OIDC_EXTERNAL_IDENTITY_SQL
+            .contains("ON CONFLICT (tenant_id, identity_provider_id, provider_subject)"));
+        assert!(UPSERT_OIDC_EXTERNAL_IDENTITY_SQL
+            .contains("WHERE platform_external_identities.principal_id = EXCLUDED.principal_id"));
+        assert!(!UPSERT_OIDC_EXTERNAL_IDENTITY_SQL.contains("raw_token"));
+        assert!(!UPSERT_OIDC_EXTERNAL_IDENTITY_SQL.contains("id_token"));
+
+        for query in [
+            UPSERT_OIDC_USER_ORGANIZATION_SQL,
+            UPSERT_OIDC_USER_PROJECT_SQL,
+            UPSERT_OIDC_USER_PRINCIPAL_SQL,
+            UPSERT_OIDC_USER_SQL,
+            UPSERT_OIDC_ORGANIZATION_MEMBERSHIP_SQL,
+            UPSERT_OIDC_PROJECT_MEMBERSHIP_SQL,
+            UPSERT_OIDC_ORGANIZATION_ADMIN_ROLE_SQL,
+            RECORD_OIDC_AUTH_SESSION_SQL,
+        ] {
+            assert!(
+                query.contains("ON CONFLICT"),
+                "OIDC completion query should be idempotent: {query}"
+            );
+            assert!(!query.to_ascii_lowercase().contains("raw_token"));
+        }
+        assert!(UPSERT_OIDC_ORGANIZATION_ADMIN_ROLE_SQL.contains("role_id"));
+        assert!(RECORD_OIDC_AUTH_SESSION_SQL.contains("identity_provider_id"));
+        assert!(RECORD_OIDC_AUTH_SESSION_SQL.contains("token_hash"));
+    }
+
+    #[test]
     fn owner_query_uses_kind_and_id_as_durable_key() {
         assert!(RECORD_RESOURCE_OWNER_SQL.contains("resource_kind"));
         assert!(RECORD_RESOURCE_OWNER_SQL.contains("resource_id"));
         assert!(RECORD_RESOURCE_OWNER_SQL.contains("ON CONFLICT (resource_kind, resource_id)"));
+    }
+
+    #[test]
+    fn single_user_bootstrap_repairs_required_durable_rows() {
+        let bootstrap_queries = [
+            (BOOTSTRAP_SINGLE_USER_TENANT_SQL, "platform_tenants"),
+            (
+                BOOTSTRAP_SINGLE_USER_ORGANIZATION_SQL,
+                "platform_organizations",
+            ),
+            (BOOTSTRAP_SINGLE_USER_PROJECT_SQL, "platform_projects"),
+            (BOOTSTRAP_SINGLE_USER_PRINCIPAL_SQL, "platform_principals"),
+            (BOOTSTRAP_SINGLE_USER_USER_SQL, "platform_users"),
+            (
+                BOOTSTRAP_SINGLE_USER_ORGANIZATION_MEMBERSHIP_SQL,
+                "platform_organization_memberships",
+            ),
+            (
+                BOOTSTRAP_SINGLE_USER_PROJECT_MEMBERSHIP_SQL,
+                "platform_project_memberships",
+            ),
+            (
+                BOOTSTRAP_SINGLE_USER_IDENTITY_PROVIDER_SQL,
+                "platform_identity_providers",
+            ),
+            (
+                BOOTSTRAP_SINGLE_USER_EXTERNAL_IDENTITY_SQL,
+                "platform_external_identities",
+            ),
+            (
+                BOOTSTRAP_SINGLE_USER_ROLE_BINDING_SQL,
+                "platform_role_bindings",
+            ),
+        ];
+
+        for (query, table) in bootstrap_queries {
+            assert!(query.contains(table), "{table} should be bootstrapped");
+            assert!(
+                query.contains("ON CONFLICT"),
+                "{table} should be idempotent"
+            );
+            assert!(
+                query.contains("status = 'active'"),
+                "{table} should be repaired active"
+            );
+        }
+        assert!(BOOTSTRAP_SINGLE_USER_IDENTITY_PROVIDER_SQL.contains("'single_user'"));
+        assert!(BOOTSTRAP_SINGLE_USER_ROLE_BINDING_SQL.contains("role_id"));
     }
 
     #[test]
@@ -1142,6 +3875,16 @@ mod tests {
             mtls_subject_for_lookup(" "),
             Err(PlatformRepositoryError::Auth(AuthError::EmptyMtlsSubject))
         );
+        assert_eq!(
+            oidc_state_hash_for_lookup("  state-token  "),
+            Ok(hash_oidc_login_state("state-token"))
+        );
+        assert_eq!(
+            oidc_state_hash_for_lookup(" "),
+            Err(PlatformRepositoryError::Identity(
+                OidcValidationError::EmptyState
+            ))
+        );
     }
 
     #[test]
@@ -1160,6 +3903,20 @@ mod tests {
         assert_eq!(
             actor_kind_from_str("unknown"),
             Err(PlatformRepositoryError::UnknownActorKind(
+                "unknown".to_owned()
+            ))
+        );
+        assert_eq!(
+            oidc_login_attempt_status_as_str(OidcLoginAttemptStatus::Active),
+            "active"
+        );
+        assert_eq!(
+            oidc_login_attempt_status_from_str("consumed"),
+            Ok(OidcLoginAttemptStatus::Consumed)
+        );
+        assert_eq!(
+            oidc_login_attempt_status_from_str("unknown"),
+            Err(PlatformRepositoryError::UnknownOidcLoginAttemptStatus(
                 "unknown".to_owned()
             ))
         );
@@ -1221,6 +3978,48 @@ mod tests {
             }),
             Err(PlatformRepositoryError::Auth(
                 AuthError::EmptyMtlsIdentityId
+            ))
+        );
+        assert_eq!(
+            validate_oidc_login_attempt_record(&valid_oidc_attempt()),
+            Ok(())
+        );
+        assert_eq!(
+            validate_oidc_login_attempt_record(&OidcLoginAttemptRecord {
+                login_attempt_id: String::new(),
+                ..valid_oidc_attempt()
+            }),
+            Err(OidcValidationError::InvalidLoginAttemptId)
+        );
+        assert_eq!(
+            validate_oidc_login_completion_record(&valid_oidc_completion()),
+            Ok(())
+        );
+        assert_eq!(
+            validate_oidc_login_completion_record(&OidcLoginCompletionRecord {
+                provider_subject: String::new(),
+                ..valid_oidc_completion()
+            }),
+            Err(PlatformRepositoryError::Identity(
+                OidcValidationError::SubjectRequired
+            ))
+        );
+        assert_eq!(
+            validate_oidc_login_completion_record(&OidcLoginCompletionRecord {
+                session: PlatformAuthSessionRecord::active(
+                    "sess_oidc",
+                    "raw-session",
+                    AuthenticatedActor::project_user(
+                        TENANT_ID,
+                        ORGANIZATION_ID,
+                        PROJECT_ID,
+                        "usr_other"
+                    ),
+                ),
+                ..valid_oidc_completion()
+            }),
+            Err(PlatformRepositoryError::OidcSessionActorMismatch(
+                "sess_oidc".to_owned()
             ))
         );
     }
@@ -1357,5 +4156,42 @@ mod tests {
 
     fn actor() -> AuthenticatedActor {
         AuthenticatedActor::project_user(TENANT_ID, ORGANIZATION_ID, PROJECT_ID, USER_ID)
+    }
+
+    fn valid_oidc_attempt() -> OidcLoginAttemptRecord {
+        OidcLoginAttemptRecord::active(OidcLoginAttemptStart {
+            login_attempt_id: "ola_test".to_owned(),
+            tenant_id: TENANT_ID.to_owned(),
+            identity_provider_id: "idp_oidc".to_owned(),
+            raw_state: "state_secret".to_owned(),
+            raw_nonce: "nonce_secret".to_owned(),
+            raw_pkce_verifier: "pkce_secret".to_owned(),
+            redirect_uri: "https://app.example/auth/oidc/callback".to_owned(),
+            expires_at_unix: 1_750_000_000,
+        })
+        .unwrap_or_else(|error| panic!("valid OIDC attempt should build: {error}"))
+    }
+
+    fn valid_oidc_completion() -> OidcLoginCompletionRecord {
+        OidcLoginCompletionRecord {
+            login_attempt_id: "ola_test".to_owned(),
+            tenant_id: TENANT_ID.to_owned(),
+            organization_id: ORGANIZATION_ID.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            user_id: USER_ID.to_owned(),
+            identity_provider_id: "idp_oidc".to_owned(),
+            external_identity_id: "xid_oidc_user".to_owned(),
+            organization_member_id: "om_oidc_user".to_owned(),
+            project_member_id: "pm_oidc_user".to_owned(),
+            organization_role_binding_id: "rb_oidc_org_admin".to_owned(),
+            provider_subject: "provider-subject".to_owned(),
+            email: Some("user@example.com".to_owned()),
+            email_verified: true,
+            user_display_name: "OIDC User".to_owned(),
+            organization_display_name: "OIDC User Organization".to_owned(),
+            project_display_name: "OIDC User Project".to_owned(),
+            session: PlatformAuthSessionRecord::active("sess_oidc", "raw-session", actor()),
+            consumed_at_unix: 1_750_000_001,
+        }
     }
 }

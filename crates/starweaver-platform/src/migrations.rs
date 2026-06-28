@@ -11,6 +11,27 @@ pub const CORE_SCHEMA_MIGRATION_VERSION: i64 = 20_260_627_000_001;
 /// SQL source for the first platform core schema migration.
 pub const CORE_SCHEMA_SQL: &str = include_str!("../migrations/20260627000001_core_schema.sql");
 
+/// `OIDC` login attempts migration version.
+pub const OIDC_LOGIN_ATTEMPTS_MIGRATION_VERSION: i64 = 20_260_627_000_002;
+
+/// SQL source for the `OIDC` login attempts migration.
+pub const OIDC_LOGIN_ATTEMPTS_SQL: &str =
+    include_str!("../migrations/20260627000002_oidc_login_attempts.sql");
+
+/// Platform secret refs and `OIDC` auth-method migration version.
+pub const SECRET_REFS_OIDC_AUTH_METHOD_MIGRATION_VERSION: i64 = 20_260_627_000_003;
+
+/// SQL source for the platform secret refs and `OIDC` auth-method migration.
+pub const SECRET_REFS_OIDC_AUTH_METHOD_SQL: &str =
+    include_str!("../migrations/20260627000003_platform_secret_refs_and_oidc_auth_method.sql");
+
+/// Platform organization invitations migration version.
+pub const ORGANIZATION_INVITATIONS_MIGRATION_VERSION: i64 = 20_260_627_000_004;
+
+/// SQL source for the platform organization invitations migration.
+pub const ORGANIZATION_INVITATIONS_SQL: &str =
+    include_str!("../migrations/20260627000004_platform_organization_invitations.sql");
+
 /// Embedded platform schema migrator.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -100,11 +121,17 @@ mod tests {
 
     use super::{
         migration_versions, missing_versions, CORE_SCHEMA_MIGRATION_VERSION, CORE_SCHEMA_SQL,
+        OIDC_LOGIN_ATTEMPTS_MIGRATION_VERSION, OIDC_LOGIN_ATTEMPTS_SQL,
+        ORGANIZATION_INVITATIONS_MIGRATION_VERSION, ORGANIZATION_INVITATIONS_SQL,
+        SECRET_REFS_OIDC_AUTH_METHOD_MIGRATION_VERSION, SECRET_REFS_OIDC_AUTH_METHOD_SQL,
     };
 
     #[test]
-    fn core_schema_migration_is_embedded() {
+    fn platform_migrations_are_embedded() {
         assert!(migration_versions().contains(&CORE_SCHEMA_MIGRATION_VERSION));
+        assert!(migration_versions().contains(&OIDC_LOGIN_ATTEMPTS_MIGRATION_VERSION));
+        assert!(migration_versions().contains(&SECRET_REFS_OIDC_AUTH_METHOD_MIGRATION_VERSION));
+        assert!(migration_versions().contains(&ORGANIZATION_INVITATIONS_MIGRATION_VERSION));
     }
 
     #[test]
@@ -113,10 +140,20 @@ mod tests {
 
         assert_eq!(
             missing_versions(&applied),
-            vec![CORE_SCHEMA_MIGRATION_VERSION]
+            vec![
+                CORE_SCHEMA_MIGRATION_VERSION,
+                OIDC_LOGIN_ATTEMPTS_MIGRATION_VERSION,
+                SECRET_REFS_OIDC_AUTH_METHOD_MIGRATION_VERSION,
+                ORGANIZATION_INVITATIONS_MIGRATION_VERSION,
+            ]
         );
 
-        let applied = HashSet::from([CORE_SCHEMA_MIGRATION_VERSION]);
+        let applied = HashSet::from([
+            CORE_SCHEMA_MIGRATION_VERSION,
+            OIDC_LOGIN_ATTEMPTS_MIGRATION_VERSION,
+            SECRET_REFS_OIDC_AUTH_METHOD_MIGRATION_VERSION,
+            ORGANIZATION_INVITATIONS_MIGRATION_VERSION,
+        ]);
         assert!(missing_versions(&applied).is_empty());
     }
 
@@ -141,10 +178,11 @@ mod tests {
 
     #[test]
     fn core_schema_supports_generic_oidc_login_provider() {
-        assert!(CORE_SCHEMA_SQL
-            .contains("provider_kind IN ('oidc', 'github_oauth_app', 'single_user')"));
+        assert!(CORE_SCHEMA_SQL.contains("provider_kind IN ('oidc', 'single_user')"));
         assert!(CORE_SCHEMA_SQL.contains("provider_kind <> 'oidc' OR issuer_url IS NOT NULL"));
-        assert!(CORE_SCHEMA_SQL.contains("provider_kind <> 'oidc' OR jwks_uri IS NOT NULL"));
+        assert!(CORE_SCHEMA_SQL.contains("provider_kind <> 'oidc' OR client_id IS NOT NULL"));
+        assert!(CORE_SCHEMA_SQL.contains("provider_kind <> 'oidc' OR redirect_uri IS NOT NULL"));
+        assert!(CORE_SCHEMA_SQL.contains("provider_kind <> 'oidc' OR requested_scopes ? 'openid'"));
         assert!(CORE_SCHEMA_SQL
             .contains("provider_kind <> 'oidc' OR jsonb_array_length(oidc_audiences) > 0"));
         assert!(CORE_SCHEMA_SQL.contains("platform_identity_providers_tenant_kind_idx"));
@@ -170,6 +208,73 @@ mod tests {
 
         assert!(lower.contains("token_hash text not null unique"));
         assert!(lower.contains("client_secret_ref text"));
+    }
+
+    #[test]
+    fn oidc_login_attempts_store_only_hashed_transient_secrets() {
+        let lower = OIDC_LOGIN_ATTEMPTS_SQL.to_ascii_lowercase();
+
+        assert!(lower.contains("create table if not exists platform_oidc_login_attempts"));
+        assert!(lower.contains("state_hash text not null unique"));
+        assert!(lower.contains("nonce_hash text not null"));
+        assert!(lower.contains("pkce_verifier_hash text not null"));
+        assert!(lower.contains("platform_oidc_login_attempts_provider_status_idx"));
+        for forbidden in [
+            " raw_state",
+            " raw_nonce",
+            " raw_pkce",
+            " state text",
+            " nonce text",
+            " pkce_verifier text",
+            " code_verifier text",
+        ] {
+            assert!(
+                !lower.contains(forbidden),
+                "OIDC attempt migration must not store raw login secret: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_ref_migration_stores_safe_metadata_and_oidc_auth_method() {
+        let lower = SECRET_REFS_OIDC_AUTH_METHOD_SQL.to_ascii_lowercase();
+
+        assert!(lower.contains("create table if not exists platform_secret_refs"));
+        assert!(lower.contains("secret_ref_id text primary key"));
+        assert!(lower.contains("backend_kind text not null"));
+        assert!(lower.contains("backend_locator text not null"));
+        assert!(lower.contains("display_mask text not null"));
+        assert!(lower.contains("fingerprint text not null"));
+        assert!(lower.contains("add column if not exists token_endpoint_auth_method"));
+        assert!(lower.contains("client_secret_basic"));
+        assert!(lower.contains("client_secret_post"));
+        assert!(lower.contains("foreign key (client_secret_ref)"));
+
+        for forbidden in ["secret_value", "raw_secret", "client_secret text"] {
+            assert!(
+                !lower.contains(forbidden),
+                "secret migration must not store raw secret material: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn organization_invitation_migration_stores_token_hash_only() {
+        let lower = ORGANIZATION_INVITATIONS_SQL.to_ascii_lowercase();
+
+        assert!(lower.contains("create table if not exists platform_organization_invitations"));
+        assert!(lower.contains("invitation_token_hash text not null unique"));
+        assert!(lower.contains("status in ('pending', 'accepted', 'revoked', 'expired')"));
+        assert!(lower.contains("platform_org_invitations_org_status_idx"));
+        assert!(lower.contains("invited_email is not null and invited_principal_id is null"));
+        assert!(lower.contains("invited_email is null and invited_principal_id is not null"));
+
+        for forbidden in ["raw_token", "invitation_token text", "token text not null"] {
+            assert!(
+                !lower.contains(forbidden),
+                "invitation migration must not store raw token material: {forbidden}"
+            );
+        }
     }
 
     #[test]
