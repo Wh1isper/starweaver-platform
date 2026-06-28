@@ -2693,6 +2693,14 @@ dependencies = [
 [[package]]
 name = "starweaver-platform"
 version = "0.0.1"
+dependencies = [
+ "axum",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tokio",
+ "tower",
+]
 
 [[package]]
 name = "string_cache"

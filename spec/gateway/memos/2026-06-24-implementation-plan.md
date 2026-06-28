@@ -44,7 +44,7 @@ Excluded from v1:
 
 ## Implementation Progress
 
-Last updated: 2026-06-26.
+Last updated: 2026-06-27.
 
 Completed foundation slices:
 
@@ -304,14 +304,101 @@ Completed foundation slices:
   `gateway-restore-rehearsal` target restores config snapshots, secret refs plus
   backend values, audit events, usage events, and rebuilt ledger aggregates into
   a fresh in-memory store and runs in `make ci`.
+- Shared auth/authz layering review now records a decision draft under
+  `spec/shared/02-auth-authz-layering.md`: keep gateway and platform authn/authz
+  service-local for now, share only versioned contracts, and extract shared
+  identity or policy crates only after both services have concrete owners and
+  contract tests.
+- Agent platform auth/authz foundations now define platform-local
+  `platform.*` actions, built-in roles, actors, resource refs, grants,
+  in-memory authorization, and item filtering for conversations, sessions, runs,
+  approvals, deferred tools, environment attachments, and evidence archives.
+  Tests prove namespace separation from gateway actions, project and
+  organization scope behavior, resource-kind compatibility, item-level filtering,
+  and user-only action denial for service accounts.
+- Agent platform route metadata now maps the first conversation, run, approval,
+  deferred-tool, environment-attachment, and evidence-archive HTTP surfaces to
+  stable platform actions, resource kinds, path resource ids, and user-only route
+  requirements before any handler can read or mutate resources.
+- Agent platform storage ownership foundations now record resource kind, resource
+  id, tenant, organization, and project ownership independently of handler
+  business records. Tests prove owner-key kind/id separation, invalid ownership
+  shape rejection, route metadata to owner resolution, and cross-project denial
+  from resolved owner metadata.
+- Agent platform HTTP authorization foundation now connects route metadata,
+  resource ownership, and platform-local authorization before handler business
+  logic. Tests cover concrete run, conversation, approval, environment
+  attachment, and evidence archive routes, including missing authentication,
+  missing owner, cross-project denial, service-account denial for user-only
+  approval decisions, and colon action path matching.
+- Agent platform authentication foundation now resolves `Authorization: Bearer`
+  opaque session tokens through a platform-local session store before route
+  authorization. Session tokens are stored by hash, active sessions resolve to
+  `AuthenticatedActor`, and revoked, unknown, missing, or malformed sessions are
+  rejected before resource ownership checks.
+- Agent platform bearer credential foundation now resolves API key and service
+  token credentials through the same actor-resolution boundary. Credential
+  tokens are stored by hash, API keys can authorize read handlers through the
+  same ownership and grant path as sessions, service tokens resolve to
+  service-account actors and cannot use user-only actions, and a revoked session
+  does not fall back to an API key with the same raw bearer token.
+- Agent platform business resource foundations now store safe typed projections
+  for conversations, runs, approvals, deferred tools, environment attachments,
+  and evidence archives separately from authorization ownership. Authorized
+  handlers return concrete business envelopes for conversation read, run read
+  and cancel, approval decision, environment health, and evidence archive read
+  routes. Missing owner records and missing business records return `404` at
+  the appropriate phase.
+- Human login documentation now treats generic OIDC as the standard external
+  login provider and GitHub OAuth App as a convenience adapter. OIDC remains
+  separate from upstream provider OAuth credentials and validates issuer,
+  audience, nonce, PKCE, expiry, and JWKS-backed ID token signatures.
+- Agent platform durable schema foundation now embeds the first platform
+  PostgreSQL migration and migration entrypoint. The schema covers tenant,
+  organization, project, principal, membership, identity provider, generic OIDC
+  external identity, auth session, bearer credential, resource owner, safe
+  business-resource, and idempotency-key tables. Tests lock the embedded
+  migration version, generic OIDC requirements, resource-owner key shape,
+  business table coverage, read-path indexes, and the rule that raw bearer
+  credentials are never stored.
+- Agent platform PostgreSQL repository adapter now provides typed async methods
+  for durable auth session resolution, API key and service-token credential
+  resolution, resource owner lookup, and safe business-resource projection
+  persistence. Tests lock token-hash-only queries, actor-kind mapping, owner
+  kind/id keys, project-scope requirements, and the coverage from every safe
+  business projection to its durable table.
+- Agent platform mTLS actor-resolution foundation now maps verified client
+  certificate subjects or SPIFFE ids to scoped platform actors. The schema,
+  in-memory store, PostgreSQL adapter, and HTTP foundation tests cover active,
+  unknown, revoked, disabled, expired, and principal-disabled identity states.
+  The HTTP surface uses a verified-subject header intended only for trusted
+  mTLS terminators that strip inbound spoofed headers before injection.
+- Agent platform HTTP state now has an explicit repository backend selector.
+  The `in_memory` backend keeps deterministic foundation stores for local
+  tests, while the `postgres` backend routes auth session, bearer credential,
+  mTLS identity, resource-owner, and safe business-resource reads through the
+  durable PostgreSQL adapter without changing route metadata, action ids,
+  policy evaluation, or response envelopes.
+- Agent platform startup configuration now reads `STARWEAVER_PLATFORM_*`
+  settings for listen address, environment, database URL, and repository
+  backend. Production profiles reject accidental in-memory repository exposure,
+  and selecting the `postgres` backend requires a durable PostgreSQL URL in any
+  environment.
+- Agent platform binary startup now validates `PlatformConfig`, builds
+  deterministic in-memory foundation state for local replay, or connects to
+  PostgreSQL, runs embedded migrations, and constructs repository-backed service
+  state before binding the HTTP listener. The binary also exposes `migrate run`
+  and `migrate check` commands for the embedded platform schema.
 
 Next implementation focus:
 
-- Continue hardening any required OTLP/gRPC transport once the metrics backend
-  contract needs it.
-- Keep auth and authorization layering explicit until the agent platform has a
-  second concrete service owner, then split shared modules only where both
-  services use the same contract.
+- Add platform bootstrap paths for local single-user mode and first-tenant
+  organization/project initialization without weakening generic OIDC as the
+  standard external login provider shape.
+- Keep shared auth/authz extraction deferred behind the two-owner contract-test
+  gate now that both gateway and platform have concrete auth evidence.
+- Continue hardening any required OTLP/gRPC transport only when the metrics
+  backend contract needs it.
 
 ## Implementation Principles
 

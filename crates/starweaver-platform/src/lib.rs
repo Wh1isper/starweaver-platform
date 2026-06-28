@@ -5,6 +5,33 @@
 /// Stable service identifier used in logs, metrics, and deployment metadata.
 pub const SERVICE_NAME: &str = "starweaver-platform";
 
+/// Platform-local authorization primitives.
+pub mod action;
+
+/// Platform-local authentication primitives.
+pub mod auth;
+
+/// Platform startup configuration.
+pub mod config;
+
+/// Platform route metadata.
+pub mod route;
+
+/// Platform business resource records.
+pub mod resource;
+
+/// Platform database migration entry points.
+pub mod migrations;
+
+/// Platform PostgreSQL repository adapters.
+pub mod postgres;
+
+/// Platform HTTP service foundation.
+pub mod service;
+
+/// Platform-local storage boundaries.
+pub mod storage;
+
 /// Returns the stable agent platform service name.
 #[must_use]
 pub const fn service_name() -> &'static str {

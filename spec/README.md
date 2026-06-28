@@ -42,6 +42,8 @@ flowchart TD
   agent platform service shape.
 - `shared/01-service-suite-boundary.md` defines the repository, workspace, and
   dependency boundaries for the service suite.
+- `shared/02-auth-authz-layering.md` records the current decision for auth,
+  identity, and policy layering between the gateway and agent platform.
 - `gateway/README.md` indexes the enterprise LLM gateway spec set.
 - `gateway/00-requirements.md` maps gateway functional capabilities to design
   owners and completion evidence.

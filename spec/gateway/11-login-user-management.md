@@ -15,15 +15,18 @@ Bare deployments must not require the operator to already own an enterprise
 OIDC provider. The gateway ships a local single-user mode that is disabled by
 default and becomes available only when an operator configures a username and
 password through environment variables. External login providers can be enabled
-after bootstrap. GitHub OAuth App is the recommended v1 bare-deploy external
-adapter. Generic OIDC is the required v1 enterprise adapter.
+after bootstrap. Generic OIDC is the standard v1 SSO adapter for operators that
+bring GitHub, Google Workspace, Auth0, Okta, Keycloak, or another compliant
+OIDC provider. GitHub OAuth App remains a convenience adapter for deployments
+that want GitHub login without requiring an OIDC broker.
 
 ## Goals
 
 - Support bare-deploy bootstrap through an environment-configured local
   single-user account.
-- Support bare-deploy external login through a configured GitHub OAuth App.
-- Support enterprise login through configured OIDC providers.
+- Support external login through configured generic OIDC providers.
+- Support bare-deploy external login through a configured GitHub OAuth App when
+  the operator does not want to run or subscribe to an OIDC provider.
 - Use OAuth 2.0 authorization code flow with provider-appropriate validation:
   `state` for all providers, PKCE and ID token validation for OIDC providers,
   and provider API identity verification for GitHub OAuth App.
@@ -53,7 +56,7 @@ adapter. Generic OIDC is the required v1 enterprise adapter.
 
 | Area                    | V1 Decision                                                                  |
 | ----------------------- | ---------------------------------------------------------------------------- |
-| Bare-deploy provider    | local single-user password mode, then optional GitHub OAuth App              |
+| Bare-deploy provider    | local single-user password mode, then optional OIDC or GitHub OAuth App      |
 | Enterprise provider     | generic OIDC provider config                                                 |
 | Provider adapters       | `github_oauth_app`, `oidc`                                                   |
 | Login protocol          | OAuth 2.0 authorization code flow                                            |
@@ -79,7 +82,7 @@ V1 supports three login provider kinds:
 | ---------------------- | --------------------------------------------- | ------------------------------------------ |
 | `single_user_password` | single-node bootstrap and simple self-hosting | local password check from environment      |
 | `github_oauth_app`     | bare deployments and small teams              | GitHub OAuth App authorization code flow   |
-| `oidc`                 | enterprise SSO                                | OIDC authorization code flow with ID token |
+| `oidc`                 | generic external SSO                          | OIDC authorization code flow with ID token |
 
 The local single-user provider is not a configurable `IdentityProvider`
 resource. It is exposed by `/auth/v1/providers` only when both
@@ -89,12 +92,12 @@ resource. It is exposed by `/auth/v1/providers` only when both
 bootstraps the default tenant, organization, project, user, membership graph,
 and tenant-owner grants if they do not already exist.
 
-For hosted SaaS, the operator may run a shared GitHub OAuth App. For
-self-hosted deployments that want external login, the administrator configures
-their own GitHub OAuth App by supplying the client id, client secret reference,
-public base URL, and optional organization/domain allow rules. The gateway
-derives the callback URL from the public base URL unless the operator overrides
-it.
+For hosted SaaS, the operator may run shared OIDC and GitHub OAuth App login
+providers. For self-hosted deployments that want external login, the
+administrator configures either an OIDC client or a GitHub OAuth App by
+supplying the client id, client secret reference, public base URL, and optional
+organization/domain allow rules. The gateway derives the callback URL from the
+public base URL unless the operator overrides it.
 
 ## Single-User Login Flow
 
@@ -270,8 +273,33 @@ STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD=...
 This mode is disabled when either value is absent or empty. It does not create
 additional password users, invitation flows, or reusable password credentials.
 
-After bootstrap, a deployment that wants external identity can add a GitHub
-OAuth App provider.
+After bootstrap, a deployment that wants external identity can add an OIDC
+provider or a GitHub OAuth App provider.
+
+Generic OIDC configuration:
+
+```yaml
+public_base_url: https://gateway.example.com
+login_providers:
+  - kind: oidc
+    identity_provider_id: company-sso
+    display_name: Company SSO
+    issuer: https://sso.example.com
+    client_id: "${GATEWAY_LOGIN_OIDC_CLIENT_ID}"
+    client_secret_ref: "secret://gateway/login/oidc/client-secret"
+    callback_path: /auth/v1/providers/company-sso/callback
+    scopes:
+      - openid
+      - profile
+      - email
+    provisioning_mode: invite_only
+```
+
+When issuer discovery is not available or the operator wants to pin endpoints,
+the same provider can supply explicit `authorization_url`, `token_url`, and
+`jwks_url` values. The gateway still validates issuer, audience, nonce, PKCE,
+token expiry, and JWKS-backed ID token signature before linking a local
+principal.
 
 GitHub OAuth App configuration:
 

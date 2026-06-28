@@ -73,10 +73,11 @@ Human admin login is separate from upstream provider OAuth. Bare deployments can
 start with local single-user mode, which is disabled by default and requires
 both `STARWEAVER_GATEWAY_SINGLE_USER_USERNAME` and
 `STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD`. Login and session-read responses
-include CSRF metadata for browser session mutations. GitHub OAuth App can be
-configured for external bare-deploy login. Generic OIDC supports issuer
-discovery, PKCE, nonce validation, token exchange, and JWKS-backed ID token
-validation for enterprise SSO.
+include CSRF metadata for browser session mutations. Generic OIDC is the
+standard external login path and supports issuer discovery, explicit pinned
+endpoints, PKCE, nonce validation, token exchange, and JWKS-backed ID token
+validation. GitHub OAuth App remains a convenience adapter for deployments that
+want GitHub login without an OIDC broker.
 
 ## Detailed Specs
 

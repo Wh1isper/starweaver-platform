@@ -38,8 +38,10 @@ password bootstrap login is needed. Compose also passes through
 `STARWEAVER_GATEWAY_SINGLE_USER_DISPLAY_NAME`, and
 `STARWEAVER_GATEWAY_SINGLE_USER_SESSION_TTL_SECONDS` when they are set.
 External login providers are created through the admin identity-provider API.
-Generic OIDC can use issuer discovery or explicit authorization, token, and JWKS
-endpoints; GitHub OAuth App remains a separate provider kind.
+Generic OIDC is the standard external login provider and can use issuer
+discovery or explicit authorization, token, and JWKS endpoints. GitHub OAuth App
+remains a separate convenience provider kind for operators that want GitHub
+login without an OIDC broker.
 Compose also mounts `gateway-export-objects` at `/data/gateway-exports` and
 sets `STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_DIR` to that path by default for
 `storage_backend: file_object_storage` export jobs.
