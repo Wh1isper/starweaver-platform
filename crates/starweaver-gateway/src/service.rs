@@ -31,9 +31,9 @@ use crate::action::{
     FoundationAuthorizationEngine, GatewayAction,
 };
 use crate::auth::{
-    constant_time_eq, create_auth_session, key_prefix, resolve_user_session_actor,
-    session_token_hash, verify_api_key, verify_secret, verify_session_token,
-    CreateAuthSessionRequest, ResolveUserSessionRequest,
+    constant_time_eq, create_api_key, create_auth_session, key_prefix, resolve_user_session_actor,
+    rotate_api_key_secret, session_token_hash, verify_api_key, verify_secret, verify_session_token,
+    CreateApiKeyRequest, CreateAuthSessionRequest, ResolveUserSessionRequest,
 };
 use crate::catalog::{GatewayCatalogSnapshot, RoutePlanOutcome, RoutePlanRequest, RouteSelection};
 use crate::config::{
@@ -42,21 +42,21 @@ use crate::config::{
     validate_config_snapshot_payload, PublishConfigSnapshotRequest, ResourceVersion,
 };
 use crate::domain::{
-    new_prefixed_id, ActorKind, ActorScope, ApiKeyRecord, AuditEventRecord, AuthSessionRecord,
-    AuthenticatedActor, BudgetPolicyRecord, CodexOAuthConnectionRecord, CodexOAuthConnectionStatus,
-    CodexOAuthRefreshStatusRecord, CodexOAuthSessionRecord, ConfigPublicationPointerRecord,
-    ConfigSnapshot, ConfigWorkerReloadRecord, DirectoryStatus, EmergencyOperationRecord,
-    ExportJobRecord, ExportManifestRecord, ExternalIdentityRecord, LedgerBucketRecord,
-    LoginAttemptRecord, LoginProviderRecord, MembershipStatus, ModelAliasRecord, ModelTargetRecord,
-    NotificationDeliveryAttemptRecord, NotificationOutboxEventRecord, NotificationSinkRecord,
-    NotificationSubscriptionRecord, OrganizationInvitationRecord, OrganizationMembershipRecord,
-    OrganizationRecord, OtelExportConfigRecord, OtelExporterHealthRecord, OtelHeaderRef,
-    OtelResourceAttribute, PricingSkuRecord, ProjectMembershipRecord, ProjectRecord,
-    ProviderEndpoint, ProviderEndpointRecord, ProviderGrantRecord, QuotaPolicyRecord,
-    ResourceStatus, RoutePolicyRecord, RoutingGroupRecord, RoutingGroupTargetRecord,
-    RuntimeBudgetLeaseRecord, SecretRefRecord, SecretRefStatus, ServiceAccountRecord,
-    UpstreamCredentialRecord, UpstreamCredentialStatus, UsageEventRecord,
-    ValidationDiagnosticRecord,
+    new_prefixed_id, ActorKind, ActorScope, ApiKeyRecord, ApiKeyStatus, AuditEventRecord,
+    AuthSessionRecord, AuthenticatedActor, BudgetPolicyRecord, CodexOAuthConnectionRecord,
+    CodexOAuthConnectionStatus, CodexOAuthRefreshStatusRecord, CodexOAuthSessionRecord,
+    ConfigPublicationPointerRecord, ConfigSnapshot, ConfigWorkerReloadRecord, DirectoryStatus,
+    EmergencyOperationRecord, ExportJobRecord, ExportManifestRecord, ExternalIdentityRecord,
+    LedgerBucketRecord, LoginAttemptRecord, LoginProviderRecord, MembershipStatus,
+    ModelAliasRecord, ModelTargetRecord, NotificationDeliveryAttemptRecord,
+    NotificationOutboxEventRecord, NotificationSinkRecord, NotificationSubscriptionRecord,
+    OrganizationInvitationRecord, OrganizationMembershipRecord, OrganizationRecord,
+    OtelExportConfigRecord, OtelExporterHealthRecord, OtelHeaderRef, OtelResourceAttribute,
+    PricingSkuRecord, ProjectMembershipRecord, ProjectRecord, ProviderEndpoint,
+    ProviderEndpointRecord, ProviderGrantRecord, QuotaPolicyRecord, ResourceStatus,
+    RoutePolicyRecord, RoutingGroupRecord, RoutingGroupTargetRecord, RuntimeBudgetLeaseRecord,
+    SecretRefRecord, SecretRefStatus, ServiceAccountRecord, UpstreamCredentialRecord,
+    UpstreamCredentialStatus, UsageEventRecord, ValidationDiagnosticRecord,
 };
 use crate::error::{GatewayError, Result};
 use crate::hot_state::{
@@ -242,6 +242,9 @@ const ADMIN_MODEL_TARGET_GET_PATH: &str = concat!("/admin/v1/model-targets/", "{
 const ADMIN_MODEL_ALIAS_GET_PATH: &str = concat!("/admin/v1/model-aliases/", "{model_alias_id}");
 const ADMIN_SERVICE_ACCOUNT_GET_PATH: &str =
     concat!("/admin/v1/service-accounts/", "{service_account_id}");
+const ADMIN_API_KEY_GET_PATH: &str = concat!("/admin/v1/api-keys/", "{api_key_id}");
+const ADMIN_API_KEY_ROTATE_PATH: &str = concat!("/admin/v1/api-keys/", "{api_key_id}", "/rotate");
+const ADMIN_API_KEY_DISABLE_PATH: &str = concat!("/admin/v1/api-keys/", "{api_key_id}", "/disable");
 const ADMIN_PRICING_SKU_GET_PATH: &str = concat!("/admin/v1/pricing-skus/", "{pricing_sku_id}");
 const ADMIN_BUDGET_POLICY_GET_PATH: &str =
     concat!("/admin/v1/budget-policies/", "{budget_policy_id}");
@@ -1494,6 +1497,7 @@ fn admin_routes(state: &AppState) -> Router<AppState> {
         .merge(secret_ref_admin_routes())
         .merge(codex_oauth_admin_routes())
         .merge(service_account_admin_routes())
+        .merge(api_key_admin_routes())
         .merge(pricing_sku_admin_routes())
         .merge(budget_policy_admin_routes())
         .merge(quota_policy_admin_routes())
@@ -1781,6 +1785,17 @@ fn service_account_admin_routes() -> Router<AppState> {
             ADMIN_SERVICE_ACCOUNT_GET_PATH,
             get(get_service_account).patch(update_service_account),
         )
+}
+
+fn api_key_admin_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/admin/v1/api-keys",
+            get(list_api_keys).post(create_api_key_admin),
+        )
+        .route(ADMIN_API_KEY_GET_PATH, get(get_api_key_admin))
+        .route(ADMIN_API_KEY_ROTATE_PATH, post(rotate_api_key_admin))
+        .route(ADMIN_API_KEY_DISABLE_PATH, post(disable_api_key_admin))
 }
 
 fn pricing_sku_admin_routes() -> Router<AppState> {
@@ -2546,6 +2561,32 @@ struct AdminCreateServiceAccountRequest {
     organization_id: Option<String>,
     project_id: Option<String>,
     display_name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AdminCreateApiKeyRequest {
+    idempotency_key: String,
+    organization_id: Option<String>,
+    project_id: Option<String>,
+    owner_principal_id: Option<String>,
+    name: String,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    allowed_actions: Vec<String>,
+    #[serde(default)]
+    allowed_resources: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AdminRotateApiKeyRequest {
+    idempotency_key: String,
+    reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AdminDisableApiKeyRequest {
+    idempotency_key: String,
+    reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -7185,6 +7226,274 @@ async fn update_service_account(
         "resource": service_account_resource_body(&updated),
         "audit_event_id": audit_event_id
     })))
+}
+
+async fn list_api_keys(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(&state, &actor, &Method::GET, "/admin/v1/api-keys", "*", now).await?;
+    let route = route_metadata(&Method::GET, ADMIN_API_KEY_GET_PATH)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
+    let api_keys = api_keys_for_actor(&state, &actor).await?;
+    let authorized = authorize_item_list(
+        engine.as_ref(),
+        &actor,
+        route.action,
+        api_keys.into_iter().map(|api_key| AuthorizableItem {
+            resource: route.resource(api_key.api_key_id.clone()),
+            item: api_key,
+        }),
+    );
+    let resources = authorized
+        .items
+        .iter()
+        .map(api_key_resource_envelope)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "schema": "gateway.admin.api_key_list.v1",
+        "resources": resources,
+        "filtered_count": authorized.filtered_count,
+        "next_cursor": null
+    })))
+}
+
+async fn create_api_key_admin(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Json(request): Json<AdminCreateApiKeyRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::POST,
+        "/admin/v1/api-keys",
+        "*",
+        now,
+    )
+    .await?;
+    let scope_key = idempotency_scope_key("api_keys:create", &request.idempotency_key);
+    let request_hash = stable_request_hash(&request)?;
+    if let Some(response) =
+        state
+            .store
+            .idempotency_response(&actor.tenant_id, &scope_key, &request_hash, now)?
+    {
+        return Ok(Json(response_with_replay_flag(response, true)));
+    }
+    let created = create_api_key(
+        CreateApiKeyRequest {
+            tenant_id: actor.tenant_id.clone(),
+            organization_id: request.organization_id,
+            project_id: request.project_id,
+            owner_principal_id: request
+                .owner_principal_id
+                .unwrap_or_else(|| actor_principal_or_actor_id(&actor)),
+            name: request.name.trim().to_owned(),
+            created_by: actor_principal_or_actor_id(&actor),
+            expires_at: request.expires_at,
+            allowed_actions: request.allowed_actions,
+            allowed_resources: request.allowed_resources,
+        },
+        now,
+    )?;
+    let api_key = create_api_key_record_for_state(&state, created.record).await?;
+    let audit_event_id = record_admin_resource_audit(
+        &state,
+        &actor,
+        AdminResourceAuditInput {
+            event_type: "gateway.api_key.create",
+            scope_kind: "api_key",
+            scope_id: api_key.api_key_id.clone(),
+            resource_kind: "ApiKey",
+            resource_id: api_key.api_key_id.clone(),
+            before_version: None,
+            after_version: None,
+            redacted_diff: json!({
+                "created": true,
+                "organization_id": api_key.organization_id.as_deref(),
+                "project_id": api_key.project_id.as_deref(),
+                "owner_principal_id": &api_key.owner_principal_id,
+                "name": &api_key.name,
+                "allowed_actions": &api_key.allowed_actions,
+                "allowed_resources": &api_key.allowed_resources,
+                "expires_at": api_key.expires_at
+            }),
+            occurred_at: now,
+        },
+    );
+    let sanitized_response =
+        api_key_mutation_response(&api_key, &audit_event_id, None, false, false);
+    state.store.record_idempotency_response(IdempotencyRecord {
+        tenant_id: actor.tenant_id,
+        scope_key,
+        request_hash,
+        response_record: sanitized_response,
+        expires_at: now + chrono::Duration::hours(IDEMPOTENCY_TTL_HOURS),
+        created_at: now,
+    });
+    Ok(Json(api_key_mutation_response(
+        &api_key,
+        &audit_event_id,
+        Some(created.raw_key.expose_secret()),
+        true,
+        false,
+    )))
+}
+
+async fn get_api_key_admin(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(api_key_id): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_API_KEY_GET_PATH,
+        &api_key_id,
+        now,
+    )
+    .await?;
+    let api_key = api_key_for_actor_admin(&state, &actor, &api_key_id).await?;
+    Ok(Json(json!({
+        "schema": "gateway.admin.api_key.v1",
+        "resource": api_key_resource_body(&api_key)
+    })))
+}
+
+async fn rotate_api_key_admin(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(api_key_id): Path<String>,
+    Json(request): Json<AdminRotateApiKeyRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::POST,
+        ADMIN_API_KEY_ROTATE_PATH,
+        &api_key_id,
+        now,
+    )
+    .await?;
+    let scope_key = idempotency_scope_key("api_keys:rotate", &request.idempotency_key);
+    let request_hash = stable_request_hash(&request)?;
+    if let Some(response) =
+        state
+            .store
+            .idempotency_response(&actor.tenant_id, &scope_key, &request_hash, now)?
+    {
+        return Ok(Json(response_with_replay_flag(response, true)));
+    }
+    let before = api_key_for_actor_admin(&state, &actor, &api_key_id).await?;
+    let rotated = rotate_api_key_secret(before.clone(), now)?;
+    let api_key = replace_api_key_secret_for_state(&state, rotated.record).await?;
+    let audit_event_id = record_admin_resource_audit(
+        &state,
+        &actor,
+        AdminResourceAuditInput {
+            event_type: "gateway.api_key.rotate",
+            scope_kind: "api_key",
+            scope_id: api_key.api_key_id.clone(),
+            resource_kind: "ApiKey",
+            resource_id: api_key.api_key_id.clone(),
+            before_version: None,
+            after_version: None,
+            redacted_diff: json!({
+                "rotated": true,
+                "key_prefix": {
+                    "before": before.key_prefix,
+                    "after": api_key.key_prefix
+                },
+                "reason": request.reason
+            }),
+            occurred_at: now,
+        },
+    );
+    let sanitized_response =
+        api_key_mutation_response(&api_key, &audit_event_id, None, false, false);
+    state.store.record_idempotency_response(IdempotencyRecord {
+        tenant_id: actor.tenant_id,
+        scope_key,
+        request_hash,
+        response_record: sanitized_response,
+        expires_at: now + chrono::Duration::hours(IDEMPOTENCY_TTL_HOURS),
+        created_at: now,
+    });
+    Ok(Json(api_key_mutation_response(
+        &api_key,
+        &audit_event_id,
+        Some(rotated.raw_key.expose_secret()),
+        true,
+        false,
+    )))
+}
+
+async fn disable_api_key_admin(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(api_key_id): Path<String>,
+    Json(request): Json<AdminDisableApiKeyRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::POST,
+        ADMIN_API_KEY_DISABLE_PATH,
+        &api_key_id,
+        now,
+    )
+    .await?;
+    let scope_key = idempotency_scope_key("api_keys:disable", &request.idempotency_key);
+    let request_hash = stable_request_hash(&request)?;
+    if let Some(response) =
+        state
+            .store
+            .idempotency_response(&actor.tenant_id, &scope_key, &request_hash, now)?
+    {
+        return Ok(Json(response_with_replay_flag(response, true)));
+    }
+    let before = api_key_for_actor_admin(&state, &actor, &api_key_id).await?;
+    let api_key =
+        update_api_key_status_for_state(&state, &actor, &api_key_id, ApiKeyStatus::Disabled, now)
+            .await?;
+    let audit_event_id = record_admin_resource_audit(
+        &state,
+        &actor,
+        AdminResourceAuditInput {
+            event_type: "gateway.api_key.disable",
+            scope_kind: "api_key",
+            scope_id: api_key.api_key_id.clone(),
+            resource_kind: "ApiKey",
+            resource_id: api_key.api_key_id.clone(),
+            before_version: None,
+            after_version: None,
+            redacted_diff: json!({
+                "status": {
+                    "before": before.status,
+                    "after": api_key.status
+                },
+                "reason": request.reason
+            }),
+            occurred_at: now,
+        },
+    );
+    let response = api_key_mutation_response(&api_key, &audit_event_id, None, false, false);
+    state.store.record_idempotency_response(IdempotencyRecord {
+        tenant_id: actor.tenant_id,
+        scope_key,
+        request_hash,
+        response_record: response.clone(),
+        expires_at: now + chrono::Duration::hours(IDEMPOTENCY_TTL_HOURS),
+        created_at: now,
+    });
+    Ok(Json(response))
 }
 
 async fn list_provider_endpoints(
@@ -17386,6 +17695,81 @@ fn api_key_for_actor(
         })
 }
 
+async fn api_keys_for_actor(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+) -> Result<Vec<ApiKeyRecord>> {
+    if let Some(store) = state.postgres_store.as_ref() {
+        store.api_keys_for_tenant(&actor.tenant_id).await
+    } else {
+        Ok(state.store.api_keys_for_tenant(&actor.tenant_id))
+    }
+}
+
+async fn api_key_for_actor_admin(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    api_key_id: &str,
+) -> Result<ApiKeyRecord> {
+    if let Some(store) = state.postgres_store.as_ref() {
+        return store
+            .api_key(api_key_id)
+            .await?
+            .filter(|api_key| api_key.tenant_id == actor.tenant_id)
+            .ok_or_else(|| GatewayError::NotFound {
+                resource: format!("API key {api_key_id}"),
+            });
+    }
+    api_key_for_actor(state, actor, api_key_id)
+}
+
+async fn create_api_key_record_for_state(
+    state: &AppState,
+    record: ApiKeyRecord,
+) -> Result<ApiKeyRecord> {
+    if let Some(store) = state.postgres_store.as_ref() {
+        let created = store.create_api_key_record(&record).await?;
+        state.store.insert_api_key(created.clone());
+        Ok(created)
+    } else {
+        state.store.create_api_key_record(record)
+    }
+}
+
+async fn replace_api_key_secret_for_state(
+    state: &AppState,
+    record: ApiKeyRecord,
+) -> Result<ApiKeyRecord> {
+    if let Some(store) = state.postgres_store.as_ref() {
+        let updated = store.replace_api_key_secret(&record).await?;
+        state.store.insert_api_key(updated.clone());
+        Ok(updated)
+    } else {
+        state.store.replace_api_key_secret(record)
+    }
+}
+
+async fn update_api_key_status_for_state(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    api_key_id: &str,
+    status: ApiKeyStatus,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<ApiKeyRecord> {
+    let updated = if let Some(store) = state.postgres_store.as_ref() {
+        store.update_api_key_status(api_key_id, status, now).await?
+    } else {
+        state.store.update_api_key_status(api_key_id, status, now)?
+    };
+    if updated.tenant_id != actor.tenant_id {
+        return Err(GatewayError::NotFound {
+            resource: format!("API key {api_key_id}"),
+        });
+    }
+    state.store.insert_api_key(updated.clone());
+    Ok(updated)
+}
+
 fn provider_endpoint_for_actor(
     state: &AppState,
     actor: &AuthenticatedActor,
@@ -20459,6 +20843,53 @@ fn service_account_resource_body(account: &ServiceAccountRecord) -> Value {
         "created_by": &account.created_by,
         "created_at": account.created_at,
         "updated_at": account.updated_at
+    })
+}
+
+fn api_key_resource_envelope(api_key: &ApiKeyRecord) -> Value {
+    json!({
+        "schema": "gateway.admin.resource.v1",
+        "resource": api_key_resource_body(api_key)
+    })
+}
+
+fn api_key_resource_body(api_key: &ApiKeyRecord) -> Value {
+    json!({
+        "kind": "api_key",
+        "id": &api_key.api_key_id,
+        "tenant_id": &api_key.tenant_id,
+        "organization_id": &api_key.organization_id,
+        "project_id": &api_key.project_id,
+        "owner_principal_id": &api_key.owner_principal_id,
+        "name": &api_key.name,
+        "key_prefix": &api_key.key_prefix,
+        "hash_version": api_key.hash_version,
+        "status": &api_key.status,
+        "allowed_actions": &api_key.allowed_actions,
+        "allowed_resources": &api_key.allowed_resources,
+        "expires_at": api_key.expires_at,
+        "last_used_at": api_key.last_used_at,
+        "last_used_request_id": &api_key.last_used_request_id,
+        "created_by": &api_key.created_by,
+        "created_at": api_key.created_at,
+        "updated_at": api_key.updated_at
+    })
+}
+
+fn api_key_mutation_response(
+    api_key: &ApiKeyRecord,
+    audit_event_id: &str,
+    raw_key: Option<&str>,
+    one_time_secret_available: bool,
+    idempotency_replayed: bool,
+) -> Value {
+    json!({
+        "schema": "gateway.admin.api_key_mutation.v1",
+        "resource": api_key_resource_body(api_key),
+        "raw_key": raw_key,
+        "one_time_secret_available": one_time_secret_available,
+        "audit_event_id": audit_event_id,
+        "idempotency_replayed": idempotency_replayed
     })
 }
 
@@ -30466,6 +30897,184 @@ mod tests {
             store.audit_events()[1].event_type,
             "gateway.service_account.update"
         );
+    }
+
+    #[tokio::test]
+    async fn admin_api_key_create_list_get_redacts_secret_and_denies_api_key_actor() {
+        let (store, raw_session, existing_raw_key) =
+            gateway_store_with_admin_session_and_runtime_access();
+        let (api_key_id, raw_key, create_body) =
+            create_project_api_key_over_http(store.clone(), &raw_session, "idem_api_key_create")
+                .await;
+
+        let list = get_admin(store.clone(), &raw_session, "/admin/v1/api-keys").await;
+        let list_status = list.status();
+        let list_body = response_json(list).await;
+        let get = get_admin(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/api-keys/{api_key_id}"),
+        )
+        .await;
+        let get_status = get.status();
+        let get_body = response_json(get).await;
+        let list_text = serde_json::to_string(&list_body)
+            .unwrap_or_else(|error| panic!("list response should serialize: {error}"));
+        let get_text = serde_json::to_string(&get_body)
+            .unwrap_or_else(|error| panic!("get response should serialize: {error}"));
+
+        assert_eq!(list_status, StatusCode::OK, "{list_body:?}");
+        assert_eq!(get_status, StatusCode::OK, "{get_body:?}");
+        assert_eq!(create_body["one_time_secret_available"], true);
+        assert_eq!(create_body["resource"]["key_prefix"], raw_key[..16]);
+        assert!(create_body["resource"].get("secret_hash").is_none());
+        assert!(!list_text.contains("secret_hash"));
+        assert!(!list_text.contains(raw_key.as_str()));
+        assert!(!get_text.contains("secret_hash"));
+        assert!(!get_text.contains(raw_key.as_str()));
+        assert_eq!(get_body["resource"]["id"], api_key_id);
+        assert_eq!(get_body["resource"]["status"], "active");
+        assert!(verify_api_key(
+            &store,
+            &raw_key,
+            "req_api_key_created".to_owned(),
+            "trace_api_key_created".to_owned(),
+            chrono::Utc::now(),
+        )
+        .is_ok());
+
+        let replay =
+            create_project_api_key_request(store.clone(), &raw_session, "idem_api_key_create")
+                .await;
+        let replay_body = response_json(replay).await;
+        assert_eq!(replay_body["idempotency_replayed"], true);
+        assert_eq!(replay_body["one_time_secret_available"], false);
+        assert!(replay_body["raw_key"].is_null());
+
+        let api_key_denied =
+            get_public_with_bearer(store.clone(), &existing_raw_key, "/admin/v1/api-keys").await;
+        assert_eq!(api_key_denied.status(), StatusCode::FORBIDDEN);
+        assert_eq!(store.audit_events().len(), 1);
+        assert_eq!(store.audit_events()[0].event_type, "gateway.api_key.create");
+    }
+
+    #[tokio::test]
+    async fn admin_api_key_rotate_disable_updates_authentication_state() {
+        let (store, raw_session, _) = gateway_store_with_admin_session_and_runtime_access();
+        let (api_key_id, raw_key, _) = create_project_api_key_over_http(
+            store.clone(),
+            &raw_session,
+            "idem_api_key_rotate_disable_create",
+        )
+        .await;
+
+        let rotate = post_admin_json(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/api-keys/{api_key_id}/rotate"),
+            json!({
+                "idempotency_key": "idem_api_key_rotate",
+                "reason": "Scheduled rotation."
+            }),
+        )
+        .await;
+        let rotate_status = rotate.status();
+        let rotate_body = response_json(rotate).await;
+        let rotated_raw_key = rotate_body["raw_key"]
+            .as_str()
+            .unwrap_or_else(|| panic!("rotated raw API key should be returned"))
+            .to_owned();
+        assert_eq!(rotate_status, StatusCode::OK, "{rotate_body:?}");
+        assert_eq!(rotate_body["resource"]["id"], api_key_id);
+        assert_eq!(rotate_body["one_time_secret_available"], true);
+        assert_ne!(rotated_raw_key, raw_key);
+        assert!(verify_api_key(
+            &store,
+            &raw_key,
+            "req_api_key_old".to_owned(),
+            "trace_api_key_old".to_owned(),
+            chrono::Utc::now(),
+        )
+        .is_err());
+        assert!(verify_api_key(
+            &store,
+            &rotated_raw_key,
+            "req_api_key_rotated".to_owned(),
+            "trace_api_key_rotated".to_owned(),
+            chrono::Utc::now(),
+        )
+        .is_ok());
+
+        let disable = post_admin_json(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/api-keys/{api_key_id}/disable"),
+            json!({
+                "idempotency_key": "idem_api_key_disable",
+                "reason": "Retire automation."
+            }),
+        )
+        .await;
+        let disable_status = disable.status();
+        let disable_body = response_json(disable).await;
+        assert_eq!(disable_status, StatusCode::OK, "{disable_body:?}");
+        assert_eq!(disable_body["resource"]["status"], "disabled");
+        assert!(verify_api_key(
+            &store,
+            &rotated_raw_key,
+            "req_api_key_disabled".to_owned(),
+            "trace_api_key_disabled".to_owned(),
+            chrono::Utc::now(),
+        )
+        .is_err());
+        assert_eq!(store.audit_events().len(), 3);
+        assert_eq!(store.audit_events()[0].event_type, "gateway.api_key.create");
+        assert_eq!(store.audit_events()[1].event_type, "gateway.api_key.rotate");
+        assert_eq!(
+            store.audit_events()[2].event_type,
+            "gateway.api_key.disable"
+        );
+    }
+
+    async fn create_project_api_key_over_http(
+        store: InMemoryGatewayStore,
+        raw_session: &str,
+        idempotency_key: &str,
+    ) -> (String, String, Value) {
+        let create = create_project_api_key_request(store, raw_session, idempotency_key).await;
+        let create_status = create.status();
+        let create_body = response_json(create).await;
+        assert_eq!(create_status, StatusCode::OK, "{create_body:?}");
+        let api_key_id = create_body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("created API key id should be present"))
+            .to_owned();
+        let raw_key = create_body["raw_key"]
+            .as_str()
+            .unwrap_or_else(|| panic!("created raw API key should be returned"))
+            .to_owned();
+        (api_key_id, raw_key, create_body)
+    }
+
+    async fn create_project_api_key_request(
+        store: InMemoryGatewayStore,
+        raw_session: &str,
+        idempotency_key: &str,
+    ) -> Response<Body> {
+        post_admin_json(
+            store,
+            raw_session,
+            "/admin/v1/api-keys",
+            json!({
+                "idempotency_key": idempotency_key,
+                "organization_id": TEST_ORGANIZATION_ID,
+                "project_id": TEST_PROJECT_ID,
+                "name": "Project automation",
+                "allowed_actions": ["gateway.model.invoke"],
+                "allowed_resources": ["model_alias:*"]
+            }),
+        )
+        .await
     }
 
     #[tokio::test]

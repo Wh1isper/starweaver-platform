@@ -243,8 +243,9 @@ Work items:
 
 - Implement organizations, projects, members, invitations, users, external
   identities, sessions, service accounts, identity providers, and role/action
-  grant views where backed by current APIs. API key lifecycle pages remain
-  blocked until explicit API key admin endpoints exist.
+  grant views where backed by current APIs. API key lifecycle pages can use the
+  admin create/list/get/rotate/disable endpoints and must preserve one-time raw
+  key reveal semantics.
 - Implement provider grants, budgets, quotas, admission policies, and redaction
   policies.
 - Implement one-time API key reveal and copy UX.

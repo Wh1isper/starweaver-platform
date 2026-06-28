@@ -43,8 +43,8 @@ action grants. The UI must make scope and permission narrowing explicit.
 - Configure generic OIDC identity provider.
 - Inspect external identities and sessions.
 - Revoke a session.
-- Plan API key lifecycle UX, but keep create, rotate, disable, and one-time
-  reveal hidden until admin API key endpoints exist.
+- Implement API key create, rotate, disable, list, detail, and one-time reveal
+  UX using the admin API key lifecycle endpoints.
 - Create, update, disable, and inspect service accounts.
 - Show action-grant or role-binding views only after the corresponding gateway
   admin endpoints exist.
@@ -76,7 +76,10 @@ action grants. The UI must make scope and permission narrowing explicit.
 | `/api/admin/v1/users/{id}/external-identities/*`        | external identity list, detail, and unlink |
 | `/api/admin/v1/identity-providers/*`                    | login provider config                      |
 | `/api/admin/v1/service-accounts`                        | service account list and create            |
-| future API key endpoints                                | API key lifecycle                          |
+| `/api/admin/v1/api-keys`                                | API key list and create                    |
+| `/api/admin/v1/api-keys/{id}`                           | API key detail                             |
+| `/api/admin/v1/api-keys/{id}/rotate`                    | API key rotate with one-time raw key       |
+| `/api/admin/v1/api-keys/{id}/disable`                   | API key disable                            |
 
 ## UX Decisions
 
@@ -96,8 +99,7 @@ action grants. The UI must make scope and permission narrowing explicit.
 
 ## One-Time API Key Reveal
 
-This is a phased workflow until API key admin endpoints exist. The create-key
-success screen must eventually:
+The create-key and rotate-key success screen must:
 
 - show the raw key once
 - provide copy control

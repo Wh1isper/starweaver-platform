@@ -495,6 +495,61 @@ const FOUNDATION_ROUTES: &[RouteMetadata] = &[
     },
     RouteMetadata {
         method: Method::GET,
+        path_pattern: "/admin/v1/api-keys",
+        protocol_family: None,
+        action: GatewayAction::ApiKeyRead,
+        resource_kind: "ApiKey",
+        scope_params: &["tenant_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.api_key.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/api-keys",
+        protocol_family: None,
+        action: GatewayAction::ApiKeyCreate,
+        resource_kind: "ApiKey",
+        scope_params: &["tenant_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.api_key.create",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/api-keys/", "{api_key_id}"),
+        protocol_family: None,
+        action: GatewayAction::ApiKeyRead,
+        resource_kind: "ApiKey",
+        scope_params: &["tenant_id", "api_key_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.api_key.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: concat!("/admin/v1/api-keys/", "{api_key_id}", "/rotate"),
+        protocol_family: None,
+        action: GatewayAction::ApiKeyRotate,
+        resource_kind: "ApiKey",
+        scope_params: &["tenant_id", "api_key_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.api_key.rotate",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: concat!("/admin/v1/api-keys/", "{api_key_id}", "/disable"),
+        protocol_family: None,
+        action: GatewayAction::ApiKeyDisable,
+        resource_kind: "ApiKey",
+        scope_params: &["tenant_id", "api_key_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.api_key.disable",
+    },
+    RouteMetadata {
+        method: Method::GET,
         path_pattern: "/admin/v1/provider-endpoints",
         protocol_family: None,
         action: GatewayAction::ProviderEndpointRead,
@@ -2405,6 +2460,28 @@ mod tests {
             route.actor_constraint_denial(&api_key_actor()),
             Some("api_key_not_allowed_for_route")
         );
+    }
+
+    #[test]
+    fn api_key_lifecycle_routes_require_strong_non_api_key_auth() {
+        for path_pattern in [
+            "/admin/v1/api-keys",
+            concat!("/admin/v1/api-keys/", "{api_key_id}"),
+            concat!("/admin/v1/api-keys/", "{api_key_id}", "/rotate"),
+            concat!("/admin/v1/api-keys/", "{api_key_id}", "/disable"),
+        ] {
+            let route = foundation_routes()
+                .iter()
+                .find(|route| route.path_pattern == path_pattern)
+                .unwrap_or_else(|| panic!("API key route metadata should exist"));
+
+            assert!(!route.allow_api_key);
+            assert!(route.strong_auth_required);
+            assert_eq!(
+                route.actor_constraint_denial(&api_key_actor()),
+                Some("api_key_not_allowed_for_route")
+            );
+        }
     }
 
     #[test]

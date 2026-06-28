@@ -13,7 +13,9 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use sqlx::Row;
 
-use crate::action::{ActionGrant, AuthorizationDecisionRecord, AuthorizationEvidenceSink};
+use crate::action::{
+    ActionGrant, AuthorizationDecisionRecord, AuthorizationEvidenceSink, GatewayAction,
+};
 use crate::config::{ConfigSnapshotDocument, PublishedConfigSnapshot};
 use crate::domain::{
     new_prefixed_id, ApiKeyRecord, ApiKeyStatus, AuditEventRecord, AuthSessionRecord,
@@ -1883,10 +1885,44 @@ impl InMemoryGatewayStore {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
+        for records in api_keys.values_mut() {
+            records.retain(|candidate| candidate.api_key_id != record.api_key_id);
+        }
         api_keys
             .entry(record.key_prefix.clone())
             .or_default()
             .push(record);
+    }
+
+    /// Creates an API key record after validating tenant-local ownership and scope.
+    pub fn create_api_key_record(&self, record: ApiKeyRecord) -> Result<ApiKeyRecord> {
+        validate_api_key_admin_record(self, &record)?;
+        self.insert_api_key(record.clone());
+        Ok(record)
+    }
+
+    /// Lists API keys in one tenant.
+    #[must_use]
+    pub fn api_keys_for_tenant(&self, tenant_id: &str) -> Vec<ApiKeyRecord> {
+        let mut records = {
+            let api_keys = match self.api_keys.read() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            api_keys
+                .values()
+                .flat_map(|records| records.iter())
+                .filter(|record| record.tenant_id == tenant_id)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        records.sort_by(|left, right| {
+            left.organization_id
+                .cmp(&right.organization_id)
+                .then_with(|| left.project_id.cmp(&right.project_id))
+                .then_with(|| left.api_key_id.cmp(&right.api_key_id))
+        });
+        records
     }
 
     /// Loads an API key by stable id.
@@ -1901,6 +1937,63 @@ impl InMemoryGatewayStore {
             .flat_map(|records| records.iter())
             .find(|record| record.api_key_id == api_key_id)
             .cloned()
+    }
+
+    /// Updates an API key lifecycle status.
+    pub fn update_api_key_status(
+        &self,
+        api_key_id: &str,
+        status: ApiKeyStatus,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ApiKeyRecord> {
+        if !api_key_status_supported_for_admin(&status) {
+            return Err(GatewayError::BadRequest {
+                message: "unsupported_api_key_status".to_owned(),
+            });
+        }
+        let updated = {
+            let mut api_keys = match self.api_keys.write() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let mut updated = None;
+            for records in api_keys.values_mut() {
+                if let Some(record) = records
+                    .iter_mut()
+                    .find(|record| record.api_key_id == api_key_id)
+                {
+                    record.status = status;
+                    record.updated_at = now;
+                    updated = Some(record.clone());
+                    break;
+                }
+            }
+            drop(api_keys);
+            updated
+        };
+        if let Some(updated) = updated {
+            return Ok(updated);
+        }
+        Err(GatewayError::NotFound {
+            resource: format!("API key {api_key_id}"),
+        })
+    }
+
+    /// Replaces API key secret metadata while preserving the stable API key id.
+    pub fn replace_api_key_secret(&self, record: ApiKeyRecord) -> Result<ApiKeyRecord> {
+        validate_api_key_admin_record(self, &record)?;
+        let existing = self
+            .api_key(&record.api_key_id)
+            .ok_or_else(|| GatewayError::NotFound {
+                resource: format!("API key {}", record.api_key_id),
+            })?;
+        if existing.tenant_id != record.tenant_id {
+            return Err(GatewayError::Authorization {
+                reason: "api_key_tenant_mismatch",
+            });
+        }
+        self.insert_api_key(record.clone());
+        Ok(record)
     }
 
     /// Returns queued API key last-used updates.
@@ -6336,6 +6429,118 @@ const fn service_account_status_supported(status: &DirectoryStatus) -> bool {
     )
 }
 
+fn validate_api_key_admin_record(
+    store: &InMemoryGatewayStore,
+    record: &ApiKeyRecord,
+) -> Result<()> {
+    if record.name.trim().is_empty() {
+        return Err(GatewayError::BadRequest {
+            message: "api_key_name_required".to_owned(),
+        });
+    }
+    if record.organization_id.is_none() && record.project_id.is_none() {
+        return Err(GatewayError::BadRequest {
+            message: "api_key_scope_required".to_owned(),
+        });
+    }
+    if !read_lock(&store.tenants).contains_key(&record.tenant_id) {
+        return Err(GatewayError::NotFound {
+            resource: format!("tenant {}", record.tenant_id),
+        });
+    }
+    validate_api_key_owner(store, record)?;
+    validate_api_key_scope(store, record)?;
+    validate_api_key_action_allowlist(record)?;
+    Ok(())
+}
+
+fn validate_api_key_owner(store: &InMemoryGatewayStore, record: &ApiKeyRecord) -> Result<()> {
+    if let Some(user) = read_lock(&store.users).get(&record.owner_principal_id) {
+        if user.tenant_id == record.tenant_id {
+            return Ok(());
+        }
+        return Err(GatewayError::Authorization {
+            reason: "api_key_owner_tenant_mismatch",
+        });
+    }
+    if let Some(account) = read_lock(&store.service_accounts).get(&record.owner_principal_id) {
+        if account.tenant_id == record.tenant_id {
+            return Ok(());
+        }
+        return Err(GatewayError::Authorization {
+            reason: "api_key_owner_tenant_mismatch",
+        });
+    }
+    Err(GatewayError::NotFound {
+        resource: format!("principal {}", record.owner_principal_id),
+    })
+}
+
+fn validate_api_key_scope(store: &InMemoryGatewayStore, record: &ApiKeyRecord) -> Result<()> {
+    let project = if let Some(project_id) = record.project_id.as_deref() {
+        let Some(project) = read_lock(&store.projects).get(project_id).cloned() else {
+            return Err(GatewayError::NotFound {
+                resource: format!("project {project_id}"),
+            });
+        };
+        if project.tenant_id != record.tenant_id {
+            return Err(GatewayError::Authorization {
+                reason: "api_key_project_tenant_mismatch",
+            });
+        }
+        Some(project)
+    } else {
+        None
+    };
+    let organization_id = record
+        .organization_id
+        .as_deref()
+        .or_else(|| {
+            project
+                .as_ref()
+                .map(|project| project.organization_id.as_str())
+        })
+        .ok_or_else(|| GatewayError::BadRequest {
+            message: "api_key_scope_required".to_owned(),
+        })?;
+    let Some(organization) = read_lock(&store.organizations)
+        .get(organization_id)
+        .cloned()
+    else {
+        return Err(GatewayError::NotFound {
+            resource: format!("organization {organization_id}"),
+        });
+    };
+    if organization.tenant_id != record.tenant_id {
+        return Err(GatewayError::Authorization {
+            reason: "api_key_organization_tenant_mismatch",
+        });
+    }
+    if let Some(project) = project.as_ref() {
+        if project.organization_id != organization.organization_id {
+            return Err(GatewayError::BadRequest {
+                message: "api_key_project_organization_mismatch".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_api_key_action_allowlist(record: &ApiKeyRecord) -> Result<()> {
+    for action_id in &record.allowed_actions {
+        if GatewayAction::from_action_id(action_id).is_none() {
+            return Err(GatewayError::BadRequest {
+                message: format!("unknown_api_key_action:{action_id}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+const fn api_key_status_supported_for_admin(status: &ApiKeyStatus) -> bool {
+    matches!(status, ApiKeyStatus::Active | ApiKeyStatus::Disabled)
+}
+
 fn validate_routing_group_request(
     store: &InMemoryGatewayStore,
     request: &CreateRoutingGroupRequest,
@@ -9024,6 +9229,263 @@ impl PostgresGatewayStore {
         rows.iter().map(api_key_record_from_row).collect()
     }
 
+    /// Creates durable API key metadata.
+    pub async fn create_api_key_record(&self, record: &ApiKeyRecord) -> Result<ApiKeyRecord> {
+        sqlx::query(
+            r"
+            INSERT INTO gateway_api_keys (
+                api_key_id,
+                tenant_id,
+                organization_id,
+                project_id,
+                owner_principal_id,
+                name,
+                key_prefix,
+                secret_hash,
+                hash_version,
+                status,
+                allowed_actions,
+                allowed_resources,
+                expires_at,
+                last_used_at,
+                last_used_request_id,
+                created_by,
+                created_at,
+                updated_at
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9,
+                $10, $11, $12, $13, $14, $15, $16, $17, $18
+            )
+            ",
+        )
+        .bind(&record.api_key_id)
+        .bind(&record.tenant_id)
+        .bind(&record.organization_id)
+        .bind(&record.project_id)
+        .bind(&record.owner_principal_id)
+        .bind(&record.name)
+        .bind(&record.key_prefix)
+        .bind(&record.secret_hash)
+        .bind(i32::from(record.hash_version))
+        .bind(api_key_status_as_str(&record.status))
+        .bind(
+            serde_json::to_value(&record.allowed_actions).map_err(|error| {
+                GatewayError::Internal {
+                    message: format!("failed to encode API key allowed actions: {error}"),
+                }
+            })?,
+        )
+        .bind(
+            serde_json::to_value(&record.allowed_resources).map_err(|error| {
+                GatewayError::Internal {
+                    message: format!("failed to encode API key allowed resources: {error}"),
+                }
+            })?,
+        )
+        .bind(record.expires_at)
+        .bind(record.last_used_at)
+        .bind(&record.last_used_request_id)
+        .bind(&record.created_by)
+        .bind(record.created_at)
+        .bind(record.updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| GatewayError::Internal {
+            message: format!("failed to create API key: {error}"),
+        })?;
+        Ok(record.clone())
+    }
+
+    /// Lists durable API keys in one tenant.
+    pub async fn api_keys_for_tenant(&self, tenant_id: &str) -> Result<Vec<ApiKeyRecord>> {
+        let rows = sqlx::query(
+            r"
+            SELECT
+                api_key_id,
+                tenant_id,
+                organization_id,
+                project_id,
+                owner_principal_id,
+                name,
+                key_prefix,
+                secret_hash,
+                hash_version,
+                status,
+                allowed_actions,
+                allowed_resources,
+                expires_at,
+                last_used_at,
+                last_used_request_id,
+                created_by,
+                created_at,
+                updated_at
+            FROM gateway_api_keys
+            WHERE tenant_id = $1
+              AND status <> 'deleted'
+            ORDER BY organization_id NULLS FIRST, project_id NULLS FIRST, api_key_id
+            ",
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| GatewayError::Internal {
+            message: format!("failed to list API keys: {error}"),
+        })?;
+        rows.iter().map(api_key_record_from_row).collect()
+    }
+
+    /// Loads one durable API key by id.
+    pub async fn api_key(&self, api_key_id: &str) -> Result<Option<ApiKeyRecord>> {
+        let row = sqlx::query(
+            r"
+            SELECT
+                api_key_id,
+                tenant_id,
+                organization_id,
+                project_id,
+                owner_principal_id,
+                name,
+                key_prefix,
+                secret_hash,
+                hash_version,
+                status,
+                allowed_actions,
+                allowed_resources,
+                expires_at,
+                last_used_at,
+                last_used_request_id,
+                created_by,
+                created_at,
+                updated_at
+            FROM gateway_api_keys
+            WHERE api_key_id = $1
+              AND status <> 'deleted'
+            ",
+        )
+        .bind(api_key_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| GatewayError::Internal {
+            message: format!("failed to load API key: {error}"),
+        })?;
+        row.as_ref().map(api_key_record_from_row).transpose()
+    }
+
+    /// Updates durable API key lifecycle status.
+    pub async fn update_api_key_status(
+        &self,
+        api_key_id: &str,
+        status: ApiKeyStatus,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ApiKeyRecord> {
+        if !api_key_status_supported_for_admin(&status) {
+            return Err(GatewayError::BadRequest {
+                message: "unsupported_api_key_status".to_owned(),
+            });
+        }
+        let row = sqlx::query(
+            r"
+            UPDATE gateway_api_keys
+            SET status = $2,
+                updated_at = $3,
+                resource_version = resource_version + 1
+            WHERE api_key_id = $1
+              AND status <> 'deleted'
+            RETURNING
+                api_key_id,
+                tenant_id,
+                organization_id,
+                project_id,
+                owner_principal_id,
+                name,
+                key_prefix,
+                secret_hash,
+                hash_version,
+                status,
+                allowed_actions,
+                allowed_resources,
+                expires_at,
+                last_used_at,
+                last_used_request_id,
+                created_by,
+                created_at,
+                updated_at
+            ",
+        )
+        .bind(api_key_id)
+        .bind(api_key_status_as_str(&status))
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| GatewayError::Internal {
+            message: format!("failed to update API key status: {error}"),
+        })?;
+        row.as_ref()
+            .map(api_key_record_from_row)
+            .transpose()?
+            .ok_or_else(|| GatewayError::NotFound {
+                resource: format!("API key {api_key_id}"),
+            })
+    }
+
+    /// Replaces durable API key secret metadata while preserving the stable id.
+    pub async fn replace_api_key_secret(&self, record: &ApiKeyRecord) -> Result<ApiKeyRecord> {
+        let row = sqlx::query(
+            r"
+            UPDATE gateway_api_keys
+            SET key_prefix = $2,
+                secret_hash = $3,
+                hash_version = $4,
+                status = $5,
+                last_used_at = NULL,
+                last_used_request_id = NULL,
+                updated_at = $6,
+                resource_version = resource_version + 1
+            WHERE api_key_id = $1
+              AND tenant_id = $7
+              AND status <> 'deleted'
+            RETURNING
+                api_key_id,
+                tenant_id,
+                organization_id,
+                project_id,
+                owner_principal_id,
+                name,
+                key_prefix,
+                secret_hash,
+                hash_version,
+                status,
+                allowed_actions,
+                allowed_resources,
+                expires_at,
+                last_used_at,
+                last_used_request_id,
+                created_by,
+                created_at,
+                updated_at
+            ",
+        )
+        .bind(&record.api_key_id)
+        .bind(&record.key_prefix)
+        .bind(&record.secret_hash)
+        .bind(i32::from(record.hash_version))
+        .bind(api_key_status_as_str(&record.status))
+        .bind(record.updated_at)
+        .bind(&record.tenant_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| GatewayError::Internal {
+            message: format!("failed to rotate API key: {error}"),
+        })?;
+        row.as_ref()
+            .map(api_key_record_from_row)
+            .transpose()?
+            .ok_or_else(|| GatewayError::NotFound {
+                resource: format!("API key {}", record.api_key_id),
+            })
+    }
+
     /// Flushes queued API key last-used updates.
     pub async fn flush_api_key_last_used_updates(
         &self,
@@ -10304,6 +10766,16 @@ fn parse_route_attempt_status(value: &str) -> Result<RouteAttemptStatus> {
         _ => Err(GatewayError::Internal {
             message: format!("unknown route attempt status: {value}"),
         }),
+    }
+}
+
+const fn api_key_status_as_str(status: &ApiKeyStatus) -> &'static str {
+    match status {
+        ApiKeyStatus::Active => "active",
+        ApiKeyStatus::Disabled => "disabled",
+        ApiKeyStatus::Expired => "expired",
+        ApiKeyStatus::Rotating => "rotating",
+        ApiKeyStatus::Deleted => "deleted",
     }
 }
 

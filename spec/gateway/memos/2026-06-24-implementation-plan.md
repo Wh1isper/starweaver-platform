@@ -1668,7 +1668,7 @@ gateway service with:
   usage, audit, and config snapshot tables
 - API key authentication
 - Cedar authorization for a small action set
-- admin create/read for tenant, organization, project, API key, provider
+- admin create/read for tenant, organization, project, API key lifecycle, provider
   endpoint, upstream credential reference, model target, model alias, routing
   group, and route policy
 - config snapshot publication and worker reload by polling

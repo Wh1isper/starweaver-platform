@@ -112,14 +112,7 @@ pub struct ResolveServiceAccountRequest {
 /// Creates an API key record and one-time raw value.
 pub fn create_api_key(request: CreateApiKeyRequest, now: DateTime<Utc>) -> Result<CreatedApiKey> {
     let raw_key = generate_raw_key();
-    let key_prefix = key_prefix(raw_key.expose_secret())?;
-    let salt = SaltString::generate(&mut OsRng);
-    let secret_hash = Argon2::default()
-        .hash_password(raw_key.expose_secret().as_bytes(), &salt)
-        .map_err(|error| GatewayError::Internal {
-            message: format!("api key hash failed: {error}"),
-        })?
-        .to_string();
+    let (key_prefix, secret_hash) = api_key_secret_metadata(&raw_key)?;
 
     Ok(CreatedApiKey {
         record: ApiKeyRecord {
@@ -144,6 +137,23 @@ pub fn create_api_key(request: CreateApiKeyRequest, now: DateTime<Utc>) -> Resul
         },
         raw_key,
     })
+}
+
+/// Rotates an API key record and returns the replacement one-time raw value.
+pub fn rotate_api_key_secret(
+    mut record: ApiKeyRecord,
+    now: DateTime<Utc>,
+) -> Result<CreatedApiKey> {
+    let raw_key = generate_raw_key();
+    let (key_prefix, secret_hash) = api_key_secret_metadata(&raw_key)?;
+    record.key_prefix = key_prefix;
+    record.secret_hash = secret_hash;
+    record.hash_version = 1;
+    record.status = ApiKeyStatus::Active;
+    record.last_used_at = None;
+    record.last_used_request_id = None;
+    record.updated_at = now;
+    Ok(CreatedApiKey { record, raw_key })
 }
 
 /// Creates a server-side auth session record and one-time raw token.
@@ -303,6 +313,18 @@ pub(crate) fn verify_secret(presented_key: &str, secret_hash: &str) -> Result<bo
 
 fn generate_raw_key() -> SecretString {
     generate_raw_prefixed_token("swg_")
+}
+
+fn api_key_secret_metadata(raw_key: &SecretString) -> Result<(String, String)> {
+    let key_prefix = key_prefix(raw_key.expose_secret())?;
+    let salt = SaltString::generate(&mut OsRng);
+    let secret_hash = Argon2::default()
+        .hash_password(raw_key.expose_secret().as_bytes(), &salt)
+        .map_err(|error| GatewayError::Internal {
+            message: format!("api key hash failed: {error}"),
+        })?
+        .to_string();
+    Ok((key_prefix, secret_hash))
 }
 
 fn generate_raw_session_token() -> SecretString {
