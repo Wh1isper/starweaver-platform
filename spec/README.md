@@ -70,8 +70,9 @@ flowchart TD
 - `gateway/11-login-user-management.md` defines GitHub OAuth App login, OIDC
   login, sessions, external identities, invitations, default organizations, and
   user management.
-- `gateway/12-dashboards-observability-api.md` defines scoped dashboard APIs,
-  usage analytics, model observability, and project member consumption views.
+- `gateway/12-dashboards-observability-api.md` defines the Redis-compatible
+  realtime operations dashboard, scoped dashboard APIs, usage analytics, model
+  observability, and project member consumption views.
 - `gateway/memos/` records implementation planning notes such as framework and
   library selection.
 - `platform/01-agent-platform-service.md` summarizes the agent control plane

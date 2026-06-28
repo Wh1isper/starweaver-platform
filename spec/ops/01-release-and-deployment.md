@@ -28,7 +28,7 @@ The tag represents a compatible set of:
 Each release should publish service images:
 
 ```text
-starweaver-gateway:v0.1.0
+gcr.io/$GCP_PROJECT_ID/starweaver-gateway:v0.1.0
 starweaver-platform-service:v0.1.0
 starweaver-admin-api:v0.1.0
 ```
@@ -74,6 +74,47 @@ local compose smoke when service files change
 ```
 
 The exact commands can be added after the workspace and tooling exist.
+
+Current container gate:
+
+- `.github/workflows/images.yml` builds the gateway image on pull requests that
+  touch Rust service code, the Dockerfile, or the image workflow.
+- The smoke build targets Linux `amd64` because the service deployment target
+  is Linux-only.
+
+## Image Publication
+
+Gateway image publication uses Google Workload Identity Federation and pushes
+to GCR-compatible registries.
+
+Required GitHub configuration:
+
+| Name                             | Kind               | Purpose                                      |
+| -------------------------------- | ------------------ | -------------------------------------------- |
+| `GCP_PROJECT_ID`                 | variable or secret | Google Cloud project that owns the registry  |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | secret             | GitHub OIDC workload identity provider       |
+| `GCP_SERVICE_ACCOUNT`            | secret             | service account allowed to push GCR images   |
+| `GCR_REGISTRY`                   | variable           | optional registry host, defaults to `gcr.io` |
+
+Nightly builds are published from `main` by the scheduled workflow:
+
+```text
+gcr.io/$GCP_PROJECT_ID/starweaver-gateway:nightly
+gcr.io/$GCP_PROJECT_ID/starweaver-gateway:nightly-YYYYMMDD-SHORTSHA
+gcr.io/$GCP_PROJECT_ID/starweaver-gateway:main-SHORTSHA
+```
+
+Release builds are published from `v*.*.*` tags or GitHub release publish
+events:
+
+```text
+gcr.io/$GCP_PROJECT_ID/starweaver-gateway:v0.1.0
+gcr.io/$GCP_PROJECT_ID/starweaver-gateway:0.1.0
+gcr.io/$GCP_PROJECT_ID/starweaver-gateway:latest
+```
+
+Manual dispatch supports `nightly` and `release` channels. Manual release
+dispatch requires a tag such as `v0.1.0`.
 
 ## Release Flow
 

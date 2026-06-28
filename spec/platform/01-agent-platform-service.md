@@ -66,6 +66,30 @@ The gateway returns model responses, stream chunks, usage metadata, and gateway
 decision metadata. The platform records run evidence but does not need to know
 which upstream credential or provider endpoint was selected.
 
+## Shared Auth And Permissions
+
+The platform is expected to share some authn/authz foundations with the
+gateway, but not by depending on gateway internals. The first implementation
+should keep platform authorization service-local while it proves concrete
+resource semantics for runs, conversations, agents, approvals, environments, and
+evidence archives.
+
+Candidate shared layers should be evaluated after both services have concrete
+use cases:
+
+- stable contracts for ids, actor context, tenant/organization/project scope,
+  principal references, sessions, service accounts, error envelopes, and audit
+  context
+- identity domain behavior for login providers, users, external identities,
+  sessions, memberships, role bindings, and action grants
+- policy helpers for action/resource registries, Cedar schema generation,
+  built-in role templates, and validation fixtures
+
+Gateway model permissions and platform run/environment permissions must remain
+service-specific namespaces. A shared policy engine is acceptable only if it
+preserves those namespaces and contract tests prove neither service can widen
+the other's permissions.
+
 ## Core Objects
 
 | Object                  | Responsibility                                     |

@@ -10,8 +10,8 @@ choices and rejected alternatives before the gateway service is implemented.
 
 - `2026-06-24-framework-selection.md` - framework and library choices for the
   first gateway implementation.
-- `2026-06-24-hot-state-cache.md` - Redis or Valkey key, TTL, atomicity,
-  failure-mode, and reconciliation decisions.
+- `2026-06-24-implementation-plan.md` - detailed gateway implementation order,
+  feasibility review, sequencing rationale, and review gates.
 
 ## Rules
 

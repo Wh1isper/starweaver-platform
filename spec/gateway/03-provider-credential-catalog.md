@@ -70,7 +70,7 @@ Fields:
 | `name`                 | admin-visible unique name within tenant                                                                                                                  |
 | `provider_kind`        | `openai`, `anthropic`, `azure_openai`, `azure_foundry`, `bedrock`, `vertex`, `google_generative_language`, `codex`, `openai_compatible`, `custom_native` |
 | `protocol_families`    | list of supported ingress families                                                                                                                       |
-| `base_url`             | upstream base URL or gateway-to-provider mount                                                                                                           |
+| `upstream_base_url`    | upstream provider base URL used by gateway request builders                                                                                              |
 | `region`               | optional geographic or cloud region                                                                                                                      |
 | `cloud_account_ref`    | optional cloud account or project reference                                                                                                              |
 | `credential_id`        | upstream credential reference                                                                                                                            |
@@ -83,6 +83,10 @@ Fields:
 | `created_by`           | admin actor                                                                                                                                              |
 | `created_at`           | creation timestamp                                                                                                                                       |
 | `updated_at`           | last update                                                                                                                                              |
+
+`upstream_base_url` is only the provider-facing endpoint. Client-facing gateway
+mount compatibility is defined in `05-runtime-protocol.md` and must not be
+stored as provider catalog URL assembly state.
 
 Provider endpoint status behavior:
 
@@ -140,7 +144,7 @@ Fields:
 | `tenant_id`              | owning tenant                                        |
 | `name`                   | admin-visible name                                   |
 | `credential_kind`        | kind from table below                                |
-| `secret_ref`             | encrypted blob id or external secret reference       |
+| `secret_ref_id`          | gateway secret reference id                          |
 | `status`                 | `active`, `disabled`, `rotating`, `expired`, `error` |
 | `expires_at`             | optional expiry for token/cert-like credentials      |
 | `rotation_policy_id`     | optional rotation schedule                           |
@@ -188,15 +192,17 @@ Every `SecretRef` has:
 - `secret_ref_id`
 - `tenant_id`
 - `kind`
-- `locator`
+- `locator_mask`
 - `version_hint`
 - `mask_hint`
 - `created_by`
 - `created_at`
 - `updated_at`
 
-The locator itself can be sensitive for some secret stores and should be
-redacted from non-security-admin views.
+Raw backend locators can be sensitive for some secret stores. Default reads
+return only `secret_ref_id`, kind, version hint, fingerprint or mask metadata,
+and timestamps. Raw locator reads require a strong-auth `security_admin` path
+and still never return the secret value.
 
 ## Secret Handling Rules
 
@@ -230,14 +236,14 @@ stateDiagram-v2
 
 Rotation metadata:
 
-| Field                   | Meaning                                    |
-| ----------------------- | ------------------------------------------ |
-| `rotation_window_start` | earliest automatic rotation time           |
-| `rotation_window_end`   | latest automatic rotation time             |
-| `candidate_secret_ref`  | optional staged secret                     |
-| `verification_route_id` | optional target used to test candidate     |
-| `previous_secret_ref`   | retained only until rollback window closes |
-| `rollback_deadline`     | latest rollback time                       |
+| Field                     | Meaning                                    |
+| ------------------------- | ------------------------------------------ |
+| `rotation_window_start`   | earliest automatic rotation time           |
+| `rotation_window_end`     | latest automatic rotation time             |
+| `candidate_secret_ref_id` | optional staged secret reference           |
+| `verification_route_id`   | optional target used to test candidate     |
+| `previous_secret_ref_id`  | retained only until rollback window closes |
+| `rollback_deadline`       | latest rollback time                       |
 
 The gateway should support dual-read rotation for providers that require
 non-disruptive key swap. Route decisions record the credential version but never
@@ -546,11 +552,13 @@ Candidate admin resources:
 /admin/v1/model-aliases
 /admin/v1/pricing-skus
 /admin/v1/catalog-imports
-/admin/v1/codex-auth-sessions
+/admin/v1/codex/oauth/connections
+/admin/v1/codex/oauth/sessions
+/admin/v1/codex/oauth/refresh-status
 ```
 
-Read APIs default to safe metadata. Security-admin-only endpoints can expose
-secret reference locators, still never raw values.
+Read APIs default to safe metadata. Strong-auth security-admin-only endpoints
+can expose raw secret reference locators, still never raw values.
 
 ## Runtime Snapshot
 

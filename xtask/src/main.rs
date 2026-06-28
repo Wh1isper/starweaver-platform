@@ -77,7 +77,7 @@ fn check_docs_examples(args: &[String]) -> Result<(), String> {
 
 fn validate_fenced_blocks(path: &Path, text: &str) -> Result<(), String> {
     let fence_count = text.match_indices("```").count();
-    if fence_count % 2 == 0 {
+    if fence_count.is_multiple_of(2) {
         Ok(())
     } else {
         Err(format!("unclosed fenced code block in {}", path.display()))
@@ -116,8 +116,13 @@ fn check_repository_scripts(args: &[String]) -> Result<(), String> {
         ".pre-commit-config.yaml",
         ".github/workflows/ci.yml",
         ".github/workflows/docs.yml",
+        ".github/workflows/images.yml",
         ".github/workflows/pre-commit.yml",
+        ".dockerignore",
+        "docker-compose.yml",
         "book.toml",
+        "crates/starweaver-gateway/Dockerfile",
+        "docs/mermaid-init.js",
         "docs/SUMMARY.md",
         "docs/nav.json",
     ] {
@@ -135,8 +140,84 @@ fn check_repository_scripts(args: &[String]) -> Result<(), String> {
             ".github/workflows/docs.yml does not deploy to {PAGES_PROJECT_NAME}"
         ));
     }
+    validate_mermaid_docs_support(&root)?;
+    validate_gateway_compose_support(&root)?;
+
+    let images_workflow = fs::read_to_string(root.join(".github/workflows/images.yml"))
+        .map_err(|error| error.to_string())?;
+    for required in [
+        "starweaver-gateway",
+        "gcr.io",
+        "GCP_PROJECT_ID",
+        "GCP_WORKLOAD_IDENTITY_PROVIDER",
+        "GCP_SERVICE_ACCOUNT",
+        "Run gateway image smoke",
+        "load: true",
+    ] {
+        if !images_workflow.contains(required) {
+            return Err(format!(
+                ".github/workflows/images.yml is missing required image publish wiring: {required}"
+            ));
+        }
+    }
 
     println!("Checked repository infrastructure files");
+    Ok(())
+}
+
+fn validate_gateway_compose_support(root: &Path) -> Result<(), String> {
+    let compose =
+        fs::read_to_string(root.join("docker-compose.yml")).map_err(|error| error.to_string())?;
+    for required in [
+        "postgres:",
+        "redis:",
+        "gateway-migrate:",
+        "migrate\", \"run",
+        "gateway:",
+    ] {
+        if !compose.contains(required) {
+            return Err(format!(
+                "docker-compose.yml is missing required gateway stack wiring: {required}"
+            ));
+        }
+    }
+
+    let makefile = fs::read_to_string(root.join("Makefile")).map_err(|error| error.to_string())?;
+    for required in [
+        "compose-up",
+        "compose-down",
+        "compose-migrate",
+        "compose-smoke",
+    ] {
+        if !makefile.contains(required) {
+            return Err(format!(
+                "Makefile is missing required compose target: {required}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_mermaid_docs_support(root: &Path) -> Result<(), String> {
+    let book_toml =
+        fs::read_to_string(root.join("book.toml")).map_err(|error| error.to_string())?;
+    if !book_toml.contains("additional-js = [\"docs/mermaid-init.js\"]") {
+        return Err(
+            "book.toml must include docs/mermaid-init.js as additional HTML JavaScript".into(),
+        );
+    }
+
+    let mermaid_init =
+        fs::read_to_string(root.join("docs/mermaid-init.js")).map_err(|error| error.to_string())?;
+    for required in ["mermaid@11", "language-mermaid", "mermaid.run"] {
+        if !mermaid_init.contains(required) {
+            return Err(format!(
+                "docs/mermaid-init.js is missing required Mermaid renderer wiring: {required}"
+            ));
+        }
+    }
+
     Ok(())
 }
 

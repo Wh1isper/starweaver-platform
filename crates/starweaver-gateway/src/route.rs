@@ -1,0 +1,1824 @@
+//! Canonical route metadata used by handlers, replay tests, and policy checks.
+
+use http::Method;
+
+use chrono::{DateTime, Utc};
+
+use crate::action::{
+    AuthorizationDecision, AuthorizationDecisionRecord, AuthorizationEngine,
+    AuthorizationEvidenceSink, AuthorizationRequest, GatewayAction, ResourceRef,
+};
+use crate::domain::AuthenticatedActor;
+use crate::ProtocolFamily;
+
+/// Static route authorization metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RouteMetadata {
+    /// Client-facing HTTP method.
+    pub method: Method,
+    /// Client-facing route path pattern.
+    pub path_pattern: &'static str,
+    /// Ingress protocol family for model routes.
+    pub protocol_family: Option<ProtocolFamily>,
+    /// Required authorization action.
+    pub action: GatewayAction,
+    /// Resource kind used by authorization.
+    pub resource_kind: &'static str,
+    /// Request fields that determine authorization scope.
+    pub scope_params: &'static [&'static str],
+    /// Whether API key authentication is accepted.
+    pub allow_api_key: bool,
+    /// Whether strong human or operator auth is required.
+    pub strong_auth_required: bool,
+    /// Safe audit event type emitted for this route.
+    pub audit_event_type: &'static str,
+}
+
+impl RouteMetadata {
+    /// Checks route-level actor constraints before policy evaluation.
+    #[must_use]
+    pub const fn actor_constraint_denial(
+        &self,
+        actor: &AuthenticatedActor,
+    ) -> Option<&'static str> {
+        if actor.api_key_id.is_some() && !self.allow_api_key {
+            return Some("api_key_not_allowed_for_route");
+        }
+        if self.strong_auth_required && actor.auth_strength < 80 {
+            return Some("strong_auth_required");
+        }
+        None
+    }
+
+    /// Creates the authorization resource for this route.
+    #[must_use]
+    pub fn resource(&self, id: impl Into<String>) -> ResourceRef {
+        ResourceRef {
+            kind: self.resource_kind.to_owned(),
+            id: id.into(),
+        }
+    }
+}
+
+/// Authorizes route metadata and records decision evidence.
+pub fn authorize_route_with_evidence(
+    route: &RouteMetadata,
+    engine: &dyn AuthorizationEngine,
+    sink: &dyn AuthorizationEvidenceSink,
+    actor: AuthenticatedActor,
+    resource_id: impl Into<String>,
+    policy_snapshot_id: Option<String>,
+    occurred_at: DateTime<Utc>,
+) -> AuthorizationDecision {
+    let request = AuthorizationRequest {
+        actor,
+        action: route.action,
+        resource: route.resource(resource_id),
+    };
+    let decision = route
+        .actor_constraint_denial(&request.actor)
+        .map_or_else(|| engine.authorize(&request), AuthorizationDecision::deny);
+    sink.record_authorization_decision(AuthorizationDecisionRecord::from_decision(
+        &request,
+        &decision,
+        policy_snapshot_id,
+        occurred_at,
+    ));
+    decision
+}
+
+const FOUNDATION_ROUTES: &[RouteMetadata] = &[
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/v1/responses",
+        protocol_family: Some(ProtocolFamily::OpenAiResponses),
+        action: GatewayAction::ModelInvoke,
+        resource_kind: "ModelAlias",
+        scope_params: &["model"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.model.invoke",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/v1/chat/completions",
+        protocol_family: Some(ProtocolFamily::OpenAiChat),
+        action: GatewayAction::ModelStream,
+        resource_kind: "ModelAlias",
+        scope_params: &["model"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.model.stream",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/v1/messages",
+        protocol_family: Some(ProtocolFamily::AnthropicMessages),
+        action: GatewayAction::ModelInvoke,
+        resource_kind: "ModelAlias",
+        scope_params: &["model"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.model.invoke",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/v1beta/models/{model}:generateContent",
+        protocol_family: Some(ProtocolFamily::GeminiGenerateContent),
+        action: GatewayAction::ModelInvoke,
+        resource_kind: "ModelAlias",
+        scope_params: &["model"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.model.invoke",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/model/{model}/converse",
+        protocol_family: Some(ProtocolFamily::BedrockConverse),
+        action: GatewayAction::ModelInvoke,
+        resource_kind: "ModelAlias",
+        scope_params: &["model"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.model.invoke",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/native/{provider}/{operation}",
+        protocol_family: Some(ProtocolFamily::ProviderNative),
+        action: GatewayAction::ModelNative,
+        resource_kind: "ProviderNativeEndpoint",
+        scope_params: &["provider", "operation"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.model.native",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/config/snapshots",
+        protocol_family: None,
+        action: GatewayAction::ConfigRead,
+        resource_kind: "ConfigSnapshot",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.config.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/config/snapshots/", "{snapshot_id}"),
+        protocol_family: None,
+        action: GatewayAction::ConfigRead,
+        resource_kind: "ConfigSnapshot",
+        scope_params: &["tenant_id", "snapshot_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.config.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/config/snapshots:validate",
+        protocol_family: None,
+        action: GatewayAction::ConfigRead,
+        resource_kind: "ConfigSnapshot",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.config.validate",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/config/validation-diagnostics",
+        protocol_family: None,
+        action: GatewayAction::ConfigRead,
+        resource_kind: "ConfigSnapshot",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.config.validation_diagnostic.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/audit/events",
+        protocol_family: None,
+        action: GatewayAction::AuditRead,
+        resource_kind: "AuditEvent",
+        scope_params: &["tenant_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.audit.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/config/snapshots:publish",
+        protocol_family: None,
+        action: GatewayAction::ConfigPublish,
+        resource_kind: "ConfigSnapshot",
+        scope_params: &["tenant_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.config.publish",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/config/snapshots:rollback",
+        protocol_family: None,
+        action: GatewayAction::ConfigRollback,
+        resource_kind: "ConfigSnapshot",
+        scope_params: &["tenant_id", "source_snapshot_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.config.rollback",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/projects",
+        protocol_family: None,
+        action: GatewayAction::ProjectRead,
+        resource_kind: "Project",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.project.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/projects/", "{project_id}"),
+        protocol_family: None,
+        action: GatewayAction::ProjectRead,
+        resource_kind: "Project",
+        scope_params: &["tenant_id", "project_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.project.read",
+    },
+    RouteMetadata {
+        method: Method::PATCH,
+        path_pattern: concat!("/admin/v1/projects/", "{project_id}"),
+        protocol_family: None,
+        action: GatewayAction::ProjectWrite,
+        resource_kind: "Project",
+        scope_params: &["tenant_id", "project_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.project.update",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/organizations",
+        protocol_family: None,
+        action: GatewayAction::OrganizationRead,
+        resource_kind: "Organization",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.organization.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/organizations/", "{organization_id}"),
+        protocol_family: None,
+        action: GatewayAction::OrganizationRead,
+        resource_kind: "Organization",
+        scope_params: &["tenant_id", "organization_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.organization.read",
+    },
+    RouteMetadata {
+        method: Method::PATCH,
+        path_pattern: concat!("/admin/v1/organizations/", "{organization_id}"),
+        protocol_family: None,
+        action: GatewayAction::OrganizationWrite,
+        resource_kind: "Organization",
+        scope_params: &["tenant_id", "organization_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.organization.update",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/organizations/", "{organization_id}", "/members"),
+        protocol_family: None,
+        action: GatewayAction::OrganizationMemberRead,
+        resource_kind: "OrganizationMember",
+        scope_params: &["tenant_id", "organization_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.organization_member.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!(
+            "/admin/v1/organizations/",
+            "{organization_id}",
+            "/members/",
+            "{organization_member_id}"
+        ),
+        protocol_family: None,
+        action: GatewayAction::OrganizationMemberRead,
+        resource_kind: "OrganizationMember",
+        scope_params: &["tenant_id", "organization_id", "organization_member_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.organization_member.read",
+    },
+    RouteMetadata {
+        method: Method::PATCH,
+        path_pattern: concat!(
+            "/admin/v1/organizations/",
+            "{organization_id}",
+            "/members/",
+            "{organization_member_id}"
+        ),
+        protocol_family: None,
+        action: GatewayAction::OrganizationMemberWrite,
+        resource_kind: "OrganizationMember",
+        scope_params: &["tenant_id", "organization_id", "organization_member_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.organization_member.update",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/projects/", "{project_id}", "/members"),
+        protocol_family: None,
+        action: GatewayAction::ProjectMemberRead,
+        resource_kind: "ProjectMember",
+        scope_params: &["tenant_id", "project_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.project_member.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!(
+            "/admin/v1/projects/",
+            "{project_id}",
+            "/members/",
+            "{project_member_id}"
+        ),
+        protocol_family: None,
+        action: GatewayAction::ProjectMemberRead,
+        resource_kind: "ProjectMember",
+        scope_params: &["tenant_id", "project_id", "project_member_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.project_member.read",
+    },
+    RouteMetadata {
+        method: Method::PATCH,
+        path_pattern: concat!(
+            "/admin/v1/projects/",
+            "{project_id}",
+            "/members/",
+            "{project_member_id}"
+        ),
+        protocol_family: None,
+        action: GatewayAction::ProjectMemberWrite,
+        resource_kind: "ProjectMember",
+        scope_params: &["tenant_id", "project_id", "project_member_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.project_member.update",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/service-accounts",
+        protocol_family: None,
+        action: GatewayAction::ServiceAccountRead,
+        resource_kind: "ServiceAccount",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.service_account.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/service-accounts",
+        protocol_family: None,
+        action: GatewayAction::ServiceAccountWrite,
+        resource_kind: "ServiceAccount",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.service_account.create",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/service-accounts/", "{service_account_id}"),
+        protocol_family: None,
+        action: GatewayAction::ServiceAccountRead,
+        resource_kind: "ServiceAccount",
+        scope_params: &["tenant_id", "service_account_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.service_account.read",
+    },
+    RouteMetadata {
+        method: Method::PATCH,
+        path_pattern: concat!("/admin/v1/service-accounts/", "{service_account_id}"),
+        protocol_family: None,
+        action: GatewayAction::ServiceAccountWrite,
+        resource_kind: "ServiceAccount",
+        scope_params: &["tenant_id", "service_account_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.service_account.update",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/provider-endpoints",
+        protocol_family: None,
+        action: GatewayAction::ProviderEndpointRead,
+        resource_kind: "ProviderEndpoint",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.provider_endpoint.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/provider-endpoints",
+        protocol_family: None,
+        action: GatewayAction::ProviderEndpointWrite,
+        resource_kind: "ProviderEndpoint",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.provider_endpoint.create",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/provider-endpoints:validate",
+        protocol_family: None,
+        action: GatewayAction::ProviderEndpointRead,
+        resource_kind: "ProviderEndpoint",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.provider_endpoint.validate",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/provider-endpoints/", "{provider_endpoint_id}"),
+        protocol_family: None,
+        action: GatewayAction::ProviderEndpointRead,
+        resource_kind: "ProviderEndpoint",
+        scope_params: &["tenant_id", "provider_endpoint_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.provider_endpoint.read",
+    },
+    RouteMetadata {
+        method: Method::PATCH,
+        path_pattern: concat!("/admin/v1/provider-endpoints/", "{provider_endpoint_id}"),
+        protocol_family: None,
+        action: GatewayAction::ProviderEndpointWrite,
+        resource_kind: "ProviderEndpoint",
+        scope_params: &["tenant_id", "provider_endpoint_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.provider_endpoint.update",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/upstream-credentials",
+        protocol_family: None,
+        action: GatewayAction::UpstreamCredentialRead,
+        resource_kind: "UpstreamCredential",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.upstream_credential.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/upstream-credentials",
+        protocol_family: None,
+        action: GatewayAction::UpstreamCredentialWrite,
+        resource_kind: "UpstreamCredential",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.upstream_credential.create",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/upstream-credentials:validate",
+        protocol_family: None,
+        action: GatewayAction::UpstreamCredentialRead,
+        resource_kind: "UpstreamCredential",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.upstream_credential.validate",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!(
+            "/admin/v1/upstream-credentials/",
+            "{upstream_credential_id}"
+        ),
+        protocol_family: None,
+        action: GatewayAction::UpstreamCredentialRead,
+        resource_kind: "UpstreamCredential",
+        scope_params: &["tenant_id", "upstream_credential_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.upstream_credential.read",
+    },
+    RouteMetadata {
+        method: Method::PATCH,
+        path_pattern: concat!(
+            "/admin/v1/upstream-credentials/",
+            "{upstream_credential_id}"
+        ),
+        protocol_family: None,
+        action: GatewayAction::UpstreamCredentialWrite,
+        resource_kind: "UpstreamCredential",
+        scope_params: &["tenant_id", "upstream_credential_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.upstream_credential.update",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/model-targets",
+        protocol_family: None,
+        action: GatewayAction::ModelTargetRead,
+        resource_kind: "ModelTarget",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.model_target.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/model-targets",
+        protocol_family: None,
+        action: GatewayAction::ModelTargetWrite,
+        resource_kind: "ModelTarget",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.model_target.create",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/model-targets:validate",
+        protocol_family: None,
+        action: GatewayAction::ModelTargetRead,
+        resource_kind: "ModelTarget",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.model_target.validate",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/model-targets/", "{model_target_id}"),
+        protocol_family: None,
+        action: GatewayAction::ModelTargetRead,
+        resource_kind: "ModelTarget",
+        scope_params: &["tenant_id", "model_target_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.model_target.read",
+    },
+    RouteMetadata {
+        method: Method::PATCH,
+        path_pattern: concat!("/admin/v1/model-targets/", "{model_target_id}"),
+        protocol_family: None,
+        action: GatewayAction::ModelTargetWrite,
+        resource_kind: "ModelTarget",
+        scope_params: &["tenant_id", "model_target_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.model_target.update",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/model-aliases",
+        protocol_family: None,
+        action: GatewayAction::ModelAliasRead,
+        resource_kind: "ModelAlias",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.model_alias.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/model-aliases",
+        protocol_family: None,
+        action: GatewayAction::ModelAliasWrite,
+        resource_kind: "ModelAlias",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.model_alias.create",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/model-aliases:validate",
+        protocol_family: None,
+        action: GatewayAction::ModelAliasRead,
+        resource_kind: "ModelAlias",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.model_alias.validate",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/model-aliases/", "{model_alias_id}"),
+        protocol_family: None,
+        action: GatewayAction::ModelAliasRead,
+        resource_kind: "ModelAlias",
+        scope_params: &["tenant_id", "model_alias_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.model_alias.read",
+    },
+    RouteMetadata {
+        method: Method::PATCH,
+        path_pattern: concat!("/admin/v1/model-aliases/", "{model_alias_id}"),
+        protocol_family: None,
+        action: GatewayAction::ModelAliasWrite,
+        resource_kind: "ModelAlias",
+        scope_params: &["tenant_id", "model_alias_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.model_alias.update",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/pricing-skus",
+        protocol_family: None,
+        action: GatewayAction::PricingSkuRead,
+        resource_kind: "PricingSku",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.pricing_sku.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/pricing-skus",
+        protocol_family: None,
+        action: GatewayAction::PricingSkuWrite,
+        resource_kind: "PricingSku",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.pricing_sku.create",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/pricing-skus:validate",
+        protocol_family: None,
+        action: GatewayAction::PricingSkuRead,
+        resource_kind: "PricingSku",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.pricing_sku.validate",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/pricing-skus/", "{pricing_sku_id}"),
+        protocol_family: None,
+        action: GatewayAction::PricingSkuRead,
+        resource_kind: "PricingSku",
+        scope_params: &["tenant_id", "pricing_sku_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.pricing_sku.read",
+    },
+    RouteMetadata {
+        method: Method::PATCH,
+        path_pattern: concat!("/admin/v1/pricing-skus/", "{pricing_sku_id}"),
+        protocol_family: None,
+        action: GatewayAction::PricingSkuWrite,
+        resource_kind: "PricingSku",
+        scope_params: &["tenant_id", "pricing_sku_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.pricing_sku.update",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/budget-policies",
+        protocol_family: None,
+        action: GatewayAction::BudgetPolicyRead,
+        resource_kind: "BudgetPolicy",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.budget_policy.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/budget-policies",
+        protocol_family: None,
+        action: GatewayAction::BudgetPolicyWrite,
+        resource_kind: "BudgetPolicy",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.budget_policy.create",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/budget-policies:validate",
+        protocol_family: None,
+        action: GatewayAction::BudgetPolicyRead,
+        resource_kind: "BudgetPolicy",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.budget_policy.validate",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/budget-policies/", "{budget_policy_id}"),
+        protocol_family: None,
+        action: GatewayAction::BudgetPolicyRead,
+        resource_kind: "BudgetPolicy",
+        scope_params: &["tenant_id", "budget_policy_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.budget_policy.read",
+    },
+    RouteMetadata {
+        method: Method::PATCH,
+        path_pattern: concat!("/admin/v1/budget-policies/", "{budget_policy_id}"),
+        protocol_family: None,
+        action: GatewayAction::BudgetPolicyWrite,
+        resource_kind: "BudgetPolicy",
+        scope_params: &["tenant_id", "budget_policy_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.budget_policy.update",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/quota-policies",
+        protocol_family: None,
+        action: GatewayAction::QuotaPolicyRead,
+        resource_kind: "QuotaPolicy",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.quota_policy.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/quota-policies",
+        protocol_family: None,
+        action: GatewayAction::QuotaPolicyWrite,
+        resource_kind: "QuotaPolicy",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.quota_policy.create",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/quota-policies:validate",
+        protocol_family: None,
+        action: GatewayAction::QuotaPolicyRead,
+        resource_kind: "QuotaPolicy",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.quota_policy.validate",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/quota-policies/", "{quota_policy_id}"),
+        protocol_family: None,
+        action: GatewayAction::QuotaPolicyRead,
+        resource_kind: "QuotaPolicy",
+        scope_params: &["tenant_id", "quota_policy_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.quota_policy.read",
+    },
+    RouteMetadata {
+        method: Method::PATCH,
+        path_pattern: concat!("/admin/v1/quota-policies/", "{quota_policy_id}"),
+        protocol_family: None,
+        action: GatewayAction::QuotaPolicyWrite,
+        resource_kind: "QuotaPolicy",
+        scope_params: &["tenant_id", "quota_policy_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.quota_policy.update",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/exports/jobs",
+        protocol_family: None,
+        action: GatewayAction::ExportRead,
+        resource_kind: "ExportManifest",
+        scope_params: &["tenant_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.export_job.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/exports/jobs",
+        protocol_family: None,
+        action: GatewayAction::ExportCreate,
+        resource_kind: "ExportJob",
+        scope_params: &["tenant_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.export_job.create",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/exports/jobs/", "{export_job_id}"),
+        protocol_family: None,
+        action: GatewayAction::ExportRead,
+        resource_kind: "ExportManifest",
+        scope_params: &["tenant_id", "export_job_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.export_job.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/exports/jobs/", "{export_job_id}", "/manifest"),
+        protocol_family: None,
+        action: GatewayAction::ExportRead,
+        resource_kind: "ExportManifest",
+        scope_params: &["tenant_id", "export_job_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.export_manifest.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/emergency/operations",
+        protocol_family: None,
+        action: GatewayAction::EmergencyDisable,
+        resource_kind: "EmergencyOperation",
+        scope_params: &["tenant_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.emergency.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!(
+            "/admin/v1/emergency/operations/",
+            "{emergency_operation_id}"
+        ),
+        protocol_family: None,
+        action: GatewayAction::EmergencyDisable,
+        resource_kind: "EmergencyOperation",
+        scope_params: &["tenant_id", "emergency_operation_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.emergency.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: concat!(
+            "/admin/v1/emergency/upstream-credentials/",
+            "{upstream_credential_id}",
+            "/disable"
+        ),
+        protocol_family: None,
+        action: GatewayAction::EmergencyDisable,
+        resource_kind: "EmergencyOperation",
+        scope_params: &["tenant_id", "upstream_credential_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.emergency.disable",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: concat!(
+            "/admin/v1/emergency/provider-endpoints/",
+            "{provider_endpoint_id}",
+            "/disable"
+        ),
+        protocol_family: None,
+        action: GatewayAction::EmergencyDisable,
+        resource_kind: "EmergencyOperation",
+        scope_params: &["tenant_id", "provider_endpoint_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.emergency.disable",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: concat!(
+            "/admin/v1/emergency/routing-groups/",
+            "{routing_group_id}",
+            "/drain"
+        ),
+        protocol_family: None,
+        action: GatewayAction::EmergencyDisable,
+        resource_kind: "EmergencyOperation",
+        scope_params: &["tenant_id", "routing_group_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.emergency.drain",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/emergency/config/freeze",
+        protocol_family: None,
+        action: GatewayAction::EmergencyDisable,
+        resource_kind: "EmergencyOperation",
+        scope_params: &["tenant_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.emergency.freeze",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/observability/otel-export/configs",
+        protocol_family: None,
+        action: GatewayAction::ObservabilityExportRead,
+        resource_kind: "OpenTelemetryExportConfig",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.observability_export.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/observability/otel-export/configs",
+        protocol_family: None,
+        action: GatewayAction::ObservabilityExportWrite,
+        resource_kind: "OpenTelemetryExportConfig",
+        scope_params: &["tenant_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.observability_export.create",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!(
+            "/admin/v1/observability/otel-export/configs/",
+            "{otel_export_config_id}"
+        ),
+        protocol_family: None,
+        action: GatewayAction::ObservabilityExportRead,
+        resource_kind: "OpenTelemetryExportConfig",
+        scope_params: &["tenant_id", "otel_export_config_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.observability_export.read",
+    },
+    RouteMetadata {
+        method: Method::PATCH,
+        path_pattern: concat!(
+            "/admin/v1/observability/otel-export/configs/",
+            "{otel_export_config_id}"
+        ),
+        protocol_family: None,
+        action: GatewayAction::ObservabilityExportWrite,
+        resource_kind: "OpenTelemetryExportConfig",
+        scope_params: &["tenant_id", "otel_export_config_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.observability_export.update",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: concat!(
+            "/admin/v1/observability/otel-export/configs/",
+            "{otel_export_config_id}",
+            "/validate"
+        ),
+        protocol_family: None,
+        action: GatewayAction::ObservabilityExportWrite,
+        resource_kind: "OpenTelemetryExportConfig",
+        scope_params: &["tenant_id", "otel_export_config_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.observability_export.validate",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: concat!(
+            "/admin/v1/observability/otel-export/configs/",
+            "{otel_export_config_id}",
+            "/disable"
+        ),
+        protocol_family: None,
+        action: GatewayAction::ObservabilityExportWrite,
+        resource_kind: "OpenTelemetryExportConfig",
+        scope_params: &["tenant_id", "otel_export_config_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.observability_export.disable",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/notification/sinks",
+        protocol_family: None,
+        action: GatewayAction::NotificationRead,
+        resource_kind: "NotificationSink",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.notification_sink.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/notification/sinks",
+        protocol_family: None,
+        action: GatewayAction::NotificationWrite,
+        resource_kind: "NotificationSink",
+        scope_params: &["tenant_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.notification_sink.create",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/notification/sinks:validate",
+        protocol_family: None,
+        action: GatewayAction::NotificationWrite,
+        resource_kind: "NotificationSink",
+        scope_params: &["tenant_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.notification_sink.validate",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/notification/sinks/", "{notification_sink_id}"),
+        protocol_family: None,
+        action: GatewayAction::NotificationRead,
+        resource_kind: "NotificationSink",
+        scope_params: &["tenant_id", "notification_sink_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.notification_sink.read",
+    },
+    RouteMetadata {
+        method: Method::PATCH,
+        path_pattern: concat!("/admin/v1/notification/sinks/", "{notification_sink_id}"),
+        protocol_family: None,
+        action: GatewayAction::NotificationWrite,
+        resource_kind: "NotificationSink",
+        scope_params: &["tenant_id", "notification_sink_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.notification_sink.update",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!(
+            "/admin/v1/notification/sinks/",
+            "{notification_sink_id}",
+            "/subscriptions"
+        ),
+        protocol_family: None,
+        action: GatewayAction::NotificationRead,
+        resource_kind: "NotificationSink",
+        scope_params: &["tenant_id", "notification_sink_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.notification_subscription.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: concat!(
+            "/admin/v1/notification/sinks/",
+            "{notification_sink_id}",
+            "/subscriptions"
+        ),
+        protocol_family: None,
+        action: GatewayAction::NotificationWrite,
+        resource_kind: "NotificationSink",
+        scope_params: &["tenant_id", "notification_sink_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.notification_subscription.create",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: concat!(
+            "/admin/v1/notification/sinks/",
+            "{notification_sink_id}",
+            "/subscriptions:validate"
+        ),
+        protocol_family: None,
+        action: GatewayAction::NotificationWrite,
+        resource_kind: "NotificationSink",
+        scope_params: &["tenant_id", "notification_sink_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.notification_subscription.validate",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!(
+            "/admin/v1/notification/sinks/",
+            "{notification_sink_id}",
+            "/subscriptions/",
+            "{notification_subscription_id}"
+        ),
+        protocol_family: None,
+        action: GatewayAction::NotificationRead,
+        resource_kind: "NotificationSink",
+        scope_params: &[
+            "tenant_id",
+            "notification_sink_id",
+            "notification_subscription_id",
+        ],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.notification_subscription.read",
+    },
+    RouteMetadata {
+        method: Method::PATCH,
+        path_pattern: concat!(
+            "/admin/v1/notification/sinks/",
+            "{notification_sink_id}",
+            "/subscriptions/",
+            "{notification_subscription_id}"
+        ),
+        protocol_family: None,
+        action: GatewayAction::NotificationWrite,
+        resource_kind: "NotificationSink",
+        scope_params: &[
+            "tenant_id",
+            "notification_sink_id",
+            "notification_subscription_id",
+        ],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.notification_subscription.update",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/identity-providers",
+        protocol_family: None,
+        action: GatewayAction::IdentityProviderRead,
+        resource_kind: "IdentityProvider",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.identity_provider.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/identity-providers",
+        protocol_family: None,
+        action: GatewayAction::IdentityProviderWrite,
+        resource_kind: "IdentityProvider",
+        scope_params: &["tenant_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.identity_provider.create",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/identity-providers:validate",
+        protocol_family: None,
+        action: GatewayAction::IdentityProviderWrite,
+        resource_kind: "IdentityProvider",
+        scope_params: &["tenant_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.identity_provider.validate",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/identity-providers/", "{login_provider_id}"),
+        protocol_family: None,
+        action: GatewayAction::IdentityProviderRead,
+        resource_kind: "IdentityProvider",
+        scope_params: &["tenant_id", "login_provider_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.identity_provider.read",
+    },
+    RouteMetadata {
+        method: Method::PATCH,
+        path_pattern: concat!("/admin/v1/identity-providers/", "{login_provider_id}"),
+        protocol_family: None,
+        action: GatewayAction::IdentityProviderWrite,
+        resource_kind: "IdentityProvider",
+        scope_params: &["tenant_id", "login_provider_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.identity_provider.update",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/route-policies",
+        protocol_family: None,
+        action: GatewayAction::RoutePolicyRead,
+        resource_kind: "RoutePolicy",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.route_policy.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/route-policies",
+        protocol_family: None,
+        action: GatewayAction::RoutePolicyWrite,
+        resource_kind: "RoutePolicy",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.route_policy.create",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/route-policies:validate",
+        protocol_family: None,
+        action: GatewayAction::RoutePolicyRead,
+        resource_kind: "RoutePolicy",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.route_policy.validate",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/route-policies/", "{route_policy_id}"),
+        protocol_family: None,
+        action: GatewayAction::RoutePolicyRead,
+        resource_kind: "RoutePolicy",
+        scope_params: &["tenant_id", "route_policy_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.route_policy.read",
+    },
+    RouteMetadata {
+        method: Method::PATCH,
+        path_pattern: concat!("/admin/v1/route-policies/", "{route_policy_id}"),
+        protocol_family: None,
+        action: GatewayAction::RoutePolicyWrite,
+        resource_kind: "RoutePolicy",
+        scope_params: &["tenant_id", "route_policy_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.route_policy.update",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/provider-grants",
+        protocol_family: None,
+        action: GatewayAction::ProviderGrantRead,
+        resource_kind: "ProviderGrant",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.provider_grant.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/provider-grants",
+        protocol_family: None,
+        action: GatewayAction::ProviderGrantWrite,
+        resource_kind: "ProviderGrant",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.provider_grant.create",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/provider-grants:validate",
+        protocol_family: None,
+        action: GatewayAction::ProviderGrantRead,
+        resource_kind: "ProviderGrant",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.provider_grant.validate",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/provider-grants/", "{provider_grant_id}"),
+        protocol_family: None,
+        action: GatewayAction::ProviderGrantRead,
+        resource_kind: "ProviderGrant",
+        scope_params: &["tenant_id", "provider_grant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.provider_grant.read",
+    },
+    RouteMetadata {
+        method: Method::PATCH,
+        path_pattern: concat!("/admin/v1/provider-grants/", "{provider_grant_id}"),
+        protocol_family: None,
+        action: GatewayAction::ProviderGrantWrite,
+        resource_kind: "ProviderGrant",
+        scope_params: &["tenant_id", "provider_grant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.provider_grant.update",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/routing-groups",
+        protocol_family: None,
+        action: GatewayAction::RoutingGroupRead,
+        resource_kind: "RoutingGroup",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.routing_group.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/routing-groups",
+        protocol_family: None,
+        action: GatewayAction::RoutingGroupWrite,
+        resource_kind: "RoutingGroup",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.routing_group.create",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/routing-groups:validate",
+        protocol_family: None,
+        action: GatewayAction::RoutingGroupRead,
+        resource_kind: "RoutingGroup",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.routing_group.validate",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/routing-groups/", "{routing_group_id}"),
+        protocol_family: None,
+        action: GatewayAction::RoutingGroupRead,
+        resource_kind: "RoutingGroup",
+        scope_params: &["tenant_id", "routing_group_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.routing_group.read",
+    },
+    RouteMetadata {
+        method: Method::PATCH,
+        path_pattern: concat!("/admin/v1/routing-groups/", "{routing_group_id}"),
+        protocol_family: None,
+        action: GatewayAction::RoutingGroupWrite,
+        resource_kind: "RoutingGroup",
+        scope_params: &["tenant_id", "routing_group_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.routing_group.update",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!(
+            "/admin/v1/routing-groups/",
+            "{routing_group_id}",
+            "/targets"
+        ),
+        protocol_family: None,
+        action: GatewayAction::RoutingGroupRead,
+        resource_kind: "RoutingGroup",
+        scope_params: &["tenant_id", "routing_group_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.routing_group_target.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: concat!(
+            "/admin/v1/routing-groups/",
+            "{routing_group_id}",
+            "/targets"
+        ),
+        protocol_family: None,
+        action: GatewayAction::RoutingGroupWrite,
+        resource_kind: "RoutingGroup",
+        scope_params: &["tenant_id", "routing_group_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.routing_group_target.create",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: concat!(
+            "/admin/v1/routing-groups/",
+            "{routing_group_id}",
+            "/targets:validate"
+        ),
+        protocol_family: None,
+        action: GatewayAction::RoutingGroupRead,
+        resource_kind: "RoutingGroup",
+        scope_params: &["tenant_id", "routing_group_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.routing_group_target.validate",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!(
+            "/admin/v1/routing-groups/",
+            "{routing_group_id}",
+            "/targets/",
+            "{routing_group_target_id}"
+        ),
+        protocol_family: None,
+        action: GatewayAction::RoutingGroupRead,
+        resource_kind: "RoutingGroup",
+        scope_params: &["tenant_id", "routing_group_id", "routing_group_target_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.routing_group_target.read",
+    },
+    RouteMetadata {
+        method: Method::PATCH,
+        path_pattern: concat!(
+            "/admin/v1/routing-groups/",
+            "{routing_group_id}",
+            "/targets/",
+            "{routing_group_target_id}"
+        ),
+        protocol_family: None,
+        action: GatewayAction::RoutingGroupWrite,
+        resource_kind: "RoutingGroup",
+        scope_params: &["tenant_id", "routing_group_id", "routing_group_target_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.routing_group_target.update",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/realtime/overview",
+        protocol_family: None,
+        action: GatewayAction::RealtimeDashboardRead,
+        resource_kind: "RealtimeDashboard",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.realtime_dashboard.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/dashboards/tenant/overview",
+        protocol_family: None,
+        action: GatewayAction::DashboardTenantRead,
+        resource_kind: "TenantDashboard",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.dashboard.tenant.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/dashboards/organizations/", "{organization_id}"),
+        protocol_family: None,
+        action: GatewayAction::DashboardOrganizationRead,
+        resource_kind: "OrganizationDashboard",
+        scope_params: &["tenant_id", "organization_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.dashboard.organization.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/dashboards/projects/", "{project_id}"),
+        protocol_family: None,
+        action: GatewayAction::DashboardProjectRead,
+        resource_kind: "ProjectDashboard",
+        scope_params: &["tenant_id", "project_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.dashboard.project.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!(
+            "/admin/v1/dashboards/project-members/",
+            "{project_member_id}"
+        ),
+        protocol_family: None,
+        action: GatewayAction::DashboardProjectMemberRead,
+        resource_kind: "ProjectMemberDashboard",
+        scope_params: &["tenant_id", "project_member_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.dashboard.project_member.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/dashboards/api-keys/", "{api_key_id}"),
+        protocol_family: None,
+        action: GatewayAction::DashboardApiKeyRead,
+        resource_kind: "ApiKeyDashboard",
+        scope_params: &["tenant_id", "api_key_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.dashboard.api_key.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!(
+            "/admin/v1/dashboards/service-accounts/",
+            "{service_account_id}"
+        ),
+        protocol_family: None,
+        action: GatewayAction::DashboardServiceAccountRead,
+        resource_kind: "ServiceAccountDashboard",
+        scope_params: &["tenant_id", "service_account_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.dashboard.service_account.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!(
+            "/admin/v1/models/aliases/",
+            "{model_alias_id}",
+            "/dashboard"
+        ),
+        protocol_family: None,
+        action: GatewayAction::ModelObservabilityRead,
+        resource_kind: "ModelObservability",
+        scope_params: &["tenant_id", "model_alias_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.model_observability.alias.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!(
+            "/admin/v1/models/targets/",
+            "{model_target_id}",
+            "/dashboard"
+        ),
+        protocol_family: None,
+        action: GatewayAction::ModelObservabilityRead,
+        resource_kind: "ModelObservability",
+        scope_params: &["tenant_id", "model_target_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.model_observability.target.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!(
+            "/admin/v1/provider-endpoints/",
+            "{provider_endpoint_id}",
+            "/observability/usage"
+        ),
+        protocol_family: None,
+        action: GatewayAction::ProviderObservabilityRead,
+        resource_kind: "ProviderEndpoint",
+        scope_params: &["tenant_id", "provider_endpoint_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.provider_observability.usage.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/usage/summary",
+        protocol_family: None,
+        action: GatewayAction::UsageSummaryRead,
+        resource_kind: "UsageScope",
+        scope_params: &["tenant_id", "scope_kind", "scope_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.usage.summary.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/usage/timeseries",
+        protocol_family: None,
+        action: GatewayAction::UsageSummaryRead,
+        resource_kind: "UsageScope",
+        scope_params: &["tenant_id", "scope_kind", "scope_id", "bucket_kind"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.usage.timeseries.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/usage/events",
+        protocol_family: None,
+        action: GatewayAction::UsageEventRead,
+        resource_kind: "UsageEvent",
+        scope_params: &["tenant_id", "scope_kind", "scope_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.usage.event.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/usage/breakdown/by-project",
+        protocol_family: None,
+        action: GatewayAction::UsageRead,
+        resource_kind: "UsageScope",
+        scope_params: &["tenant_id", "scope_kind", "scope_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.usage.breakdown.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/usage/breakdown/by-project-member",
+        protocol_family: None,
+        action: GatewayAction::UsageRead,
+        resource_kind: "UsageScope",
+        scope_params: &["tenant_id", "scope_kind", "scope_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.usage.breakdown.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/usage/breakdown/by-model",
+        protocol_family: None,
+        action: GatewayAction::UsageRead,
+        resource_kind: "UsageScope",
+        scope_params: &["tenant_id", "scope_kind", "scope_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.usage.breakdown.read",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/usage/breakdown/by-provider-endpoint",
+        protocol_family: None,
+        action: GatewayAction::UsageRead,
+        resource_kind: "UsageScope",
+        scope_params: &["tenant_id", "scope_kind", "scope_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.usage.breakdown.read",
+    },
+];
+
+/// Foundation route matrix used before generated `OpenAPI` metadata exists.
+#[must_use]
+pub const fn foundation_routes() -> &'static [RouteMetadata] {
+    FOUNDATION_ROUTES
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use crate::action::{ActionGrant, FoundationAuthorizationEngine, GatewayAction};
+    use crate::domain::{ActorKind, AuthenticatedActor, CredentialKind};
+    use crate::route::{authorize_route_with_evidence, foundation_routes};
+    use crate::storage::InMemoryGatewayStore;
+
+    fn api_key_actor() -> AuthenticatedActor {
+        AuthenticatedActor {
+            actor_id: "ak_test".to_owned(),
+            actor_kind: ActorKind::ApiKey,
+            tenant_id: "ten_test".to_owned(),
+            organization_id: Some("org_test".to_owned()),
+            project_id: Some("prj_test".to_owned()),
+            principal_id: Some("usr_test".to_owned()),
+            api_key_id: Some("ak_test".to_owned()),
+            credential_kind: CredentialKind::ApiKey,
+            auth_strength: 50,
+            expires_at: None,
+            api_key_allowed_actions: Vec::new(),
+            api_key_allowed_resources: Vec::new(),
+            request_id: "req_test".to_owned(),
+        }
+    }
+
+    #[test]
+    fn route_matrix_has_unique_method_patterns() {
+        let mut seen = HashSet::new();
+        for route in foundation_routes() {
+            assert!(
+                seen.insert((route.method.as_str(), route.path_pattern)),
+                "duplicate route metadata"
+            );
+        }
+    }
+
+    #[test]
+    fn route_matrix_has_registered_actions() {
+        for route in foundation_routes() {
+            assert!(route.action.as_str().starts_with("gateway."));
+            assert!(!route.resource_kind.is_empty());
+            assert_eq!(route.resource_kind, route.action.resource_kind());
+            assert!(
+                !route.scope_params.is_empty(),
+                "{} should declare scope params",
+                route.path_pattern
+            );
+            assert!(
+                !route.audit_event_type.is_empty(),
+                "{} should declare audit event type",
+                route.path_pattern
+            );
+        }
+    }
+
+    #[test]
+    fn native_route_metadata_uses_spec_resource_kind() {
+        let route = foundation_routes()
+            .iter()
+            .find(|route| route.path_pattern == "/native/{provider}/{operation}")
+            .unwrap_or_else(|| panic!("native route metadata should exist"));
+
+        assert_eq!(route.resource_kind, "ProviderNativeEndpoint");
+        assert_eq!(
+            GatewayAction::ModelNative.resource_kind(),
+            "ProviderNativeEndpoint"
+        );
+    }
+
+    #[test]
+    fn route_constraints_block_api_key_on_strong_admin_routes() {
+        let route = foundation_routes()
+            .iter()
+            .find(|route| route.path_pattern == "/admin/v1/config/snapshots:publish")
+            .unwrap_or_else(|| panic!("publish route metadata should exist"));
+
+        assert_eq!(
+            route.actor_constraint_denial(&api_key_actor()),
+            Some("api_key_not_allowed_for_route")
+        );
+    }
+
+    #[test]
+    fn model_routes_accept_api_key_constraint_before_policy() {
+        let route = foundation_routes()
+            .iter()
+            .find(|route| route.path_pattern == "/v1/responses")
+            .unwrap_or_else(|| panic!("responses route metadata should exist"));
+
+        assert_eq!(route.actor_constraint_denial(&api_key_actor()), None);
+    }
+
+    #[test]
+    fn route_authorization_records_constraint_denial() {
+        let route = foundation_routes()
+            .iter()
+            .find(|route| route.path_pattern == "/admin/v1/config/snapshots:publish")
+            .unwrap_or_else(|| panic!("publish route metadata should exist"));
+        let store = InMemoryGatewayStore::default();
+
+        let decision = authorize_route_with_evidence(
+            route,
+            &FoundationAuthorizationEngine::default(),
+            &store,
+            api_key_actor(),
+            "cfg_test",
+            None,
+            chrono::Utc::now(),
+        );
+
+        assert!(!decision.allowed);
+        assert_eq!(decision.reason, "api_key_not_allowed_for_route");
+        assert_eq!(store.authorization_decisions().len(), 1);
+    }
+
+    #[test]
+    fn route_authorization_records_policy_allow() {
+        let route = foundation_routes()
+            .iter()
+            .find(|route| route.path_pattern == "/v1/responses")
+            .unwrap_or_else(|| panic!("responses route metadata should exist"));
+        let engine = FoundationAuthorizationEngine::new(vec![ActionGrant::project(
+            "ten_test",
+            "org_test",
+            "prj_test",
+            "usr_test",
+            GatewayAction::ModelInvoke,
+            route.resource("ma_test"),
+        )]);
+        let store = InMemoryGatewayStore::default();
+
+        let decision = authorize_route_with_evidence(
+            route,
+            &engine,
+            &store,
+            api_key_actor(),
+            "ma_test",
+            None,
+            chrono::Utc::now(),
+        );
+
+        assert!(decision.allowed);
+        assert_eq!(decision.reason, "allowed");
+        assert_eq!(store.authorization_decisions().len(), 1);
+        assert!(store.authorization_decisions()[0].allowed);
+    }
+}

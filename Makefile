@@ -1,4 +1,9 @@
 XTASK = cargo run -p xtask --locked --
+GATEWAY_IMAGE ?= starweaver-gateway:dev
+GATEWAY_DOCKER_PLATFORM ?= linux/amd64
+DOCKER_COMPOSE ?= docker compose
+GATEWAY_COMPOSE_PROJECT ?= starweaver-platform
+GATEWAY_SMOKE_PORT ?= 18080
 
 .PHONY: help
 help: ## Show available commands
@@ -40,6 +45,47 @@ test: ## Run workspace tests
 build: ## Build the workspace
 	@echo "Building Rust workspace"
 	@cargo build --workspace --all-targets --all-features --locked
+
+.PHONY: docker-build-gateway
+docker-build-gateway: ## Build the gateway Docker image
+	@echo "Building gateway Docker image $(GATEWAY_IMAGE)"
+	@docker build \
+		--platform $(GATEWAY_DOCKER_PLATFORM) \
+		--file crates/starweaver-gateway/Dockerfile \
+		--tag $(GATEWAY_IMAGE) \
+		.
+
+.PHONY: docker-build
+docker-build: docker-build-gateway ## Build service Docker images
+
+.PHONY: compose-up
+compose-up: ## Start local gateway dependencies and service through Docker Compose
+	@$(DOCKER_COMPOSE) -p $(GATEWAY_COMPOSE_PROJECT) up --build -d postgres redis gateway-migrate gateway
+
+.PHONY: compose-down
+compose-down: ## Stop local gateway Docker Compose services and remove volumes
+	@$(DOCKER_COMPOSE) -p $(GATEWAY_COMPOSE_PROJECT) down -v
+
+.PHONY: compose-migrate
+compose-migrate: ## Run gateway database migrations through Docker Compose
+	@$(DOCKER_COMPOSE) -p $(GATEWAY_COMPOSE_PROJECT) run --rm gateway-migrate
+
+.PHONY: compose-smoke
+compose-smoke: ## Build and run the gateway compose stack, then probe /readyz
+	@set -e; \
+	export STARWEAVER_GATEWAY_HTTP_PORT=$(GATEWAY_SMOKE_PORT); \
+	trap 'STARWEAVER_GATEWAY_HTTP_PORT=$(GATEWAY_SMOKE_PORT) $(DOCKER_COMPOSE) -p $(GATEWAY_COMPOSE_PROJECT)-smoke down -v' EXIT; \
+	$(DOCKER_COMPOSE) -p $(GATEWAY_COMPOSE_PROJECT)-smoke up --build -d postgres redis gateway-migrate gateway; \
+	$(DOCKER_COMPOSE) -p $(GATEWAY_COMPOSE_PROJECT)-smoke run --rm gateway-migrate migrate check; \
+	for attempt in $$(seq 1 60); do \
+		if curl -fsS http://127.0.0.1:$(GATEWAY_SMOKE_PORT)/readyz; then \
+			exit 0; \
+		fi; \
+		sleep 2; \
+	done; \
+	$(DOCKER_COMPOSE) -p $(GATEWAY_COMPOSE_PROJECT)-smoke ps; \
+	$(DOCKER_COMPOSE) -p $(GATEWAY_COMPOSE_PROJECT)-smoke logs gateway gateway-migrate; \
+	exit 1
 
 .PHONY: docs-check
 docs-check: ## Validate documentation structure

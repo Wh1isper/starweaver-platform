@@ -62,8 +62,8 @@ The admin API is grouped by resource family:
 | policy        | budgets, quotas, admission policy, redaction policy                                                                |
 | notifications | sinks, subscriptions, delivery attempts                                                                            |
 | evidence      | usage events, route decisions, audit events, exports                                                               |
-| dashboards    | overview, usage analytics, model observability, budget posture                                                     |
-| operations    | config snapshots, validation, runtime health, maintenance windows                                                  |
+| dashboards    | realtime operations, overview, usage analytics, model observability, budget posture                                |
+| operations    | config snapshots, validation, runtime health, maintenance windows, observability export config                     |
 
 The first implementation can expose only the resources needed for gateway v1,
 but the resource vocabulary should not change when UI and automation arrive.
@@ -127,20 +127,20 @@ Rules:
 
 Every admin request resolves an actor context:
 
-| Field             | Meaning                                                             |
-| ----------------- | ------------------------------------------------------------------- |
-| `tenant_id`       | tenant boundary for the request                                     |
-| `organization_id` | optional organization boundary                                      |
-| `project_id`      | optional project boundary                                           |
-| `principal_id`    | human, service account, API key owner, or system actor              |
-| `api_key_id`      | authenticating API key when present                                 |
-| `actor_kind`      | `human`, `service_account`, `api_key`, `internal_service`, `system` |
-| `auth_method`     | deployment-specific authentication method                           |
-| `role_bindings`   | effective role bindings used for authorization                      |
-| `request_id`      | admin request id                                                    |
-| `trace_id`        | trace id                                                            |
-| `source_ip`       | optional remote address                                             |
-| `user_agent`      | optional caller agent                                               |
+| Field             | Meaning                                                            |
+| ----------------- | ------------------------------------------------------------------ |
+| `tenant_id`       | tenant boundary for the request                                    |
+| `organization_id` | optional organization boundary                                     |
+| `project_id`      | optional project boundary                                          |
+| `principal_id`    | user, service account, API key owner, or system actor              |
+| `api_key_id`      | authenticating API key when present                                |
+| `actor_kind`      | `user`, `service_account`, `api_key`, `internal_service`, `system` |
+| `auth_method`     | deployment-specific authentication method                          |
+| `role_bindings`   | effective role bindings used for authorization                     |
+| `request_id`      | admin request id                                                   |
+| `trace_id`        | trace id                                                           |
+| `source_ip`       | optional remote address                                            |
+| `user_agent`      | optional caller agent                                              |
 
 Actor context is written into audit events. It should not be inferred later
 from mutable identity tables.
@@ -154,16 +154,19 @@ custom policies through the authorization engine.
 
 Initial roles:
 
-| Role                 | Scope                         | Capabilities                                                             |
-| -------------------- | ----------------------------- | ------------------------------------------------------------------------ |
-| `tenant_owner`       | tenant                        | full tenant administration, emergency secret disable, audit export       |
-| `tenant_admin`       | tenant                        | manage organizations, projects, provider resources, policies             |
-| `security_admin`     | tenant                        | manage API keys, caller credentials, secret refs, and redaction policies |
-| `gateway_operator`   | tenant                        | inspect health, reload config, drain endpoints, view operational metrics |
-| `organization_admin` | organization                  | manage projects, project policies, organization grants                   |
-| `project_admin`      | project                       | manage project API keys, budgets, allowed aliases                        |
-| `usage_viewer`       | tenant, organization, project | read usage and cost reports                                              |
-| `auditor`            | tenant, organization, project | read audit events and route decisions                                    |
+| Role                  | Scope                         | Capabilities                                                             |
+| --------------------- | ----------------------------- | ------------------------------------------------------------------------ |
+| `tenant_owner`        | tenant                        | full tenant administration, emergency secret disable, audit export       |
+| `tenant_admin`        | tenant                        | manage organizations, projects, provider resources, policies             |
+| `security_admin`      | tenant                        | manage API keys, caller credentials, secret refs, and redaction policies |
+| `gateway_operator`    | tenant                        | inspect health, reload config, drain endpoints, view operational metrics |
+| `organization_admin`  | organization                  | manage projects, project policies, organization grants                   |
+| `organization_member` | organization                  | read own organization membership and default dashboards                  |
+| `project_admin`       | project                       | manage project API keys, budgets, allowed aliases                        |
+| `project_developer`   | project                       | use allowed models and read own project usage                            |
+| `project_viewer`      | project                       | read project dashboards and non-sensitive configuration                  |
+| `usage_viewer`        | tenant, organization, project | read usage and cost reports                                              |
+| `auditor`             | tenant, organization, project | read audit events and route decisions                                    |
 
 Roles are scoped. A tenant owner can manage all organizations in the tenant. An
 organization admin can manage resources granted to the organization but cannot
@@ -275,6 +278,8 @@ A runtime snapshot contains only data needed for serving:
 - redaction policy
 - budget and quota policy summaries
 - notification sink routing metadata
+- OpenTelemetry export configuration metadata and exporter secret references,
+  not exporter header values
 
 It should not contain UI-only metadata, audit text, deleted resources, or raw
 secret material.
@@ -350,6 +355,7 @@ Different resources need different propagation behavior.
 | pricing update                         | eventual for estimates, durable for new usage events      |
 | notification sink update               | eventual, affects future deliveries                       |
 | redaction policy update                | near-immediate for debug capture                          |
+| OpenTelemetry export config update     | eventual for exporter workers, never blocks request path  |
 
 The API should expose publication status so administrators know whether a
 mutation has reached runtime workers.
@@ -380,7 +386,10 @@ Validation outputs:
 
 Validation should catch broken route graphs, missing provider grants, disabled
 credential references, incompatible protocol families, missing pricing for
-budget-enforced aliases, and redaction policy gaps.
+budget-enforced aliases, redaction policy gaps, invalid OpenTelemetry export
+endpoints, unsupported OTLP protocols, missing exporter header secret
+references, unsupported signal combinations, and unsafe metric label
+cardinality.
 
 ## Route Simulation API
 
@@ -432,32 +441,46 @@ Common operations:
 
 ### Resource Operation Matrix
 
-| Resource Family       | Required Operations                                   | Special Rules                                             |
-| --------------------- | ----------------------------------------------------- | --------------------------------------------------------- |
-| tenants               | list, get, create, update, disable, history           | system scope only for create/disable                      |
-| organizations         | list, get, create, update, disable, history           | tenant scoped                                             |
-| organization members  | list, get, invite, update, suspend, remove, history   | invitation and default organization semantics             |
-| projects              | list, get, create, update, disable, history           | organization scoped                                       |
-| project members       | list, get, create, update, suspend, remove, history   | project role controls usage/dashboard visibility          |
-| identity providers    | list, get, create, update, disable, validate, history | human login providers, not upstream provider credentials  |
-| principals            | list, get, update, disable, history                   | identity source may be external                           |
-| external identities   | list, get, link, unlink, disable, history             | issuer/subject links to gateway principals                |
-| auth sessions         | list, get, revoke, history                            | opaque browser/admin sessions                             |
-| API keys              | list, get, create, rotate, disable, history           | raw key returned only once                                |
-| provider endpoints    | list, get, create, update, disable, validate, history | cannot update protocol family after use                   |
-| upstream credentials  | list, get, create, rotate, disable, validate, history | read returns only secret reference and metadata           |
-| model targets         | list, get, create, update, disable, validate, history | protocol family must match endpoint                       |
-| model aliases         | list, get, create, update, disable, validate, history | name uniqueness by tenant/org/project namespace           |
-| routing groups        | list, get, create, update, disable, validate, history | all targets must share protocol family                    |
-| route policies        | list, get, create, update, disable, validate, history | route simulation should be available before publish       |
-| provider grants       | list, get, create, update, disable, validate, history | deny closure must be visible in simulation                |
-| budget policies       | list, get, create, update, disable, validate, history | hard-cap stale behavior required                          |
-| quota policies        | list, get, create, update, disable, validate, history | cache-loss mode required                                  |
-| notification sinks    | list, get, create, update, disable, validate, history | signing secret write-only                                 |
-| config snapshots      | list, get, validate, publish, rollback, history       | immutable after publication                               |
-| usage and audit views | list, get, export                                     | read-only, cursor pagination required                     |
-| dashboard views       | list, get, query                                      | read-only, scoped aggregation and freshness required      |
-| emergency operations  | create, get, list                                     | reason, expiry, strong audit, and operator alert required |
+| Resource Family         | Required Operations                                   | Special Rules                                             |
+| ----------------------- | ----------------------------------------------------- | --------------------------------------------------------- |
+| tenants                 | list, get, create, update, disable, history           | system scope only for create/disable                      |
+| organizations           | list, get, create, update, disable, history           | tenant scoped                                             |
+| organization members    | list, get, invite, update, suspend, remove, history   | invitation and default organization semantics             |
+| projects                | list, get, create, update, disable, history           | organization scoped                                       |
+| project members         | list, get, create, update, suspend, remove, history   | project role controls usage/dashboard visibility          |
+| identity providers      | list, get, create, update, disable, validate, history | human login providers, not upstream provider credentials  |
+| principals              | list, get, update, disable, history                   | identity source may be external                           |
+| service accounts        | list, get, create, update, disable, history           | own API keys and automation grants                        |
+| external identities     | list, get, link, unlink, disable, history             | issuer/subject links to gateway principals                |
+| auth sessions           | list, get, revoke, history                            | opaque browser/admin sessions                             |
+| role definitions        | list, get, create, update, disable, history           | built-in roles are immutable; custom roles are phased     |
+| API keys                | list, get, create, rotate, disable, history           | raw key returned only once                                |
+| caller credentials      | list, get, disable, history                           | resolved credential views; API keys remain `ApiKey`       |
+| action grants           | list, get, create, update, disable, history           | narrow API keys, service accounts, or custom roles        |
+| provider endpoints      | list, get, create, update, disable, validate, history | cannot update protocol family after use                   |
+| upstream credentials    | list, get, create, rotate, disable, validate, history | read returns only secret reference and metadata           |
+| secret refs             | list, get, validate, history                          | safe metadata only; raw locators require strong auth      |
+| Codex OAuth connections | list, get, create, update, disable, validate, history | Codex-only upstream OAuth, not human login OAuth          |
+| Codex OAuth sessions    | create, get, revoke, history                          | device/session flow state with token values hidden        |
+| model targets           | list, get, create, update, disable, validate, history | protocol family must match endpoint                       |
+| model aliases           | list, get, create, update, disable, validate, history | name uniqueness by tenant/org/project namespace           |
+| pricing SKUs            | list, get, create, update, disable, validate, history | fixed-point pricing versions for estimates                |
+| routing groups          | list, get, create, update, disable, validate, history | all targets must share protocol family                    |
+| route policies          | list, get, create, update, disable, validate, history | route simulation should be available before publish       |
+| provider grants         | list, get, create, update, disable, validate, history | deny closure must be visible in simulation                |
+| budget policies         | list, get, create, update, disable, validate, history | hard-cap stale behavior required                          |
+| quota policies          | list, get, create, update, disable, validate, history | cache-loss mode required                                  |
+| admission policies      | list, get, create, update, disable, validate, history | request admission before route selection                  |
+| redaction policies      | list, get, create, update, disable, validate, history | controls evidence, logs, debug capture, and exports       |
+| notification sinks      | list, get, create, update, disable, validate, history | signing secret write-only                                 |
+| config snapshots        | list, get, validate, publish, rollback, history       | immutable after publication                               |
+| usage and audit views   | list, get, export                                     | read-only, cursor pagination required                     |
+| dashboard views         | list, get, query                                      | read-only, scoped aggregation and freshness required      |
+| usage exports           | list, get, create                                     | asynchronous export manifests, no raw prompt payloads     |
+| catalog imports         | create, get, validate, history                        | bulk catalog ingestion with validation diagnostics        |
+| maintenance windows     | list, get, create, update, disable, history           | scoped operational windows with audit                     |
+| observability exports   | list, get, create, update, disable, validate, history | OpenTelemetry export config, secret values write-only     |
+| emergency operations    | create, get, list                                     | reason, expiry, strong audit, and operator alert required |
 
 Generated OpenAPI must include the required action id for every operation.
 
@@ -497,9 +520,12 @@ Pattern:
 
 1. Admin creates or updates a secret value through a dedicated secret write.
 2. Gateway stores the value in the configured secret backend.
-3. Gateway returns a `secret_ref`.
-4. Admin attaches the `secret_ref` to an upstream credential resource.
-5. Read APIs return only the secret reference and metadata.
+3. Gateway returns a `secret_ref_id`, safe purpose, version, and fingerprint.
+4. Admin attaches the `secret_ref_id` to an upstream credential resource.
+5. Default read APIs return only `secret_ref_id`, purpose, version,
+   fingerprint, mask, backend class, and timestamps.
+6. Raw backend locators require a strong-auth security-admin path and are still
+   never raw secret values.
 
 The API should support provider-specific validation without returning the
 secret. For example, a credential test can call the upstream provider and return
@@ -559,14 +585,14 @@ Diffs should include structural changes and policy changes, not secret values.
 
 Examples:
 
-| Change                             | Diff Behavior                                    |
-| ---------------------------------- | ------------------------------------------------ |
-| upstream credential secret changed | show secret reference version changed            |
-| provider endpoint URL changed      | show old and new host/path, redact query secrets |
-| routing weights changed            | show before and after weights                    |
-| API key secret rotated             | show key prefix and hash version only            |
-| budget limit changed               | show numeric limit                               |
-| notification URL changed           | show host and path, redact embedded credentials  |
+| Change                             | Diff Behavior                                         |
+| ---------------------------------- | ----------------------------------------------------- |
+| upstream credential secret changed | show secret reference version and fingerprint changed |
+| provider endpoint URL changed      | show old and new host/path, redact query secrets      |
+| routing weights changed            | show before and after weights                         |
+| API key secret rotated             | show key prefix and hash version only                 |
+| budget limit changed               | show numeric limit                                    |
+| notification URL changed           | show host and path, redact embedded credentials       |
 
 ## Admin Errors
 
@@ -723,9 +749,9 @@ Emergency operations need clear semantics.
 
 Emergency operations still require authorization and audit.
 
-## Implementation Phases
+## Admin API Milestones
 
-Phase 1:
+Milestone A:
 
 - resource schema definitions
 - CRUD for provider endpoint, upstream credential, model alias, routing group
@@ -733,7 +759,7 @@ Phase 1:
 - audit events
 - snapshot publication by database version
 
-Phase 2:
+Milestone B:
 
 - tenant and organization provider grants
 - budget and notification resources
@@ -741,7 +767,7 @@ Phase 2:
 - config bundles
 - admin CLI
 
-Phase 3:
+Milestone C:
 
 - Terraform provider
 - event-driven invalidation

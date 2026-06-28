@@ -212,7 +212,7 @@ turn the gateway into a generic upstream OAuth broker.
 flowchart LR
     admin[Admin API]
     config[(PostgreSQL config)]
-    redis[(Redis hot state)]
+    hot_state[(Redis-compatible hot state)]
     gateway[Gateway node]
     secret[Secret provider]
     upstream[Provider endpoint]
@@ -221,9 +221,9 @@ flowchart LR
 
     admin --> config
     admin --> outbox
-    admin --> redis
+    admin --> hot_state
     config --> gateway
-    redis --> gateway
+    hot_state --> gateway
     gateway --> secret
     secret --> gateway
     gateway --> upstream

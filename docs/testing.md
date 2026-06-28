@@ -14,14 +14,22 @@ make docs-check
 make docs-build
 ```
 
+Service smoke checks:
+
+```bash
+make docker-build
+make compose-smoke
+```
+
 GitHub Actions runs:
 
 - Rust formatting.
 - Workspace check and clippy.
-- Linux, macOS, and Windows tests.
+- Linux tests.
 - Repository automation checks.
+- Gateway image build and `/readyz` smoke when container inputs change.
 - Pre-commit hooks.
 - mdBook build and Cloudflare Pages deploy on `main`.
 
-Add service-specific gates such as migrations, OpenAPI validation, Docker smoke
-tests, and compose smoke tests when those artifacts exist.
+Future service-specific gates include OpenAPI validation, SBOM generation, and
+release artifact checksum generation.

@@ -16,6 +16,8 @@ services, automation, and any compatible HTTP model client.
 - Record usage, cost estimates, routing decisions, and audit evidence.
 - Expose scoped dashboards for organizations, projects, project members, model
   aliases, and provider endpoints.
+- Provide a Redis-compatible realtime operations dashboard and OpenTelemetry
+  export configuration for operator-owned long-term monitoring dashboards.
 
 ## Protocol Families
 
@@ -30,7 +32,10 @@ Initial protocol families:
 - OpenAI Chat Completions.
 - Anthropic Messages.
 - Gemini.
-- Bedrock Native.
+- Bedrock Converse.
+
+Provider-native routes are explicit extensions for operators that grant
+`provider_native` access. They are not the default Bedrock protocol family.
 
 ## Enterprise Model
 
@@ -64,8 +69,11 @@ consuming signed usage and budget notifications or by exporting usage events.
 
 Upstream provider OAuth support is intentionally limited to Codex in the
 initial design. Other providers use administrator-managed upstream credentials.
-Human admin login is separate and uses configured login providers such as a
-GitHub OAuth App for bare deployments or OIDC for enterprise SSO.
+Human admin login is separate from upstream provider OAuth. Bare deployments can
+start with local single-user mode, which is disabled by default and requires
+both `STARWEAVER_GATEWAY_SINGLE_USER_USERNAME` and
+`STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD`. GitHub OAuth App can be configured
+for external bare-deploy login, and OIDC is the enterprise SSO path.
 
 ## Detailed Specs
 
@@ -87,7 +95,8 @@ Architecture decisions live in the repository under `spec/gateway/`:
 - `07-admin-config-api.md` - admin resources, config snapshots, validation,
   audit, and route simulation.
 - `08-security-observability-operations.md` - secret safety, redaction,
-  telemetry, storage, deployment, and incident operations.
+  telemetry, Redis-compatible hot state, OpenTelemetry export, storage,
+  deployment, and incident operations.
 - `09-validation-and-rollout.md` - phases, test matrices, compatibility, and
   review gates.
 - `10-authorization-api-keys.md` - API keys, REST API permissions,
@@ -95,5 +104,5 @@ Architecture decisions live in the repository under `spec/gateway/`:
 - `11-login-user-management.md` - GitHub OAuth App login, OIDC login,
   sessions, invitations, default organizations, project membership, and user
   management.
-- `12-dashboards-observability-api.md` - dashboards, usage analytics, model
-  observability, and project member consumption views.
+- `12-dashboards-observability-api.md` - realtime operations dashboard,
+  usage analytics, model observability, and project member consumption views.

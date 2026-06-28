@@ -60,12 +60,33 @@ make test
 make docs-check
 make docs-build
 make scripts-check
+make docker-build
+make compose-smoke
 ```
 
 Install local pre-commit hooks with:
 
 ```bash
 make install
+```
+
+The gateway does not enable human login by default. For local or simple
+self-hosted bootstrap, enable the local single-user provider with:
+
+```bash
+export STARWEAVER_GATEWAY_SINGLE_USER_USERNAME=admin
+export STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD='change-me'
+```
+
+When both values are configured, `/auth/v1/single-user/login` creates an opaque
+session and bootstraps the default tenant, organization, project, and owner
+grants.
+
+For a local gateway stack with PostgreSQL, Redis, migration, and `/readyz`
+smoke:
+
+```bash
+make compose-smoke
 ```
 
 ## Documentation

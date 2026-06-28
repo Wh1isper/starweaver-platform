@@ -189,16 +189,19 @@ Ledger dimensions:
 
 Ledger buckets:
 
-| Bucket | Use                                             |
-| ------ | ----------------------------------------------- |
-| minute | hot dashboards and near-real-time budget checks |
-| hour   | operational reports                             |
-| day    | cost summaries                                  |
-| month  | budget and chargeback summaries                 |
-| event  | immutable source event                          |
+| Bucket | Use                                                                  |
+| ------ | -------------------------------------------------------------------- |
+| minute | low-latency usage analytics rollups and near-real-time budget checks |
+| hour   | operational reports                                                  |
+| day    | cost summaries                                                       |
+| month  | budget and chargeback summaries                                      |
+| event  | immutable source event                                               |
 
 The event ledger is the source of truth for reconstruction. Aggregated buckets
 are derived materializations.
+
+Ledger buckets feed usage analytics. They are not the Redis-compatible
+hot-state source for the built-in realtime operations dashboard.
 
 Dashboard buckets should materialize common views:
 
@@ -375,8 +378,9 @@ Quota types:
 | stream duration     | credential, alias, endpoint             |
 | request body bytes  | credential, alias, protocol family      |
 
-Counters can use Redis hot state with durable usage events as reconciliation
-source. Redis loss should fail according to policy: `fail_open`,
+Counters can use Redis-compatible hot state with durable usage events as
+reconciliation source. Hot-state loss should fail according to policy:
+`fail_open`,
 `fail_limited`, or `fail_closed`.
 
 ### Counter Algorithm

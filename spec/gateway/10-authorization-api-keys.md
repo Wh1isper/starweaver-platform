@@ -10,18 +10,18 @@ The main design rule is simple: every gateway request is authorized as
 `principal, action, resource, context`, regardless of whether the request enters
 through model protocol ingress or the REST admin API.
 
-## Review Findings
+## Design Constraints
 
-The current design is directionally correct but has several rough edges that
-should be fixed before implementation:
+The authorization design follows these constraints:
 
-- `ClientCredential` reads like a model-ingress credential only, while API keys
-  must also call REST APIs.
-- Admin roles and credential scopes are described as separate systems. That
-  would force duplicate permission logic and make audits harder.
-- REST API resources do not yet have an explicit action matrix.
-- The spec does not select an authorization engine or describe how custom
-  policy is validated before publication.
+- `ClientCredential` is an internal authentication resolution snapshot; API
+  keys are first-class persistent resources and may call model ingress or REST
+  APIs when policy permits.
+- Admin roles, API key grants, service account grants, and model invocation
+  scopes use one action/resource vocabulary.
+- REST API resources have an explicit action matrix.
+- Authorization engine selection and policy validation are part of the v1
+  contract.
 - List endpoints need item-level authorization, not only route-level access.
 - API keys need an owner model so a key can be revoked, audited, narrowed, and
   rotated independently from the owning user or service account.
@@ -218,81 +218,122 @@ Model actions:
 
 Admin/config actions:
 
-| Action                               | Resource             |
-| ------------------------------------ | -------------------- |
-| `gateway.tenant.read`                | `Tenant`             |
-| `gateway.tenant.write`               | `Tenant`             |
-| `gateway.identity_provider.read`     | `IdentityProvider`   |
-| `gateway.identity_provider.write`    | `IdentityProvider`   |
-| `gateway.user.read`                  | `UserPrincipal`      |
-| `gateway.user.write`                 | `UserPrincipal`      |
-| `gateway.user.disable`               | `UserPrincipal`      |
-| `gateway.external_identity.read`     | `ExternalIdentity`   |
-| `gateway.external_identity.unlink`   | `ExternalIdentity`   |
-| `gateway.session.read`               | `AuthSession`        |
-| `gateway.session.revoke`             | `AuthSession`        |
-| `gateway.organization.read`          | `Organization`       |
-| `gateway.organization.write`         | `Organization`       |
-| `gateway.organization_member.read`   | `OrganizationMember` |
-| `gateway.organization_member.write`  | `OrganizationMember` |
-| `gateway.organization_invite.create` | `OrganizationInvite` |
-| `gateway.organization_invite.manage` | `OrganizationInvite` |
-| `gateway.project.read`               | `Project`            |
-| `gateway.project.write`              | `Project`            |
-| `gateway.project_member.read`        | `ProjectMember`      |
-| `gateway.project_member.write`       | `ProjectMember`      |
-| `gateway.provider_endpoint.read`     | `ProviderEndpoint`   |
-| `gateway.provider_endpoint.write`    | `ProviderEndpoint`   |
-| `gateway.upstream_credential.read`   | `UpstreamCredential` |
-| `gateway.upstream_credential.write`  | `UpstreamCredential` |
-| `gateway.upstream_credential.rotate` | `UpstreamCredential` |
-| `gateway.model_target.read`          | `ModelTarget`        |
-| `gateway.model_target.write`         | `ModelTarget`        |
-| `gateway.model_alias.read`           | `ModelAlias`         |
-| `gateway.model_alias.write`          | `ModelAlias`         |
-| `gateway.routing_group.read`         | `RoutingGroup`       |
-| `gateway.routing_group.write`        | `RoutingGroup`       |
-| `gateway.route_policy.read`          | `RoutePolicy`        |
-| `gateway.route_policy.write`         | `RoutePolicy`        |
-| `gateway.provider_grant.read`        | `ProviderGrant`      |
-| `gateway.provider_grant.write`       | `ProviderGrant`      |
-| `gateway.api_key.create`             | `ApiKey`             |
-| `gateway.api_key.read`               | `ApiKey`             |
-| `gateway.api_key.rotate`             | `ApiKey`             |
-| `gateway.api_key.disable`            | `ApiKey`             |
-| `gateway.role_binding.read`          | `RoleBinding`        |
-| `gateway.role_binding.write`         | `RoleBinding`        |
-| `gateway.policy.read`                | `PolicyAttachment`   |
-| `gateway.policy.write`               | `PolicyAttachment`   |
-| `gateway.budget_policy.read`         | `BudgetPolicy`       |
-| `gateway.budget_policy.write`        | `BudgetPolicy`       |
-| `gateway.config.read`                | `ConfigSnapshot`     |
-| `gateway.config.apply`               | `ConfigBundle`       |
-| `gateway.config.publish`             | `ConfigSnapshot`     |
-| `gateway.config.rollback`            | `ConfigSnapshot`     |
-| `gateway.route_simulation.run`       | `RouteSimulation`    |
+| Action                                 | Resource                  |
+| -------------------------------------- | ------------------------- |
+| `gateway.tenant.read`                  | `Tenant`                  |
+| `gateway.tenant.write`                 | `Tenant`                  |
+| `gateway.identity_provider.read`       | `IdentityProvider`        |
+| `gateway.identity_provider.write`      | `IdentityProvider`        |
+| `gateway.user.read`                    | `UserPrincipal`           |
+| `gateway.user.write`                   | `UserPrincipal`           |
+| `gateway.user.disable`                 | `UserPrincipal`           |
+| `gateway.external_identity.read`       | `ExternalIdentity`        |
+| `gateway.external_identity.unlink`     | `ExternalIdentity`        |
+| `gateway.session.read`                 | `AuthSession`             |
+| `gateway.session.revoke`               | `AuthSession`             |
+| `gateway.session.update`               | `AuthSession`             |
+| `gateway.service_account.read`         | `ServiceAccount`          |
+| `gateway.service_account.write`        | `ServiceAccount`          |
+| `gateway.service_account.disable`      | `ServiceAccount`          |
+| `gateway.organization.read`            | `Organization`            |
+| `gateway.organization.write`           | `Organization`            |
+| `gateway.organization_member.read`     | `OrganizationMember`      |
+| `gateway.organization_member.write`    | `OrganizationMember`      |
+| `gateway.organization_invite.read`     | `OrganizationInvite`      |
+| `gateway.organization_invite.create`   | `OrganizationInvite`      |
+| `gateway.organization_invite.manage`   | `OrganizationInvite`      |
+| `gateway.organization_invite.accept`   | `OrganizationInvite`      |
+| `gateway.project.read`                 | `Project`                 |
+| `gateway.project.write`                | `Project`                 |
+| `gateway.project_member.read`          | `ProjectMember`           |
+| `gateway.project_member.write`         | `ProjectMember`           |
+| `gateway.caller_credential.read`       | `CallerCredential`        |
+| `gateway.caller_credential.disable`    | `CallerCredential`        |
+| `gateway.action_grant.read`            | `ActionGrant`             |
+| `gateway.action_grant.write`           | `ActionGrant`             |
+| `gateway.provider_endpoint.read`       | `ProviderEndpoint`        |
+| `gateway.provider_endpoint.write`      | `ProviderEndpoint`        |
+| `gateway.upstream_credential.read`     | `UpstreamCredential`      |
+| `gateway.upstream_credential.write`    | `UpstreamCredential`      |
+| `gateway.upstream_credential.rotate`   | `UpstreamCredential`      |
+| `gateway.secret_ref.read`              | `SecretRef`               |
+| `gateway.secret_ref.write`             | `SecretRef`               |
+| `gateway.secret_ref.locator.read`      | `SecretRef`               |
+| `gateway.codex_oauth_connection.read`  | `CodexOAuthConnection`    |
+| `gateway.codex_oauth_connection.write` | `CodexOAuthConnection`    |
+| `gateway.codex_oauth_session.read`     | `CodexOAuthSession`       |
+| `gateway.codex_oauth_session.start`    | `CodexOAuthSession`       |
+| `gateway.codex_oauth_session.revoke`   | `CodexOAuthSession`       |
+| `gateway.codex_oauth_refresh.read`     | `CodexOAuthRefreshStatus` |
+| `gateway.model_target.read`            | `ModelTarget`             |
+| `gateway.model_target.write`           | `ModelTarget`             |
+| `gateway.model_alias.read`             | `ModelAlias`              |
+| `gateway.model_alias.write`            | `ModelAlias`              |
+| `gateway.pricing_sku.read`             | `PricingSku`              |
+| `gateway.pricing_sku.write`            | `PricingSku`              |
+| `gateway.routing_group.read`           | `RoutingGroup`            |
+| `gateway.routing_group.write`          | `RoutingGroup`            |
+| `gateway.route_policy.read`            | `RoutePolicy`             |
+| `gateway.route_policy.write`           | `RoutePolicy`             |
+| `gateway.provider_grant.read`          | `ProviderGrant`           |
+| `gateway.provider_grant.write`         | `ProviderGrant`           |
+| `gateway.quota_policy.read`            | `QuotaPolicy`             |
+| `gateway.quota_policy.write`           | `QuotaPolicy`             |
+| `gateway.admission_policy.read`        | `AdmissionPolicy`         |
+| `gateway.admission_policy.write`       | `AdmissionPolicy`         |
+| `gateway.redaction_policy.read`        | `RedactionPolicy`         |
+| `gateway.redaction_policy.write`       | `RedactionPolicy`         |
+| `gateway.api_key.create`               | `ApiKey`                  |
+| `gateway.api_key.read`                 | `ApiKey`                  |
+| `gateway.api_key.rotate`               | `ApiKey`                  |
+| `gateway.api_key.disable`              | `ApiKey`                  |
+| `gateway.role.read`                    | `RoleDefinition`          |
+| `gateway.role.write`                   | `RoleDefinition`          |
+| `gateway.role_binding.read`            | `RoleBinding`             |
+| `gateway.role_binding.write`           | `RoleBinding`             |
+| `gateway.policy.read`                  | `PolicyAttachment`        |
+| `gateway.policy.write`                 | `PolicyAttachment`        |
+| `gateway.budget_policy.read`           | `BudgetPolicy`            |
+| `gateway.budget_policy.write`          | `BudgetPolicy`            |
+| `gateway.config.read`                  | `ConfigSnapshot`          |
+| `gateway.config.apply`                 | `ConfigBundle`            |
+| `gateway.config.publish`               | `ConfigSnapshot`          |
+| `gateway.config.rollback`              | `ConfigSnapshot`          |
+| `gateway.route_simulation.run`         | `RouteSimulation`         |
+| `gateway.catalog_import.create`        | `CatalogImport`           |
+| `gateway.catalog_import.read`          | `CatalogImport`           |
+| `gateway.maintenance_window.read`      | `MaintenanceWindow`       |
+| `gateway.maintenance_window.write`     | `MaintenanceWindow`       |
 
 Evidence and operations actions:
 
-| Action                                  | Resource                                |
-| --------------------------------------- | --------------------------------------- |
-| `gateway.usage.read`                    | `UsageEvent` or ledger scope            |
-| `gateway.usage.summary.read`            | usage aggregate scope                   |
-| `gateway.usage.event.read`              | usage event rows                        |
-| `gateway.dashboard.tenant.read`         | tenant dashboard scope                  |
-| `gateway.dashboard.organization.read`   | organization dashboard scope            |
-| `gateway.dashboard.project.read`        | project dashboard scope                 |
-| `gateway.dashboard.project_member.read` | project member dashboard scope          |
-| `gateway.model_observability.read`      | `ModelAlias` or `ModelTarget`           |
-| `gateway.provider_observability.read`   | `ProviderEndpoint`                      |
-| `gateway.budget_dashboard.read`         | `BudgetPolicy` or budget scope          |
-| `gateway.audit.read`                    | `AuditEvent`                            |
-| `gateway.notification.read`             | `NotificationSink` or delivery          |
-| `gateway.notification.write`            | `NotificationSink`                      |
-| `gateway.health.read`                   | runtime health resource                 |
-| `gateway.provider_health.override`      | `ProviderEndpoint`                      |
-| `gateway.emergency.disable`             | credential, endpoint, or route resource |
-| `gateway.debug_capture.enable`          | debug capture policy                    |
+| Action                                   | Resource                                  |
+| ---------------------------------------- | ----------------------------------------- |
+| `gateway.usage.read`                     | `UsageEvent` or ledger scope              |
+| `gateway.usage.summary.read`             | usage aggregate scope                     |
+| `gateway.usage.event.read`               | usage event rows                          |
+| `gateway.realtime_dashboard.read`        | Redis-compatible realtime dashboard scope |
+| `gateway.dashboard.tenant.read`          | tenant dashboard scope                    |
+| `gateway.dashboard.organization.read`    | organization dashboard scope              |
+| `gateway.dashboard.project.read`         | project dashboard scope                   |
+| `gateway.dashboard.project_member.read`  | project member dashboard scope            |
+| `gateway.dashboard.api_key.read`         | API key dashboard scope                   |
+| `gateway.dashboard.service_account.read` | service account dashboard scope           |
+| `gateway.model_observability.read`       | `ModelAlias` or `ModelTarget`             |
+| `gateway.provider_observability.read`    | `ProviderEndpoint`                        |
+| `gateway.budget_dashboard.read`          | `BudgetPolicy` or budget scope            |
+| `gateway.quota_dashboard.read`           | quota or rate-limit scope                 |
+| `gateway.audit.read`                     | `AuditEvent`                              |
+| `gateway.export.read`                    | export manifest                           |
+| `gateway.export.create`                  | export job                                |
+| `gateway.notification.read`              | `NotificationSink` or delivery            |
+| `gateway.notification.write`             | `NotificationSink`                        |
+| `gateway.observability_export.read`      | `OpenTelemetryExportConfig`               |
+| `gateway.observability_export.write`     | `OpenTelemetryExportConfig`               |
+| `gateway.health.read`                    | runtime health resource                   |
+| `gateway.provider_health.override`       | `ProviderEndpoint`                        |
+| `gateway.emergency.disable`              | credential, endpoint, or route resource   |
+| `gateway.debug_capture.enable`           | debug capture policy                      |
 
 No handler should invent action strings at runtime. Action ids belong in code,
 schema, docs, and OpenAPI extensions.
@@ -301,39 +342,89 @@ schema, docs, and OpenAPI extensions.
 
 REST endpoints require action checks before accessing storage.
 
-| Endpoint Family                                | Required Actions                                                           |
-| ---------------------------------------------- | -------------------------------------------------------------------------- |
-| `/admin/v1/tenants/*`                          | `gateway.tenant.read`, `gateway.tenant.write`                              |
-| `/admin/v1/identity-providers/*`               | `gateway.identity_provider.read`, `gateway.identity_provider.write`        |
-| `/admin/v1/users/*`                            | `gateway.user.read`, `gateway.user.write`, `gateway.user.disable`          |
-| `/admin/v1/external-identities/*`              | `gateway.external_identity.read`, `gateway.external_identity.unlink`       |
-| `/admin/v1/sessions/*`                         | `gateway.session.read`, `gateway.session.revoke`                           |
-| `/admin/v1/organizations/*`                    | `gateway.organization.read`, `gateway.organization.write`                  |
-| `/admin/v1/organization-members/*`             | `gateway.organization_member.read`, `gateway.organization_member.write`    |
-| `/admin/v1/organization-invites/*`             | `gateway.organization_invite.*`                                            |
-| `/admin/v1/projects/*`                         | `gateway.project.read`, `gateway.project.write`                            |
-| `/admin/v1/project-members/*`                  | `gateway.project_member.read`, `gateway.project_member.write`              |
-| `/admin/v1/api-keys/*`                         | `gateway.api_key.*`, scoped to owner/project                               |
-| `/admin/v1/provider-endpoints/*`               | `gateway.provider_endpoint.read`, `gateway.provider_endpoint.write`        |
-| `/admin/v1/upstream-credentials/*`             | `gateway.upstream_credential.*` plus strong auth for secret writes         |
-| `/admin/v1/provider-grants/*`                  | `gateway.provider_grant.read`, `gateway.provider_grant.write`              |
-| `/admin/v1/model-targets/*`                    | `gateway.model_target.read`, `gateway.model_target.write`                  |
-| `/admin/v1/model-aliases/*`                    | `gateway.model_alias.read`, `gateway.model_alias.write`                    |
-| `/admin/v1/routing-groups/*`                   | `gateway.routing_group.read`, `gateway.routing_group.write`                |
-| `/admin/v1/route-policies/*`                   | `gateway.route_policy.read`, `gateway.route_policy.write`                  |
-| `/admin/v1/budget-policies/*`                  | `gateway.budget_policy.read`, `gateway.budget_policy.write`                |
-| `/admin/v1/notification-sinks/*`               | `gateway.notification.read`, `gateway.notification.write`                  |
-| `/admin/v1/usage-events/*`                     | `gateway.usage.read` scoped by tenant/org/project/key                      |
-| `/admin/v1/usage/*`                            | `gateway.usage.summary.read` or `gateway.usage.event.read` by route        |
-| `/admin/v1/dashboards/*`                       | `gateway.dashboard.*.read` scoped by requested dashboard scope             |
-| `/admin/v1/models/*/dashboard`                 | `gateway.model_observability.read` scoped by alias or target               |
-| `/admin/v1/provider-endpoints/*/observability` | `gateway.provider_observability.read` scoped by endpoint                   |
-| `/admin/v1/budgets/*/dashboard`                | `gateway.budget_dashboard.read` scoped by budget policy                    |
-| `/admin/v1/audit-events/*`                     | `gateway.audit.read` with stronger audit role                              |
-| `/admin/v1/config-snapshots/*`                 | `gateway.config.read`, `gateway.config.publish`, `gateway.config.rollback` |
-| `/admin/v1/config-bundles/*`                   | `gateway.config.apply`                                                     |
-| `/admin/v1/route-simulations`                  | `gateway.route_simulation.run` plus referenced resource read actions       |
-| `/admin/v1/emergency/*`                        | `gateway.emergency.disable` plus break-glass policy                        |
+| Endpoint Family                                                                        | Required Actions                                                                                                       |
+| -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `/admin/v1/tenants/*`                                                                  | `gateway.tenant.read`, `gateway.tenant.write`                                                                          |
+| `/admin/v1/identity-providers/*`                                                       | `gateway.identity_provider.read`, `gateway.identity_provider.write`                                                    |
+| `/admin/v1/users/*`                                                                    | `gateway.user.read`, `gateway.user.write`, `gateway.user.disable`                                                      |
+| `/admin/v1/users/{id}/external-identities/*`                                           | `gateway.external_identity.read`, `gateway.external_identity.unlink`                                                   |
+| `/admin/v1/users/{id}/sessions/*`                                                      | `gateway.session.read`, `gateway.session.revoke`                                                                       |
+| `/admin/v1/service-accounts/*`                                                         | `gateway.service_account.read`, `gateway.service_account.write`, `gateway.service_account.disable`                     |
+| `/admin/v1/organizations/*`                                                            | `gateway.organization.read`, `gateway.organization.write`                                                              |
+| `/admin/v1/organizations/{id}/members/*`                                               | `gateway.organization_member.read`, `gateway.organization_member.write`                                                |
+| `/admin/v1/organizations/{id}/invitations/*`                                           | `gateway.organization_invite.read`, `gateway.organization_invite.create`, `gateway.organization_invite.manage`         |
+| `/admin/v1/projects/*`                                                                 | `gateway.project.read`, `gateway.project.write`                                                                        |
+| `/admin/v1/projects/{id}/members/*`                                                    | `gateway.project_member.read`, `gateway.project_member.write`                                                          |
+| `/admin/v1/api-keys/*`                                                                 | `gateway.api_key.create`, `gateway.api_key.read`, `gateway.api_key.rotate`, `gateway.api_key.disable`                  |
+| `/admin/v1/roles/*`                                                                    | `gateway.role.read`, `gateway.role.write`                                                                              |
+| `/admin/v1/caller-credentials/*`                                                       | `gateway.caller_credential.read`, `gateway.caller_credential.disable`                                                  |
+| `/admin/v1/action-grants/*`                                                            | `gateway.action_grant.read`, `gateway.action_grant.write`                                                              |
+| `/admin/v1/provider-endpoints/*`                                                       | `gateway.provider_endpoint.read`, `gateway.provider_endpoint.write`                                                    |
+| `/admin/v1/upstream-credentials/*`                                                     | `gateway.upstream_credential.read`, `gateway.upstream_credential.write`, `gateway.upstream_credential.rotate`          |
+| `/admin/v1/secret-refs/*`                                                              | `gateway.secret_ref.read`, `gateway.secret_ref.write`, `gateway.secret_ref.locator.read` for strong-auth locator reads |
+| `/admin/v1/codex/oauth/connections/*`                                                  | `gateway.codex_oauth_connection.read`, `gateway.codex_oauth_connection.write`                                          |
+| `/admin/v1/codex/oauth/sessions/*`                                                     | `gateway.codex_oauth_session.read`, `gateway.codex_oauth_session.start`, `gateway.codex_oauth_session.revoke`          |
+| `/admin/v1/codex/oauth/refresh-status/*`                                               | `gateway.codex_oauth_refresh.read`                                                                                     |
+| `/admin/v1/provider-grants/*`                                                          | `gateway.provider_grant.read`, `gateway.provider_grant.write`                                                          |
+| `/admin/v1/model-targets/*`                                                            | `gateway.model_target.read`, `gateway.model_target.write`                                                              |
+| `/admin/v1/model-aliases/*`                                                            | `gateway.model_alias.read`, `gateway.model_alias.write`                                                                |
+| `/admin/v1/pricing-skus/*`                                                             | `gateway.pricing_sku.read`, `gateway.pricing_sku.write`                                                                |
+| `/admin/v1/routing-groups/*`                                                           | `gateway.routing_group.read`, `gateway.routing_group.write`                                                            |
+| `/admin/v1/route-policies/*`                                                           | `gateway.route_policy.read`, `gateway.route_policy.write`                                                              |
+| `/admin/v1/budget-policies/*`                                                          | `gateway.budget_policy.read`, `gateway.budget_policy.write`                                                            |
+| `/admin/v1/quota-policies/*`                                                           | `gateway.quota_policy.read`, `gateway.quota_policy.write`                                                              |
+| `/admin/v1/admission-policies/*`                                                       | `gateway.admission_policy.read`, `gateway.admission_policy.write`                                                      |
+| `/admin/v1/redaction-policies/*`                                                       | `gateway.redaction_policy.read`, `gateway.redaction_policy.write`                                                      |
+| `/admin/v1/notification-sinks/*`                                                       | `gateway.notification.read`, `gateway.notification.write`                                                              |
+| `/admin/v1/usage/summary`, `/admin/v1/usage/timeseries`, `/admin/v1/usage/breakdown/*` | `gateway.usage.summary.read` scoped by tenant/org/project/key                                                          |
+| `/admin/v1/usage/events`                                                               | `gateway.usage.event.read` scoped by tenant/org/project/key                                                            |
+| `/admin/v1/usage/exports/*`                                                            | `gateway.export.read`, `gateway.export.create`                                                                         |
+| `/admin/v1/realtime/*`                                                                 | `gateway.realtime_dashboard.read` scoped by requested realtime scope                                                   |
+| `/admin/v1/dashboards/tenant/*`                                                        | `gateway.dashboard.tenant.read`                                                                                        |
+| `/admin/v1/dashboards/organizations/*`                                                 | `gateway.dashboard.organization.read`                                                                                  |
+| `/admin/v1/dashboards/projects/*`                                                      | `gateway.dashboard.project.read`                                                                                       |
+| `/admin/v1/dashboards/project-members/*`                                               | `gateway.dashboard.project_member.read`                                                                                |
+| `/admin/v1/dashboards/api-keys/*`                                                      | `gateway.dashboard.api_key.read`                                                                                       |
+| `/admin/v1/dashboards/service-accounts/*`                                              | `gateway.dashboard.service_account.read`                                                                               |
+| `/admin/v1/models/aliases/{id}/dashboard`                                              | `gateway.model_observability.read` scoped by alias                                                                     |
+| `/admin/v1/models/aliases/{id}/routes`                                                 | `gateway.model_observability.read` scoped by alias and route policy                                                    |
+| `/admin/v1/models/aliases/{id}/quality`                                                | `gateway.model_observability.read` scoped by alias                                                                     |
+| `/admin/v1/models/targets/{id}/dashboard`                                              | `gateway.model_observability.read` scoped by target                                                                    |
+| `/admin/v1/provider-endpoints/{id}/observability/model-targets`                        | `gateway.provider_observability.read` scoped by endpoint                                                               |
+| `/admin/v1/provider-endpoints/{id}/observability/health`                               | `gateway.provider_observability.read` scoped by endpoint                                                               |
+| `/admin/v1/provider-endpoints/{id}/observability/usage`                                | `gateway.provider_observability.read` scoped by endpoint                                                               |
+| `/admin/v1/provider-endpoints/{id}/observability/failover`                             | `gateway.provider_observability.read` scoped by endpoint                                                               |
+| `/admin/v1/provider-endpoints/{id}/observability/credentials`                          | `gateway.provider_observability.read` plus upstream credential read policy                                             |
+| `/admin/v1/budgets/dashboard`, `/admin/v1/budgets/{id}/timeseries`                     | `gateway.budget_dashboard.read` scoped by budget policy                                                                |
+| `/admin/v1/quotas/dashboard`, `/admin/v1/rate-limits/{id}/timeseries`                  | `gateway.quota_dashboard.read` scoped by quota or rate-limit policy                                                    |
+| `/admin/v1/observability/otel-export/*`                                                | `gateway.observability_export.read`, `gateway.observability_export.write`                                              |
+| `/admin/v1/audit-events/*`                                                             | `gateway.audit.read` with stronger audit role                                                                          |
+| `/admin/v1/config-snapshots/*`                                                         | `gateway.config.read`, `gateway.config.publish`, `gateway.config.rollback`                                             |
+| `/admin/v1/config-bundles/*`                                                           | `gateway.config.apply`                                                                                                 |
+| `/admin/v1/catalog-imports/*`                                                          | `gateway.catalog_import.create`, `gateway.catalog_import.read`                                                         |
+| `/admin/v1/maintenance-windows/*`                                                      | `gateway.maintenance_window.read`, `gateway.maintenance_window.write`                                                  |
+| `/admin/v1/runtime-health/*`                                                           | `gateway.health.read`                                                                                                  |
+| `/admin/v1/health-overrides/*`                                                         | `gateway.provider_health.override`                                                                                     |
+| `/admin/v1/route-simulations`                                                          | `gateway.route_simulation.run` plus referenced resource read actions                                                   |
+| `/admin/v1/emergency/*`                                                                | `gateway.emergency.disable` plus break-glass policy                                                                    |
+
+## Auth API Permission Matrix
+
+Auth endpoints use the same policy engine, but login start and callback routes
+also have pre-auth state, nonce, issuer, and code-verifier checks.
+
+| Endpoint Family                                 | Required Checks                                                        |
+| ----------------------------------------------- | ---------------------------------------------------------------------- |
+| `GET /auth/v1/providers`                        | pre-auth safe provider metadata, rate-limited                          |
+| `GET /auth/v1/providers/{provider_id}/login`    | pre-auth login state creation, provider enabled                        |
+| `GET /auth/v1/providers/{provider_id}/callback` | pre-auth state, nonce, code, issuer, audience, and JWKS validation     |
+| `POST /auth/v1/logout`                          | `gateway.session.revoke` for the current session                       |
+| `GET /auth/v1/session`                          | `gateway.session.read` for the current session                         |
+| `POST /auth/v1/session/default-organization`    | `gateway.session.update` plus active organization membership           |
+| `POST /auth/v1/session/active-organization`     | `gateway.session.update` plus active organization membership           |
+| `POST /auth/v1/session/active-project`          | `gateway.session.update` plus active project membership                |
+| `GET /auth/v1/invitations/{token}/preview`      | `gateway.organization_invite.read` on safe invitation metadata         |
+| `POST /auth/v1/invitations/{token}/accept`      | `gateway.organization_invite.accept` for the invited principal or flow |
 
 OpenAPI should annotate every operation with:
 
@@ -396,9 +487,9 @@ Built-in roles can compile to Cedar policies or policy templates.
 Example intent:
 
 ```text
-permit tenant owners to manage resources in their tenant.
-permit organization admins to manage projects in their organization.
-permit project admins to manage API keys and budgets in their project.
+permit tenant_owner roles to manage resources in their tenant.
+permit organization_admin roles to manage projects in their organization.
+permit project_admin roles to manage API keys and budgets in their project.
 permit API keys to perform only actions granted to the key and allowed to the owner.
 forbid disabled, expired, or deleted API keys from all actions.
 forbid project-bound API keys from resources outside their project.

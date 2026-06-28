@@ -226,6 +226,8 @@ Capabilities:
 
 - readiness and liveness endpoints
 - metrics and trace instrumentation
+- Redis-compatible built-in realtime operations dashboard
+- OpenTelemetry export configuration for user-owned dashboards
 - backup and restore procedure
 - migration safety checks
 - notification replay and dead-letter operations
@@ -236,8 +238,10 @@ Capabilities:
 Exit criteria:
 
 - production profile uses an external or encrypted secret backend
-- dashboards cover request, provider, route, budget, config, and notification
-  health
+- built-in realtime dashboard covers live provider, route, budget, quota,
+  config, and worker health from hot-state data
+- OpenTelemetry export emits provider latency, TTFT, throughput, error,
+  failover, and worker health metrics for user-owned dashboards
 - restore rehearsal succeeds in a test environment
 - migration checks run in CI and at startup
 - incident runbooks exist for credential leak, provider outage, runaway spend,
@@ -385,6 +389,24 @@ Model observability tests should cover:
 | rollup lag                        | dashboard response includes freshness warning        |
 | retention boundary                | response marks partial data                          |
 | prompt-bearing event              | dashboard omits raw prompt and completion            |
+
+## Realtime And OTel Observability Test Matrix
+
+Realtime and OpenTelemetry observability tests should cover:
+
+| Case                              | Expected Result                                             |
+| --------------------------------- | ----------------------------------------------------------- |
+| realtime value with TTL           | response includes TTL, freshness timestamp, and source kind |
+| missing hot-state value           | response marks field unavailable and explains fallback      |
+| stale hot-state value             | response marks field stale and avoids durable conclusions   |
+| Redis or Valkey outage            | runtime follows configured fail mode and dashboard degrades |
+| hot-state source metadata         | response never exposes raw hot-state keys                   |
+| OpenTelemetry endpoint validation | invalid protocol, endpoint, or secret reference rejected    |
+| OpenTelemetry label cardinality   | unbounded tenant, user, request, or model labels rejected   |
+| exporter collector outage         | model requests continue and exporter failure metrics rise   |
+| dropped metric accounting         | dropped metric count is reported in exporter health         |
+| disabled exporter                 | built-in realtime dashboard remains available               |
+| metrics backend outage            | authorization, routing, usage, and audit behavior continue  |
 
 ## Notification Test Matrix
 
@@ -628,7 +650,9 @@ The minimum complete gateway is not the smallest proxy. It must include:
 - route decision evidence
 - usage event recording
 - immutable usage attribution by project member when applicable
+- Redis-compatible built-in realtime operations dashboard
 - organization, project, project member, and model dashboard read APIs
+- OpenTelemetry metrics export configuration for user-owned monitoring
 - cost estimate with pricing version or unpriced confidence
 - budget policy hook, even if only one policy mode is implemented
 - redacted logs and audit events
@@ -645,10 +669,10 @@ not as the gateway.
 - Multi-tenancy, organization provider grants, admin-managed credentials,
   user-owned and service-owned API keys, REST API permissions, routing groups,
   router strategies, cost-only budgets, GitHub OAuth App login, OIDC login,
-  user management,
-  organization/project membership, project member usage attribution, scoped
-  dashboards, model observability, Codex-only upstream OAuth, and notifications
-  are all covered by implementation phases and tests.
+  user management, organization/project membership, project member usage
+  attribution, scoped dashboards, Redis-compatible realtime operations dashboard,
+  OpenTelemetry metrics export, model observability, Codex-only upstream OAuth,
+  and notifications are all covered by implementation phases and tests.
 - CI can validate docs, schemas, and Rust crates without live provider secrets.
 - Each phase has objective exit criteria.
 - Security and operational gates are explicit before production deployment.

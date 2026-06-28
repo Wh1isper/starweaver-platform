@@ -12,13 +12,17 @@ provider. Human login is how an operator, organization admin, project member,
 or viewer authenticates to the admin and dashboard APIs.
 
 Bare deployments must not require the operator to already own an enterprise
-OIDC provider. The gateway should ship built-in login provider adapters that can
-be enabled by configuration. GitHub OAuth App is the required v1 bare-deploy
+OIDC provider. The gateway ships a local single-user mode that is disabled by
+default and becomes available only when an operator configures a username and
+password through environment variables. External login providers can be enabled
+after bootstrap. GitHub OAuth App is the recommended v1 bare-deploy external
 adapter. Generic OIDC is the required v1 enterprise adapter.
 
 ## Goals
 
-- Support bare-deploy login through a configured GitHub OAuth App.
+- Support bare-deploy bootstrap through an environment-configured local
+  single-user account.
+- Support bare-deploy external login through a configured GitHub OAuth App.
 - Support enterprise login through configured OIDC providers.
 - Use OAuth 2.0 authorization code flow with provider-appropriate validation:
   `state` for all providers, PKCE and ID token validation for OIDC providers,
@@ -33,8 +37,10 @@ adapter. Generic OIDC is the required v1 enterprise adapter.
 
 ## Non-Goals
 
-- Do not build password authentication in v1.
-- Do not store login provider passwords.
+- Do not build a general multi-user password authentication system in v1.
+- Do not store login provider passwords. The local single-user password is read
+  from process environment and is intended for bootstrap and simple self-hosted
+  operation.
 - Do not become a general identity provider or SCIM directory in v1.
 - Do not auto-link accounts by email unless an explicit verified-email policy
   permits it.
@@ -47,7 +53,7 @@ adapter. Generic OIDC is the required v1 enterprise adapter.
 
 | Area                    | V1 Decision                                                                  |
 | ----------------------- | ---------------------------------------------------------------------------- |
-| Bare-deploy provider    | GitHub OAuth App                                                             |
+| Bare-deploy provider    | local single-user password mode, then optional GitHub OAuth App              |
 | Enterprise provider     | generic OIDC provider config                                                 |
 | Provider adapters       | `github_oauth_app`, `oidc`                                                   |
 | Login protocol          | OAuth 2.0 authorization code flow                                            |
@@ -67,18 +73,62 @@ adapter. Generic OIDC is the required v1 enterprise adapter.
 The name does not mean the gateway becomes an identity provider, and it does
 not describe upstream model provider credentials.
 
-V1 supports two login provider kinds:
+V1 supports three login provider kinds:
 
-| Kind               | Primary Use                      | Protocol Shape                             |
-| ------------------ | -------------------------------- | ------------------------------------------ |
-| `github_oauth_app` | bare deployments and small teams | GitHub OAuth App authorization code flow   |
-| `oidc`             | enterprise SSO                   | OIDC authorization code flow with ID token |
+| Kind                   | Primary Use                                   | Protocol Shape                             |
+| ---------------------- | --------------------------------------------- | ------------------------------------------ |
+| `single_user_password` | single-node bootstrap and simple self-hosting | local password check from environment      |
+| `github_oauth_app`     | bare deployments and small teams              | GitHub OAuth App authorization code flow   |
+| `oidc`                 | enterprise SSO                                | OIDC authorization code flow with ID token |
+
+The local single-user provider is not a configurable `IdentityProvider`
+resource. It is exposed by `/auth/v1/providers` only when both
+`STARWEAVER_GATEWAY_SINGLE_USER_USERNAME` and
+`STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD` are non-empty. Login uses
+`POST /auth/v1/single-user/login`, creates an opaque server-side session, and
+bootstraps the default tenant, organization, project, user, membership graph,
+and tenant-owner grants if they do not already exist.
 
 For hosted SaaS, the operator may run a shared GitHub OAuth App. For
-self-hosted and single-node deployments, the administrator configures their own
-GitHub OAuth App by supplying the client id, client secret reference, public
-base URL, and optional organization/domain allow rules. The gateway derives the
-callback URL from the public base URL unless the operator overrides it.
+self-hosted deployments that want external login, the administrator configures
+their own GitHub OAuth App by supplying the client id, client secret reference,
+public base URL, and optional organization/domain allow rules. The gateway
+derives the callback URL from the public base URL unless the operator overrides
+it.
+
+## Single-User Login Flow
+
+```mermaid
+sequenceDiagram
+    participant Browser
+    participant Gateway as Gateway Auth API
+    participant DB as PostgreSQL
+    participant Authz as Authorization Engine
+
+    Browser->>Gateway: GET /auth/v1/providers
+    Gateway-->>Browser: local_single_user only when env credentials exist
+    Browser->>Gateway: POST /auth/v1/single-user/login
+    Gateway->>Gateway: constant-time username and password check
+    Gateway->>DB: bootstrap tenant, organization, project, user, memberships
+    Gateway->>Authz: seed tenant-owner grants when missing
+    Gateway->>DB: create server-side auth session
+    Gateway-->>Browser: return opaque bearer session
+```
+
+Required environment variables:
+
+```text
+STARWEAVER_GATEWAY_SINGLE_USER_USERNAME=admin
+STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD=...
+```
+
+Optional environment variables:
+
+```text
+STARWEAVER_GATEWAY_SINGLE_USER_EMAIL=admin@example.com
+STARWEAVER_GATEWAY_SINGLE_USER_DISPLAY_NAME=Admin
+STARWEAVER_GATEWAY_SINGLE_USER_SESSION_TTL_SECONDS=43200
+```
 
 ## GitHub OAuth App Login Flow
 
@@ -190,9 +240,20 @@ kind with explicit authorization, token, user, and email API base URLs.
 ## Bare Deployment Bootstrap
 
 A bare deployment should be able to become usable without an existing
-enterprise SSO tenant.
+enterprise SSO tenant. The minimum path is local single-user mode:
 
-Minimum configuration:
+```text
+STARWEAVER_GATEWAY_SINGLE_USER_USERNAME=admin
+STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD=...
+```
+
+This mode is disabled when either value is absent or empty. It does not create
+additional password users, invitation flows, or reusable password credentials.
+
+After bootstrap, a deployment that wants external identity can add a GitHub
+OAuth App provider.
+
+GitHub OAuth App configuration:
 
 ```yaml
 public_base_url: https://gateway.example.com
@@ -330,10 +391,9 @@ Invitation tokens must be single-use and revocable.
 
 Project membership can be granted by:
 
-- organization owner
 - organization admin
-- project owner
 - project admin when policy permits
+- gateway operator or tenant admin during controlled bootstrap or repair
 - invitation with project assignment
 - domain allowlist provisioning policy
 
@@ -441,8 +501,11 @@ Login and user management introduce explicit actions.
 | `gateway.external_identity.unlink`   | `ExternalIdentity`       |
 | `gateway.session.read`               | `AuthSession`            |
 | `gateway.session.revoke`             | `AuthSession`            |
+| `gateway.session.update`             | `AuthSession`            |
+| `gateway.organization_invite.read`   | `OrganizationInvitation` |
 | `gateway.organization_invite.create` | `OrganizationInvitation` |
 | `gateway.organization_invite.manage` | `OrganizationInvitation` |
+| `gateway.organization_invite.accept` | `OrganizationInvitation` |
 | `gateway.organization_member.read`   | `OrganizationMember`     |
 | `gateway.organization_member.write`  | `OrganizationMember`     |
 | `gateway.project_member.read`        | `ProjectMember`          |
@@ -451,6 +514,10 @@ Login and user management introduce explicit actions.
 Self-service session APIs still require policy checks. For example, a user can
 read their own session, but cannot switch to an organization where they lack an
 active membership.
+
+The canonical endpoint and action matrix for `/auth/v1/*` and user-management
+admin APIs is defined in `10-authorization-api-keys.md`. This spec should not
+introduce additional role names or route aliases beyond that matrix.
 
 ## Security Rules
 
