@@ -1,0 +1,418 @@
+name: Container Images
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/**"
+      - "rust-toolchain.toml"
+      - ".dockerignore"
+      - "docker-compose.yml"
+      - ".github/workflows/images.yml"
+  schedule:
+    - cron: "17 18 * * *"
+  release:
+    types: [published]
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Image channel to publish."
+        required: true
+        type: choice
+        options:
+          - nightly
+          - release
+      release_tag:
+        description: "Release tag to publish when channel is release, for example v0.1.0."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: container-images-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  GCR_REGISTRY: ${{ vars.GCR_REGISTRY || 'gcr.io' }}
+  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
+
+jobs:
+  service-smoke:
+    name: ${{ matrix.title }} image smoke build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - title: Gateway
+            image: starweaver-gateway
+            dockerfile: crates/starweaver-gateway/Dockerfile
+            cache_scope: starweaver-gateway
+            host_port: "18080"
+            container_port: "8080"
+            listen_env: STARWEAVER_GATEWAY_LISTEN_ADDR
+          - title: Platform
+            image: starweaver-platform
+            dockerfile: crates/starweaver-platform/Dockerfile
+            cache_scope: starweaver-platform
+            host_port: "18090"
+            container_port: "8090"
+            listen_env: STARWEAVER_PLATFORM_LISTEN_ADDR
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build service image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: false
+          load: true
+          pull: true
+          tags: ${{ matrix.image }}:pr-${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.cache_scope }}
+          cache-to: type=gha,scope=${{ matrix.cache_scope }},mode=max
+
+      - name: Run service image smoke
+        env:
+          SERVICE_IMAGE: ${{ matrix.image }}
+          HOST_PORT: ${{ matrix.host_port }}
+          CONTAINER_PORT: ${{ matrix.container_port }}
+          LISTEN_ENV: ${{ matrix.listen_env }}
+        run: |
+          set -euo pipefail
+          container_id="$(
+            docker run \
+              --detach \
+              --publish "${HOST_PORT}:${CONTAINER_PORT}" \
+              --env "${LISTEN_ENV}=0.0.0.0:${CONTAINER_PORT}" \
+              "${SERVICE_IMAGE}:pr-${GITHUB_SHA}"
+          )"
+          trap 'docker logs "${container_id}" || true; docker rm -f "${container_id}" || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:${HOST_PORT}/readyz"; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+  service-nightly:
+    name: Publish ${{ matrix.title }} nightly image
+    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'schedule' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.channel == 'nightly')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - title: Gateway
+            image: starweaver-gateway
+            dockerfile: crates/starweaver-gateway/Dockerfile
+            cache_scope: starweaver-gateway
+            artifact_prefix: gateway
+          - title: Platform
+            image: starweaver-platform
+            dockerfile: crates/starweaver-platform/Dockerfile
+            cache_scope: starweaver-platform
+            artifact_prefix: platform
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Validate release contract artifacts
+        run: make migration-checksum-check openapi-check
+
+      - name: Validate registry settings
+        run: |
+          set -euo pipefail
+          : "${GCR_REGISTRY:?Set GCR_REGISTRY or use the default gcr.io.}"
+          : "${GCP_PROJECT_ID:?Set GCP_PROJECT_ID as a repository variable or secret.}"
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - name: Log in to GCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.GCR_REGISTRY }}
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute image metadata
+        id: meta
+        env:
+          SERVICE_IMAGE_NAME: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          revision="$(git rev-parse HEAD)"
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          build_date="$(date -u +%Y%m%d)"
+          image="${GCR_REGISTRY}/${GCP_PROJECT_ID}/${SERVICE_IMAGE_NAME}"
+          {
+            echo "image=${image}"
+            echo "tags<<EOF"
+            echo "${image}:nightly"
+            echo "${image}:nightly-${build_date}-${short_sha}"
+            echo "${image}:main-${short_sha}"
+            echo "EOF"
+            echo "labels<<EOF"
+            echo "org.opencontainers.image.title=${SERVICE_IMAGE_NAME}"
+            echo "org.opencontainers.image.revision=${revision}"
+            echo "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+            echo "org.opencontainers.image.version=nightly"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Build and push service image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          pull: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.cache_scope }}
+          cache-to: type=gha,scope=${{ matrix.cache_scope }},mode=max
+
+      - name: Write image artifact metadata
+        id: artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p image-artifacts
+          mkdir -p image-artifacts/openapi
+          mkdir -p image-artifacts/migrations
+          cp docs/openapi/*.openapi.json image-artifacts/openapi/
+          cp release/migration-checksums.txt image-artifacts/migrations/
+          find image-artifacts/openapi -type f -name '*.openapi.json' -print | sort > image-artifacts/openapi-contracts.txt
+          printf '%s\n' '${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}' > image-artifacts/image-digest.txt
+          cat > image-artifacts/image-tags.txt <<'EOF'
+          ${{ steps.meta.outputs.tags }}
+          EOF
+          cat > image-artifacts/oci-labels.txt <<'EOF'
+          ${{ steps.meta.outputs.labels }}
+          EOF
+          cat > image-artifacts/attestations.txt <<'EOF'
+          BuildKit SBOM and provenance attestations are attached to the pushed image digest.
+          EOF
+          (cd image-artifacts && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+          echo "path=image-artifacts" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload image artifact metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_prefix }}-nightly-image-${{ github.run_id }}
+          path: ${{ steps.artifacts.outputs.path }}
+          if-no-files-found: error
+
+      - name: Write publish summary
+        env:
+          SERVICE_IMAGE_NAME: ${{ matrix.image }}
+        run: |
+          {
+            echo "Published ${SERVICE_IMAGE_NAME} nightly image."
+            echo ""
+            echo "Image: ${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}"
+            echo ""
+            echo "Tags:"
+            echo '${{ steps.meta.outputs.tags }}'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  service-release:
+    name: Publish ${{ matrix.title }} release image
+    runs-on: ubuntu-latest
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && inputs.channel == 'release')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - title: Gateway
+            image: starweaver-gateway
+            dockerfile: crates/starweaver-gateway/Dockerfile
+            cache_scope: starweaver-gateway
+            artifact_prefix: gateway
+          - title: Platform
+            image: starweaver-platform
+            dockerfile: crates/starweaver-platform/Dockerfile
+            cache_scope: starweaver-platform
+            artifact_prefix: platform
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+    steps:
+      - name: Validate release tag
+        run: |
+          set -euo pipefail
+          if [[ -z "${RELEASE_TAG}" ]]; then
+            echo "release_tag is required for manual release publishes." >&2
+            exit 2
+          fi
+          if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "release tag must look like v0.1.0 or v0.1.0-rc.1: ${RELEASE_TAG}" >&2
+            exit 2
+          fi
+
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Validate release contract artifacts
+        run: make migration-checksum-check openapi-check
+
+      - name: Validate registry settings
+        run: |
+          set -euo pipefail
+          : "${GCR_REGISTRY:?Set GCR_REGISTRY or use the default gcr.io.}"
+          : "${GCP_PROJECT_ID:?Set GCP_PROJECT_ID as a repository variable or secret.}"
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - name: Log in to GCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.GCR_REGISTRY }}
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute image metadata
+        id: meta
+        env:
+          SERVICE_IMAGE_NAME: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          revision="$(git rev-parse HEAD)"
+          semver="${RELEASE_TAG#v}"
+          image="${GCR_REGISTRY}/${GCP_PROJECT_ID}/${SERVICE_IMAGE_NAME}"
+          {
+            echo "image=${image}"
+            echo "tags<<EOF"
+            echo "${image}:${RELEASE_TAG}"
+            echo "${image}:${semver}"
+            echo "${image}:latest"
+            echo "EOF"
+            echo "labels<<EOF"
+            echo "org.opencontainers.image.title=${SERVICE_IMAGE_NAME}"
+            echo "org.opencontainers.image.revision=${revision}"
+            echo "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+            echo "org.opencontainers.image.version=${RELEASE_TAG}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Build and push service image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          pull: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.cache_scope }}
+          cache-to: type=gha,scope=${{ matrix.cache_scope }},mode=max
+
+      - name: Write image artifact metadata
+        id: artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p image-artifacts
+          mkdir -p image-artifacts/openapi
+          mkdir -p image-artifacts/migrations
+          cp docs/openapi/*.openapi.json image-artifacts/openapi/
+          cp release/migration-checksums.txt image-artifacts/migrations/
+          find image-artifacts/openapi -type f -name '*.openapi.json' -print | sort > image-artifacts/openapi-contracts.txt
+          printf '%s\n' '${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}' > image-artifacts/image-digest.txt
+          cat > image-artifacts/image-tags.txt <<'EOF'
+          ${{ steps.meta.outputs.tags }}
+          EOF
+          cat > image-artifacts/oci-labels.txt <<'EOF'
+          ${{ steps.meta.outputs.labels }}
+          EOF
+          cat > image-artifacts/attestations.txt <<'EOF'
+          BuildKit SBOM and provenance attestations are attached to the pushed image digest.
+          EOF
+          (cd image-artifacts && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+          echo "path=image-artifacts" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload image artifact metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_prefix }}-release-image-${{ env.RELEASE_TAG }}
+          path: ${{ steps.artifacts.outputs.path }}
+          if-no-files-found: error
+
+      - name: Write publish summary
+        env:
+          SERVICE_IMAGE_NAME: ${{ matrix.image }}
+        run: |
+          {
+            echo "Published ${SERVICE_IMAGE_NAME} release image."
+            echo ""
+            echo "Image: ${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}"
+            echo ""
+            echo "Tags:"
+            echo '${{ steps.meta.outputs.tags }}'
+          } >> "${GITHUB_STEP_SUMMARY}"

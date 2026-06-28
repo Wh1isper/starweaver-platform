@@ -189,16 +189,19 @@ Ledger dimensions:
 
 Ledger buckets:
 
-| Bucket | Use                                             |
-| ------ | ----------------------------------------------- |
-| minute | hot dashboards and near-real-time budget checks |
-| hour   | operational reports                             |
-| day    | cost summaries                                  |
-| month  | budget and chargeback summaries                 |
-| event  | immutable source event                          |
+| Bucket | Use                                                                  |
+| ------ | -------------------------------------------------------------------- |
+| minute | low-latency usage analytics rollups and near-real-time budget checks |
+| hour   | operational reports                                                  |
+| day    | cost summaries                                                       |
+| month  | budget and chargeback summaries                                      |
+| event  | immutable source event                                               |
 
 The event ledger is the source of truth for reconstruction. Aggregated buckets
 are derived materializations.
+
+Ledger buckets feed usage analytics. They are not the Redis-compatible
+hot-state source for the built-in realtime operations dashboard.
 
 Dashboard buckets should materialize common views:
 
@@ -375,8 +378,9 @@ Quota types:
 | stream duration     | credential, alias, endpoint             |
 | request body bytes  | credential, alias, protocol family      |
 
-Counters can use Redis hot state with durable usage events as reconciliation
-source. Redis loss should fail according to policy: `fail_open`,
+Counters can use Redis-compatible hot state with durable usage events as
+reconciliation source. Hot-state loss should fail according to policy:
+`fail_open`,
 `fail_limited`, or `fail_closed`.
 
 ### Counter Algorithm
@@ -495,13 +499,19 @@ Webhook requests should include:
 | ----------------------- | -------------------------------------- |
 | `x-gateway-event-id`    | event id                               |
 | `x-gateway-event-type`  | event type                             |
-| `x-gateway-delivery-id` | delivery attempt id                    |
+| `x-gateway-delivery-id` | stable outbox delivery id              |
 | `x-gateway-signature`   | HMAC signature over timestamp and body |
 | `x-gateway-timestamp`   | signing timestamp                      |
 | `x-gateway-schema`      | schema version                         |
 
 Receivers use event id as idempotency key. Gateway may retry deliveries, so
 receivers must treat duplicate event ids as safe duplicates.
+
+Webhook delivery uses HTTPS URLs by default. Local and test profiles may allow
+loopback HTTP receivers for deterministic integration tests. Delivery evidence
+records only safe metadata: host, path, body checksum, signature checksum,
+redacted header names, timeout, and response status class. It must not store
+raw webhook bodies, raw signatures, signing secret values, or response bodies.
 
 ## Outbox
 
@@ -534,6 +544,9 @@ Retry policy:
 
 - bounded exponential backoff with jitter
 - max retry duration configurable per sink
+- 2xx responses mark the outbox event delivered
+- 408, 425, 429, 5xx, timeout, and transport failures are retryable
+- other non-2xx responses are permanent failures
 - dead-letter after retry budget exhausted
 - disable sink automatically only for explicit policy, not by default
 - delivery failures do not block gateway runtime requests
@@ -562,6 +575,26 @@ Some operators prefer pull-based export. The gateway should support:
 - schema version in every record
 
 Export files must follow the same redaction policy as webhooks.
+
+V1 export job creation accepts `storage_backend: inline_manifest`,
+`storage_backend: file_object_storage`, or `storage_backend: object_storage`.
+`inline_manifest` is the local/default backend used for small self-hosted
+deployments and tests. `file_object_storage` writes the redacted JSON payload to
+the absolute directory configured by
+`STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_DIR` and returns a logical
+`file-object://gateway-exports/{tenant_id}/{export_job_id}.json` object ref
+without exposing the local root path or inlining exported rows in the API
+manifest. `object_storage` writes the same redacted JSON payload to the HTTPS
+base URL configured by `STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_URL` using a
+`PUT {base}/{tenant_id}/{export_job_id}.json` request and optional
+`STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_AUTHORIZATION`. If no writer is
+configured, the configured URL is unsafe, or the PUT fails, the gateway records a
+failed export job and a redacted failure manifest instead of returning a false
+success.
+Failure manifests include the storage backend, connection state, retryable
+failure reason, filtered record count, checksum evidence, and no exported rows.
+Manifest reads must enforce `expires_at`; expired manifests are not returned
+even though the export job metadata remains auditable.
 
 ## Budget Reset
 

@@ -44,22 +44,23 @@ flowchart TD
 
 ## Spec Map
 
-| File                                      | Scope                                                                                |
-| ----------------------------------------- | ------------------------------------------------------------------------------------ |
-| `00-requirements.md`                      | functional capability map, requirement levels, and completion evidence               |
-| `01-llm-gateway.md`                       | product boundary, non-goals, top-level lifecycle, and glossary                       |
-| `02-tenancy-access.md`                    | tenant, organization, project, API key, caller credential, RBAC, and provider grants |
-| `03-provider-credential-catalog.md`       | provider endpoint, upstream credential, upstream Codex OAuth, model catalog, pricing |
-| `04-routing-router.md`                    | routing group, route policy, strategy, health, failover, stickiness, and decisions   |
-| `05-runtime-protocol.md`                  | client-facing protocols, endpoint adaptation, streaming, retries, usage extraction   |
-| `06-usage-cost-budget-notifications.md`   | cost-only usage ledger, budgets, quotas, notifications, and webhook/outbox model     |
-| `07-admin-config-api.md`                  | admin resources, versioned config lifecycle, audit, invalidation, and OpenAPI shape  |
-| `08-security-observability-operations.md` | secret safety, redaction, telemetry, storage, deployment, and operational gates      |
-| `09-validation-and-rollout.md`            | implementation phases, acceptance gates, migration policy, and test matrix           |
-| `10-authorization-api-keys.md`            | API keys, REST API permissions, authorization engine, actions, and policy gates      |
-| `11-login-user-management.md`             | GitHub OAuth App login, OIDC login, sessions, user lifecycle, and memberships        |
-| `12-dashboards-observability-api.md`      | dashboard APIs, usage analytics, model observability, and scoped aggregations        |
-| `memos/`                                  | implementation planning notes, including framework and hot-state cache decisions     |
+| File                                      | Scope                                                                                        |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `00-requirements.md`                      | functional capability map, requirement levels, and completion evidence                       |
+| `01-llm-gateway.md`                       | product boundary, non-goals, top-level lifecycle, and glossary                               |
+| `02-tenancy-access.md`                    | tenant, organization, project, API key, caller credential, RBAC, and provider grants         |
+| `03-provider-credential-catalog.md`       | provider endpoint, upstream credential, upstream Codex OAuth, model catalog, pricing         |
+| `04-routing-router.md`                    | routing group, route policy, strategy, health, failover, stickiness, and decisions           |
+| `05-runtime-protocol.md`                  | client-facing protocols, endpoint adaptation, streaming, retries, usage extraction           |
+| `06-usage-cost-budget-notifications.md`   | cost-only usage ledger, budgets, quotas, notifications, and webhook/outbox model             |
+| `07-admin-config-api.md`                  | admin resources, versioned config lifecycle, audit, invalidation, and OpenAPI shape          |
+| `08-security-observability-operations.md` | secret safety, redaction, telemetry, Redis-compatible hot state, OTel export, and operations |
+| `09-validation-and-rollout.md`            | implementation phases, acceptance gates, migration policy, and test matrix                   |
+| `10-authorization-api-keys.md`            | API keys, REST API permissions, authorization engine, actions, and policy gates              |
+| `11-login-user-management.md`             | single-user bootstrap, generic OIDC login, sessions, user lifecycle, and memberships         |
+| `12-dashboards-observability-api.md`      | realtime operations dashboard, usage analytics, model observability, and aggregations        |
+| `ui/`                                     | admin console UI spec, implementation plan, and module-level UI/UX reviews                   |
+| `memos/`                                  | implementation planning notes, including framework selection                                 |
 
 ## Requirements Covered
 
@@ -73,12 +74,13 @@ flowchart TD
 - Usage notifications and webhook integration points for external billing or
   analytics systems.
 - Upstream provider OAuth support restricted to Codex.
-- Human login through configured login providers: GitHub OAuth App for bare
-  deployments and OIDC for enterprise SSO.
+- Human login through local single-user bootstrap and configured generic OIDC
+  providers.
 - User-owned and service-owned API keys that can call model APIs and authorized
   REST APIs.
 - Unified authorization for model ingress and admin/evidence REST APIs.
-- Future web UI work is a separate product design.
+- Admin console UI work is specified separately under `ui/` and must not change
+  backend resource semantics.
 - No dependency on a specific application runtime, developer CLI, or client SDK
   implementation.
 

@@ -42,6 +42,8 @@ flowchart TD
   agent platform service shape.
 - `shared/01-service-suite-boundary.md` defines the repository, workspace, and
   dependency boundaries for the service suite.
+- `shared/02-auth-authz-layering.md` records the current decision for auth,
+  identity, and policy layering between the gateway and agent platform.
 - `gateway/README.md` indexes the enterprise LLM gateway spec set.
 - `gateway/00-requirements.md` maps gateway functional capabilities to design
   owners and completion evidence.
@@ -67,11 +69,12 @@ flowchart TD
 - `gateway/10-authorization-api-keys.md` defines user-owned and service-owned
   API keys, REST API authorization, action/resource vocabulary, policy engine
   direction, and permission gates.
-- `gateway/11-login-user-management.md` defines GitHub OAuth App login, OIDC
-  login, sessions, external identities, invitations, default organizations, and
-  user management.
-- `gateway/12-dashboards-observability-api.md` defines scoped dashboard APIs,
-  usage analytics, model observability, and project member consumption views.
+- `gateway/11-login-user-management.md` defines local single-user bootstrap,
+  generic OIDC login, sessions, external identities, invitations, default
+  organizations, and user management.
+- `gateway/12-dashboards-observability-api.md` defines the Redis-compatible
+  realtime operations dashboard, scoped dashboard APIs, usage analytics, model
+  observability, and project member consumption views.
 - `gateway/memos/` records implementation planning notes such as framework and
   library selection.
 - `platform/01-agent-platform-service.md` summarizes the agent control plane

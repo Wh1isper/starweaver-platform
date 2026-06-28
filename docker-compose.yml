@@ -1,0 +1,76 @@
+name: starweaver-platform
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: starweaver_platform
+      POSTGRES_USER: starweaver
+      POSTGRES_PASSWORD: starweaver
+    ports:
+      - "${STARWEAVER_GATEWAY_POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U starweaver -d starweaver_platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - gateway-postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${STARWEAVER_GATEWAY_REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - gateway-redis-data:/data
+
+  gateway-migrate:
+    build:
+      context: .
+      dockerfile: crates/starweaver-gateway/Dockerfile
+    command: ["migrate", "run"]
+    environment:
+      STARWEAVER_GATEWAY_DATABASE_URL: postgres://starweaver:starweaver@postgres:5432/starweaver_platform
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  gateway:
+    build:
+      context: .
+      dockerfile: crates/starweaver-gateway/Dockerfile
+    environment:
+      STARWEAVER_GATEWAY_LISTEN_ADDR: 0.0.0.0:8080
+      STARWEAVER_GATEWAY_ENV: local
+      STARWEAVER_GATEWAY_DATABASE_URL: postgres://starweaver:starweaver@postgres:5432/starweaver_platform
+      STARWEAVER_GATEWAY_REDIS_URL: redis://redis:6379/0
+      STARWEAVER_GATEWAY_DEPENDENCY_PROBE_MODE: live
+      STARWEAVER_GATEWAY_READINESS_PROBE_TIMEOUT_MS: 750
+      STARWEAVER_GATEWAY_SINGLE_USER_USERNAME: ${STARWEAVER_GATEWAY_SINGLE_USER_USERNAME:-}
+      STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD: ${STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD:-}
+      STARWEAVER_GATEWAY_SINGLE_USER_EMAIL: ${STARWEAVER_GATEWAY_SINGLE_USER_EMAIL:-}
+      STARWEAVER_GATEWAY_SINGLE_USER_DISPLAY_NAME: ${STARWEAVER_GATEWAY_SINGLE_USER_DISPLAY_NAME:-}
+      STARWEAVER_GATEWAY_SINGLE_USER_SESSION_TTL_SECONDS: ${STARWEAVER_GATEWAY_SINGLE_USER_SESSION_TTL_SECONDS:-}
+      STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_DIR: ${STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_DIR:-/data/gateway-exports}
+    ports:
+      - "${STARWEAVER_GATEWAY_HTTP_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      gateway-migrate:
+        condition: service_completed_successfully
+    volumes:
+      - gateway-export-objects:/data/gateway-exports
+
+volumes:
+  gateway-postgres-data:
+  gateway-redis-data:
+  gateway-export-objects:

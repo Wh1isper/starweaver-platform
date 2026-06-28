@@ -12,24 +12,24 @@ adding unnecessary distributed-system dependencies too early.
 
 Use a small Rust service stack:
 
-| Area                 | v1 Selection                                                                                 | Reason                                                                                             |
-| -------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Async runtime        | `tokio`                                                                                      | Rust async ecosystem baseline and required by selected web, DB, and HTTP crates                    |
-| HTTP server          | `axum` + `tower` + `tower-http`                                                              | Typed routing, middleware composition, streaming support, and low framework lock-in                |
-| HTTP client          | `reqwest` with `rustls-tls` and streaming                                                    | Provider egress needs JSON, bytes, streaming, timeouts, and TLS consistency                        |
-| Database             | PostgreSQL + `sqlx`                                                                          | SQL-first schema, async pool, migrations, offline query checking, and explicit data model          |
-| Cache / hot state    | Redis through `fred`                                                                         | PubSub, scripts, hashes, counters, rustls, and async ergonomics for config invalidation and limits |
-| Authorization engine | `cedar-policy` behind `AuthorizationEngine`                                                  | Rust-native policy evaluator, schema validation, RBAC/ABAC fit, and no required external service   |
-| Human login          | GitHub OAuth App through `oauth2`, OIDC through `openidconnect`; opaque server-side sessions | Bare deploy login, enterprise SSO, revocation, and auditability                                    |
-| API key hashing      | `argon2` PHC strings                                                                         | Password-hash style storage for high-entropy bearer keys with future hash upgrades                 |
-| Secret handling      | `secrecy` + `zeroize`                                                                        | Avoid accidental debug/display leaks and clear in-memory secret material                           |
-| Constant-time checks | `subtle` or `constant_time_eq`                                                               | Avoid timing-sensitive comparisons for key verification                                            |
-| OpenAPI              | `utoipa` + Swagger UI only for dev/admin                                                     | Rust-native schema generation and operation annotations                                            |
-| Serialization        | `serde`, `serde_json`, `serde_with` when needed                                              | Stable Rust serialization baseline                                                                 |
-| Errors               | `thiserror` in libraries, `anyhow` in binaries/tasks                                         | Typed service errors with pragmatic command/task plumbing                                          |
-| Observability        | `tracing`, `tower-http` trace, OpenTelemetry OTLP                                            | Structured logs and distributed traces without vendor lock-in                                      |
-| Testing              | `axum-test`, fake providers, `testcontainers` or compose for Postgres/Redis                  | Fast handler tests plus deterministic integration coverage                                         |
-| Local deployment     | Docker Compose for Postgres/Redis/service roles                                              | Keeps local validation reproducible without forcing Kubernetes                                     |
+| Area                 | v1 Selection                                                                | Reason                                                                                             |
+| -------------------- | --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Async runtime        | `tokio`                                                                     | Rust async ecosystem baseline and required by selected web, DB, and HTTP crates                    |
+| HTTP server          | `axum` + `tower` + `tower-http`                                             | Typed routing, middleware composition, streaming support, and low framework lock-in                |
+| HTTP client          | `reqwest` with `rustls-tls` and streaming                                   | Provider egress needs JSON, bytes, streaming, timeouts, and TLS consistency                        |
+| Database             | PostgreSQL + `sqlx`                                                         | SQL-first schema, async pool, migrations, offline query checking, and explicit data model          |
+| Cache / hot state    | Redis through `fred`                                                        | PubSub, scripts, hashes, counters, rustls, and async ergonomics for config invalidation and limits |
+| Authorization engine | `cedar-policy` behind `AuthorizationEngine`                                 | Rust-native policy evaluator, schema validation, RBAC/ABAC fit, and no required external service   |
+| Human login          | generic OIDC through `openidconnect`; opaque server-side sessions           | External login, enterprise SSO, revocation, and auditability                                       |
+| API key hashing      | `argon2` PHC strings                                                        | Password-hash style storage for high-entropy bearer keys with future hash upgrades                 |
+| Secret handling      | `secrecy` + `zeroize`                                                       | Avoid accidental debug/display leaks and clear in-memory secret material                           |
+| Constant-time checks | `subtle` or `constant_time_eq`                                              | Avoid timing-sensitive comparisons for key verification                                            |
+| OpenAPI              | `utoipa` + Swagger UI only for dev/admin                                    | Rust-native schema generation and operation annotations                                            |
+| Serialization        | `serde`, `serde_json`, `serde_with` when needed                             | Stable Rust serialization baseline                                                                 |
+| Errors               | `thiserror` in libraries, `anyhow` in binaries/tasks                        | Typed service errors with pragmatic command/task plumbing                                          |
+| Observability        | `tracing`, `tower-http` trace, OpenTelemetry OTLP                           | Structured logs and distributed traces without vendor lock-in                                      |
+| Testing              | `axum-test`, fake providers, `testcontainers` or compose for Postgres/Redis | Fast handler tests plus deterministic integration coverage                                         |
+| Local deployment     | Docker Compose for Postgres/Redis/service roles                             | Keeps local validation reproducible without forcing Kubernetes                                     |
 
 ## Architecture Shape
 
@@ -241,12 +241,12 @@ Avoid the term `virtual key` outside migration notes or anti-design discussion.
 
 ## Login And Session Decision
 
-Use provider-specific OAuth/OIDC authorization code flow for human admin and
-dashboard login. GitHub OAuth App is the v1 bare-deployment login adapter.
-Generic OIDC is the v1 enterprise SSO adapter. The gateway acts as a login
-client/relying party for configured login providers and maps external
-identities into gateway-local principals, organization memberships, project
-memberships, and sessions.
+Use generic OIDC authorization code flow for human admin and dashboard login.
+Local single-user password mode is the v1 bare-deployment bootstrap path, and
+generic OIDC is the standard v1 external login adapter after bootstrap. The
+gateway acts as a login client/relying party for configured OIDC providers and
+maps external identities into gateway-local principals, organization
+memberships, project memberships, and sessions.
 
 Use opaque server-side sessions:
 
@@ -261,10 +261,11 @@ Do not use self-contained JWT browser sessions for v1. They make revocation,
 default organization repair, project membership changes, and audit behavior
 harder to reason about.
 
-The `oauth2` crate is the v1 baseline for GitHub OAuth App login. The
-`openidconnect` crate is the v1 baseline for OIDC discovery, PKCE, nonce, ID
-token, and JWKS validation. Do not mix human login OAuth/OIDC with upstream
-provider OAuth credential storage.
+The `openidconnect` crate is the v1 baseline for OIDC discovery, PKCE, nonce,
+ID token, and JWKS validation. Do not mix human login OAuth/OIDC with upstream
+provider OAuth credential storage. Non-OIDC OAuth providers can be introduced
+later only through a separately reviewed adapter or through an external OIDC
+broker.
 
 ## Storage Decision
 

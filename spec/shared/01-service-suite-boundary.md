@@ -11,8 +11,18 @@ Use a new Git repository with one workspace for both services:
 
 - `starweaver-gateway`: the model egress plane.
 - `starweaver-platform-service`: the agent control plane.
-- shared service crates: identity, credentials, usage, audit, config versioning,
-  storage adapters, and client contracts.
+- versioned HTTP and schema contracts between the services.
+
+Shared service crates are deferred candidates. They should be extracted only
+after a second concrete service use proves the boundary, not for early
+convenience.
+
+Authn, identity, permissions, and policy are expected shared candidates, but
+they still follow the same rule. The gateway should first prove its own
+request, admin, login, dashboard, and export authorization paths. The agent
+platform should then prove concrete run, conversation, approval, environment,
+and evidence-archive authorization paths. Only after both sides have real usage
+should code move into shared layers.
 
 Do not place this workspace inside the existing Starweaver SDK/runtime
 repository.
@@ -64,14 +74,8 @@ Candidate workspace layout:
 starweaver-platform/
   Cargo.toml
   crates/
-    starweaver-service-core
-    starweaver-credentials
-    starweaver-gateway-core
     starweaver-gateway
-    starweaver-platform-core
-    starweaver-platform-service
-    starweaver-storage
-    starweaver-admin-api
+    starweaver-platform
     xtask
   migrations/
     gateway/
@@ -87,18 +91,20 @@ starweaver-platform/
   docs/
 ```
 
-The concrete crate list can change. The boundary rule should not change:
-shared crates contain contracts, types, repositories, and small policy helpers.
-They should not own long-running service loops.
+The concrete crate list can change. The current implementation should keep the
+workspace small and add shared crates only after a stable cross-service
+contract has two real owners. Shared candidates may contain contracts, types,
+repositories, and small policy helpers. They should not own long-running
+service loops.
 
 ## Dependency Rules
 
-| Component              | May Depend On                                                                  | Must Not Depend On                                    |
-| ---------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------- |
-| Gateway service        | shared service contracts, gateway core, storage adapters                       | agent runtime, platform service internals             |
-| Platform service       | shared service contracts, platform core, storage adapters, gateway HTTP client | gateway service internals, local CLI internals        |
-| Shared contracts       | serde types, error contracts, small validation helpers                         | service loops, HTTP server frameworks, runtime engine |
-| SDK/runtime repository | public gateway endpoint contracts as external HTTP config                      | this repository's internal crates                     |
+| Component              | May Depend On                                                               | Must Not Depend On                                    |
+| ---------------------- | --------------------------------------------------------------------------- | ----------------------------------------------------- |
+| Gateway service        | gateway-local modules and versioned schema contracts                        | agent runtime, platform service internals             |
+| Platform service       | platform-local modules, gateway HTTP client, and versioned schema contracts | gateway service internals, local CLI internals        |
+| Shared contracts       | serde types, error contracts, small validation helpers                      | service loops, HTTP server frameworks, runtime engine |
+| SDK/runtime repository | public gateway endpoint contracts as external HTTP config                   | this repository's internal crates                     |
 
 ## Service Relationship
 
@@ -124,9 +130,9 @@ sequenceDiagram
     Platform-->>Client: Run events and display stream
 ```
 
-## Shared Contract Candidates
+## Deferred Shared Contract Candidates
 
-Shared contracts should be small and stable:
+Shared contracts should be small and stable if they are extracted later:
 
 - `TenantId`, `ProjectId`, `UserId`, `ServiceAccountId`
 - `ClientCredential`, `CredentialScope`, `CredentialStatus`
@@ -138,3 +144,29 @@ Shared contracts should be small and stable:
 
 Do not share provider routing implementation, agent run coordination, retry
 loops, stream fanout loops, or admin route handlers until a stable need exists.
+
+## Auth And Permission Layering
+
+The final split should be discussed after the gateway and agent platform both
+exercise authn/authz in code. The likely layering is:
+
+- shared contracts: ids, actor context, tenant/organization/project scope,
+  principal references, session references, service account references, error
+  envelopes, and audit context fields
+- shared identity domain candidates: login provider config, users, external
+  identities, sessions, service accounts, organization membership, project
+  membership, role bindings, and action grants
+- shared policy candidates: action registry shape, resource registry shape,
+  Cedar schema generation, policy validation, built-in role templates, and
+  contract tests
+- gateway-local policy: model ingress actions, provider grants, upstream
+  credentials, routing resources, budget/quota actions, realtime dashboard
+  scopes, and provider observability
+- platform-local policy: run actions, conversation actions, agent actions,
+  approval actions, environment attachment actions, evidence archive actions,
+  and platform-specific retention rules
+
+The extraction gate is two concrete owners. A shared module needs at least one
+gateway use case and one agent platform use case, plus contract tests proving it
+does not widen either service's permissions. Until then, keep modules
+service-local and share only versioned HTTP/schema contracts.

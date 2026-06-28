@@ -1,0 +1,200 @@
+name: Live Provider Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type run-live-provider-smoke to confirm this may spend live provider quota."
+        required: true
+        type: string
+      gateway_url:
+        description: "HTTPS URL of a deployed gateway configured with live provider credentials."
+        required: true
+        type: string
+      request_path:
+        description: "Gateway protocol path to exercise."
+        required: true
+        default: "/v1/responses"
+        type: string
+      request_body:
+        description: "JSON request body. Use a low-cost model alias configured in the gateway."
+        required: true
+        default: '{"model":"smoke-low-cost","input":"Return only the word OK."}'
+        type: string
+      expected_status:
+        description: "Expected HTTP response status."
+        required: true
+        default: "200"
+        type: string
+      upload_redacted_response:
+        description: "Upload a redacted response artifact for debugging."
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-provider-smoke-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  live-provider-smoke:
+    name: Live provider smoke request
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate manual inputs
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+          GATEWAY_URL: ${{ inputs.gateway_url }}
+          REQUEST_PATH: ${{ inputs.request_path }}
+          EXPECTED_STATUS: ${{ inputs.expected_status }}
+          LIVE_GATEWAY_API_KEY: ${{ secrets.LIVE_GATEWAY_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ "${CONFIRM}" != "run-live-provider-smoke" ]]; then
+            echo "confirm must be exactly run-live-provider-smoke." >&2
+            exit 2
+          fi
+          if [[ ! "${GATEWAY_URL}" =~ ^https:// ]]; then
+            echo "gateway_url must be an HTTPS URL." >&2
+            exit 2
+          fi
+          if [[ ! "${REQUEST_PATH}" =~ ^/ ]] || [[ "${REQUEST_PATH}" == *"://"* ]]; then
+            echo "request_path must be a relative HTTP path that starts with /." >&2
+            exit 2
+          fi
+          if [[ ! "${EXPECTED_STATUS}" =~ ^[0-9]{3}$ ]]; then
+            echo "expected_status must be a three-digit HTTP status." >&2
+            exit 2
+          fi
+          : "${LIVE_GATEWAY_API_KEY:?Set LIVE_GATEWAY_API_KEY as a repository secret.}"
+
+      - name: Prepare request body
+        env:
+          REQUEST_BODY: ${{ inputs.request_body }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          body = json.loads(os.environ["REQUEST_BODY"])
+          pathlib.Path("request.json").write_text(
+              json.dumps(body, separators=(",", ":")),
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Send smoke request
+        env:
+          GATEWAY_URL: ${{ inputs.gateway_url }}
+          REQUEST_PATH: ${{ inputs.request_path }}
+          EXPECTED_STATUS: ${{ inputs.expected_status }}
+          LIVE_GATEWAY_API_KEY: ${{ secrets.LIVE_GATEWAY_API_KEY }}
+        run: |
+          set -euo pipefail
+          base="${GATEWAY_URL%/}"
+          path="/${REQUEST_PATH#/}"
+          status="$(
+            curl \
+              --silent \
+              --show-error \
+              --request POST \
+              --header "Authorization: Bearer ${LIVE_GATEWAY_API_KEY}" \
+              --header "Content-Type: application/json" \
+              --data @request.json \
+              --output response.json \
+              --write-out '%{http_code}' \
+              "${base}${path}"
+          )"
+          printf '%s\n' "${status}" > response.status
+          if [[ "${status}" != "${EXPECTED_STATUS}" ]]; then
+            echo "Expected HTTP ${EXPECTED_STATUS}, got HTTP ${status}." >&2
+            python -m json.tool response.json >/dev/null 2>&1 || true
+            exit 1
+          fi
+
+      - name: Write redacted response summary
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import pathlib
+
+          raw = pathlib.Path("response.json").read_bytes()
+          summary = {
+              "status": pathlib.Path("response.status").read_text(encoding="utf-8").strip(),
+              "response_bytes": len(raw),
+              "response_sha256": hashlib.sha256(raw).hexdigest(),
+          }
+          pathlib.Path("response-summary.json").write_text(
+              json.dumps(summary, indent=2, sort_keys=True),
+              encoding="utf-8",
+          )
+          PY
+          {
+            echo "Live provider smoke completed."
+            echo ""
+            echo "Path: ${{ inputs.request_path }}"
+            echo "Status: $(cat response.status)"
+            echo "Response summary:"
+            echo '```json'
+            cat response-summary.json
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Redact response artifact
+        if: inputs.upload_redacted_response
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import pathlib
+
+          sensitive_keys = {
+              "api_key",
+              "apikey",
+              "authorization",
+              "credential",
+              "secret",
+              "token",
+          }
+
+          def redact(value):
+              if isinstance(value, dict):
+                  redacted = {}
+                  for key, item in value.items():
+                      normalized = key.replace("-", "_").lower()
+                      if any(marker in normalized for marker in sensitive_keys):
+                          redacted[key] = "[REDACTED]"
+                      else:
+                          redacted[key] = redact(item)
+                  return redacted
+              if isinstance(value, list):
+                  return [redact(item) for item in value]
+              return value
+
+          payload = json.loads(pathlib.Path("response.json").read_text(encoding="utf-8"))
+          pathlib.Path("redacted-response.json").write_text(
+              json.dumps(redact(payload), indent=2, sort_keys=True),
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload redacted response artifact
+        if: inputs.upload_redacted_response
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-provider-smoke-${{ github.run_id }}
+          path: |
+            response-summary.json
+            redacted-response.json
+          if-no-files-found: error

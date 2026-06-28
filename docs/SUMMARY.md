@@ -6,6 +6,7 @@
 
 - [Install](install.md)
 - [Testing](testing.md)
+- [API Contracts](api-contracts.md)
 
 # Architecture
 

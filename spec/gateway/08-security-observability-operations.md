@@ -63,15 +63,15 @@ embedded development secret backend.
 
 ## Secret Backends
 
-Supported backend classes:
+Backend classes:
 
-| Backend                | Use                           |
-| ---------------------- | ----------------------------- |
-| `memory`               | tests only                    |
-| `file`                 | local development only        |
-| `database_encrypted`   | small self-hosted deployment  |
-| `cloud_secret_manager` | managed production deployment |
-| `external_vault`       | enterprise deployment         |
+| Backend                | Use                          | Current startup support                        |
+| ---------------------- | ---------------------------- | ---------------------------------------------- |
+| `memory`               | tests only                   | accepted outside production                    |
+| `file`                 | self-hosted deployments      | accepted; production requires an explicit root |
+| `database_encrypted`   | small self-hosted deployment | planned; rejected until backend is implemented |
+| `cloud_secret_manager` | managed production           | planned; rejected until backend is implemented |
+| `external_vault`       | enterprise deployment        | planned; rejected until backend is implemented |
 
 The API should expose a `SecretRef` abstraction so provider credentials can move
 between backends without changing routing resources.
@@ -80,21 +80,29 @@ between backends without changing routing resources.
 
 Secret reference fields:
 
-| Field         | Meaning                                                           |
-| ------------- | ----------------------------------------------------------------- |
-| `secret_ref`  | opaque reference string                                           |
-| `backend`     | configured secret backend                                         |
-| `scope_kind`  | tenant, organization, system                                      |
-| `scope_id`    | owning scope                                                      |
-| `purpose`     | upstream credential, login provider, webhook signing, OAuth token |
-| `version`     | backend version if available                                      |
-| `created_at`  | creation time                                                     |
-| `rotated_at`  | last rotation time                                                |
-| `expires_at`  | optional expiry                                                   |
-| `fingerprint` | non-secret digest for audit                                       |
+| Field           | Meaning                                                           |
+| --------------- | ----------------------------------------------------------------- |
+| `secret_ref_id` | stable gateway id for the secret reference                        |
+| `locator_mask`  | redacted backend locator or display mask                          |
+| `backend`       | configured secret backend                                         |
+| `scope_kind`    | tenant, organization, system                                      |
+| `scope_id`      | owning scope                                                      |
+| `purpose`       | upstream credential, login provider, webhook signing, OAuth token |
+| `version`       | backend version if available                                      |
+| `created_at`    | creation time                                                     |
+| `rotated_at`    | last rotation time                                                |
+| `expires_at`    | optional expiry                                                   |
+| `fingerprint`   | non-secret digest for audit                                       |
 
-`secret_ref` values should be treated as sensitive metadata. They are safer than
-raw secrets, but they can still reveal provider or tenant structure.
+`SecretRef` values should be treated as sensitive metadata. They are safer than
+raw secrets, but they can still reveal provider or tenant structure. Default
+read APIs return only `secret_ref_id`, purpose, version, fingerprint, mask,
+backend class, and timestamps. They must not return raw backend locators,
+backend paths, auth headers, or embedded secret material.
+
+Raw backend locators are available only through a strong-auth `security_admin`
+path for break-glass diagnostics. Audit diffs record only version,
+fingerprint, purpose, and masked locator changes.
 
 ## Secret Rotation
 
@@ -239,6 +247,27 @@ route decisions are the durable evidence.
 
 ## Metrics
 
+Use OpenTelemetry Metrics as the primary metrics instrumentation and export
+surface. Runtime workers, admin workers, and background workers should emit
+metrics through the same OpenTelemetry SDK and export them through OTLP to an
+operator-selected collector/backend. Do not make DogStatsD, Prometheus client
+libraries, or a vendor-specific API the v1 primary instrumentation path.
+
+The gateway has three observability data planes:
+
+| Plane                      | Primary Use                                                                                 | Source Of Truth                       |
+| -------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------- |
+| OpenTelemetry metrics      | operator-owned external dashboards, long-term provider performance, and alerts              | metrics backend through OTLP          |
+| PostgreSQL evidence        | auditable usage, cost, route, config, and mutation history                                  | PostgreSQL tables and derived rollups |
+| Redis-compatible hot state | built-in realtime dashboard, live counters, health hints, stickiness, and dynamic decisions | never durable; rebuilt or reconciled  |
+
+OpenTelemetry metrics are operational telemetry exported for the operator's own
+monitoring stack. They can power external dashboards and long-term provider
+performance comparisons, but they do not replace durable usage events, cost
+ledgers, route decisions, or audit events. Redis-compatible hot-state values
+power the gateway's built-in realtime dashboard and dynamic decisions, but they
+are not the long-term monitoring store.
+
 Metric families:
 
 | Metric                         | Dimensions                                            |
@@ -260,8 +289,90 @@ Metric families:
 | config publication lag         | tenant, snapshot status                               |
 | secret resolution failure      | backend, purpose                                      |
 
+Provider performance metrics should be emitted for both terminal requests and
+upstream attempts:
+
+| Metric                            | Purpose                                                              |
+| --------------------------------- | -------------------------------------------------------------------- |
+| `gateway.provider.request.count`  | provider attempt volume by endpoint, target, status, and error class |
+| `gateway.provider.latency`        | long-term latency histograms by endpoint, target, and protocol       |
+| `gateway.provider.ttft`           | time-to-first-token histograms for streaming-capable targets         |
+| `gateway.provider.throughput`     | output tokens per second for comparable provider/model routes        |
+| `gateway.provider.error.count`    | provider error, throttling, timeout, and auth failure trends         |
+| `gateway.provider.failover.count` | failover volume and source/destination endpoint patterns             |
+| `gateway.provider.health.state`   | current observed health class exported as an asynchronous gauge      |
+
+Metric names should use the `gateway.` namespace until a stable semantic
+convention is adopted. Histograms are required for latency, TTFT, stream
+duration, and provider attempt duration. Counters are required for requests,
+attempts, errors, failovers, budget blocks, rate-limit rejections, and
+notification deliveries. Gauges are allowed for worker loaded config version,
+queue depth, collector/exporter health, dashboard freshness lag, and current
+provider health class.
+
 High-cardinality labels should be controlled. Avoid raw request ids and raw
 model ids as unbounded metric labels unless the backend supports exemplars.
+Tenant, organization, project, project member, API key, and user labels are
+allowed only when explicitly enabled by policy and retention controls. Default
+metrics should prefer bounded identifiers such as protocol family, route group,
+model alias, model target, provider endpoint, provider kind, status class,
+error class, and region.
+
+Metric export requirements:
+
+- support OTLP/HTTP first, and reject `otlp_grpc` configs until a real gRPC
+  transport is implemented
+- support periodic export interval, timeout, and retry configuration
+- tolerate collector outages without blocking model requests
+- expose exporter failure count and dropped metric count
+- redact secret-like labels and resource attributes before export
+- support exemplars only when prompt, response, and secret data cannot leak
+- keep metric schema names and units versioned in docs and OpenAPI examples
+
+OTLP/HTTP requests use bounded JSON payloads and secret-backed headers from
+`OpenTelemetryExportConfig`. Export evidence records response status class,
+failure counts, dropped metric counts, and last successful export timestamp. It
+must not store collector auth header values, raw prompts, raw responses, or raw
+provider payloads. Local and test profiles may use loopback HTTP collectors for
+deterministic integration tests; production collector endpoints must use HTTPS.
+
+`OpenTelemetryExportConfig` is the admin-managed resource for exporting
+telemetry to an operator-owned collector/backend.
+
+| Field                     | Meaning                                                |
+| ------------------------- | ------------------------------------------------------ |
+| `otel_export_config_id`   | stable id                                              |
+| `tenant_id`               | owning tenant or system scope                          |
+| `signals`                 | `metrics`; traces and logs are outside v1              |
+| `protocol`                | `otlp_http`; `otlp_grpc` is rejected until implemented |
+| `endpoint`                | collector endpoint URL                                 |
+| `headers_secret_ref_id`   | optional secret reference id for exporter headers      |
+| `resource_attributes`     | bounded deployment attributes                          |
+| `metric_temporality`      | cumulative or delta, if supported by selected backend  |
+| `export_interval_seconds` | periodic metrics export interval                       |
+| `export_timeout_seconds`  | exporter request timeout                               |
+| `enabled`                 | whether the exporter is active                         |
+| `status`                  | last validation and export health                      |
+
+Read APIs return exporter metadata and health only. They must not return raw
+headers, auth tokens, or other exporter secrets. A missing or unhealthy
+OpenTelemetry exporter must not disable the built-in realtime dashboard.
+
+Recommended dashboard inputs:
+
+| Dashboard Area                     | Primary Input                                                  |
+| ---------------------------------- | -------------------------------------------------------------- |
+| built-in realtime operations       | Redis-compatible hot state plus recent route decision evidence |
+| built-in usage and cost analytics  | PostgreSQL usage events, ledger buckets, and cost rollups      |
+| built-in audit and compliance      | PostgreSQL audit events and route decision evidence            |
+| operator-owned provider dashboards | OpenTelemetry metric histograms exported through OTLP          |
+| operator-owned worker dashboards   | OpenTelemetry runtime metrics and readiness endpoints          |
+
+If a metrics backend is unavailable, the gateway should continue serving
+according to policy. The built-in realtime dashboard should continue to use
+Redis-compatible hot state and readiness data. Operator-owned OTel dashboards
+may show degraded monitoring freshness, but runtime authorization, budget,
+route, and usage behavior must not depend on the metrics backend.
 
 ## Tracing
 
@@ -355,17 +466,18 @@ Each degraded mode should emit metrics, logs, and audit or operational events.
 
 V1 production baseline storage split:
 
-| Component       | Data                                                                  |
-| --------------- | --------------------------------------------------------------------- |
-| PostgreSQL      | config, audit, usage events, ledger, outbox                           |
-| Redis or Valkey | hot counters, config hints, health state, route stickiness            |
-| secret backend  | raw upstream secrets, login provider client secrets, and OAuth tokens |
-| object storage  | exports, optional redacted debug bundles                              |
+| Component                | Data                                                                                 |
+| ------------------------ | ------------------------------------------------------------------------------------ |
+| PostgreSQL               | config, audit, usage events, ledger, outbox                                          |
+| Redis-compatible backend | realtime dashboard state, hot counters, config hints, health state, route stickiness |
+| secret backend           | raw upstream secrets, login provider client secrets, and OAuth tokens                |
+| object storage           | exports, optional redacted debug bundles                                             |
 
-Local development may run without Redis only in an explicit limited profile.
-Production profiles should treat Redis or a compatible hot-state backend as
-required for rate limits, budget hot counters, route stickiness, circuit
-breakers, and config invalidation. PostgreSQL remains the source of truth.
+Local development may run without a Redis-compatible backend only in an
+explicit limited profile. Production profiles should treat Redis or a
+compatible hot-state backend as required for rate limits, budget hot counters,
+route stickiness, circuit breakers, and config invalidation. PostgreSQL remains
+the source of truth.
 
 ## Database Requirements
 
@@ -422,34 +534,200 @@ unbounded write buffering as a substitute for durable ledger writes.
 
 ## Cache Requirements
 
-Cache uses:
+A Redis-compatible backend such as Redis or Valkey is the shared hot-state
+backend. It is not a source of truth.
+Durable resources, configuration, usage events, cost ledger buckets, audit
+events, and notification outbox records live in PostgreSQL.
 
+Cache uses must be limited to low-latency state that can be rebuilt, ignored,
+or reconciled:
+
+- built-in realtime operations dashboard views
 - rate limit counters
 - budget hot counters
 - route stickiness keys
+- provider health windows
 - circuit breaker state
 - config invalidation messages
-- short-lived provider health state
+- short-lived concurrency leases
 
 Cache loss behavior is policy-specific. Runtime code should not assume cache is
 durable evidence.
 
-Cache entries must have an owner, TTL, recovery path, and failure mode.
+### Key Naming
+
+All keys must use gateway-owned names and tenant scope unless the data is
+explicitly global:
+
+```text
+gateway:{domain}:{tenant_id}:{scope...}:{version_or_window}
+```
+
+Rules:
+
+- include `tenant_id` for tenant data
+- include `policy_id` for policy-owned counters
+- include `config_version` or policy version when stale values can affect
+  routing or policy
+- hash or normalize user-provided affinity values before putting them in keys
+- never include raw API key material, prompt text, completion text, upstream
+  credential values, OAuth tokens, or secret reference payloads
+- keep key names stable enough for dashboards and runbooks
+
+### Key Classes
+
+Cache entries must have an owner, TTL, recovery path, and failure mode. Keys
+without TTL require an explicit exception in the owning spec.
 
 | Entry Type             | Owner            | Required TTL              | Recovery Path                         | Default Failure Mode       |
 | ---------------------- | ---------------- | ------------------------- | ------------------------------------- | -------------------------- |
-| rate limit counter     | rate policy      | policy window plus grace  | durable usage or fresh empty window   | policy-defined             |
-| budget hot counter     | budget policy    | budget reset plus grace   | durable ledger bucket reconciliation  | fail closed for hard caps  |
+| rate limit counter     | quota policy     | policy window plus grace  | durable usage or fresh empty window   | policy-defined             |
+| budget hot counter     | budget policy    | reset window plus grace   | durable ledger bucket reconciliation  | fail closed for hard caps  |
 | route stickiness       | route policy     | sticky policy TTL         | route without affinity                | degrade optimization       |
 | provider health window | health policy    | short rolling window      | unknown until fresh probe or traffic  | health unknown             |
 | circuit breaker        | endpoint policy  | breaker cool-down TTL     | config state and fresh attempt errors | closed only if policy says |
 | config invalidation    | config publisher | message only              | database version polling              | converge through polling   |
 | concurrency lease      | quota policy     | request deadline plus lag | lease expiry and terminal audit       | policy-defined             |
+| request lease          | runtime request  | request deadline plus lag | terminal request cleanup              | request-scoped             |
+| authn failure window   | auth policy      | short failure window      | fresh empty window                    | policy-defined             |
 
-Redis or Valkey deployment must support the atomic operations required by the
-enabled policies. If the selected deployment mode cannot provide the needed
+Example key shapes:
+
+| Domain        | Example Shape                                                                          |
+| ------------- | -------------------------------------------------------------------------------------- |
+| rate          | `gateway:rate:{tenant}:{policy_id}:{scope_kind}:{scope_id}:{window}`                   |
+| budget        | `gateway:budget:{tenant}:{policy_id}:{scope_kind}:{scope_id}:{reset_window}`           |
+| concurrent    | `gateway:concurrent:{tenant}:{policy_id}:{scope_kind}:{scope_id}`                      |
+| request lease | `gateway:lease:{tenant}:{request_id}:{lease_kind}`                                     |
+| sticky        | `gateway:sticky:{tenant}:{project_id}:{model_alias_id}:{affinity_hash}`                |
+| health        | `gateway:health:{tenant}:{provider_endpoint_id}:{window}`                              |
+| circuit       | `gateway:circuit:{tenant}:{provider_endpoint_id}:{reason}`                             |
+| config        | `gateway:config:loaded:{worker_id}` and `gateway:config:invalidate:{tenant_or_global}` |
+| authn         | `gateway:authn_fail:{tenant_or_global}:{credential_prefix_or_ip}:{window}`             |
+
+### Atomicity
+
+Use a single Redis command or Lua script when multiple operations must be
+observed as one policy decision.
+
+Required atomic operations:
+
+- check and increment request or token counters
+- reserve budget hot counters when projected cost stays within allowance
+- acquire and release concurrency leases idempotently
+- update circuit breaker state with compare-and-set semantics
+- write sticky mapping only when the target remains eligible for the active
+  config version
+
+Script outputs should return structured decision data and must not include
+secret material:
+
+```json
+{
+  "allowed": true,
+  "policy_id": "pol_...",
+  "counter_value": 42,
+  "limit": 100,
+  "reset_at": "2026-06-24T00:01:00Z",
+  "mode": "normal"
+}
+```
+
+### Failure Modes
+
+Default behavior under cache loss:
+
+| Capability       | Cache Unavailable Default                                     |
+| ---------------- | ------------------------------------------------------------- |
+| route stickiness | ignore sticky mapping and route from current config           |
+| provider health  | treat health as unknown unless config marks endpoint disabled |
+| circuit breaker  | use config state and fresh attempts; do not infer durability  |
+| soft budget      | allow or notify according to budget policy                    |
+| hard budget      | fail closed unless policy declares bounded fail-limited mode  |
+| rate limit       | policy-defined `fail_open`, `fail_limited`, or `fail_closed`  |
+| concurrency      | policy-defined; production defaults should be conservative    |
+| config reload    | rely on PostgreSQL version polling                            |
+
+Any fail-limited mode must define:
+
+- maximum requests
+- maximum estimated cost or tokens
+- time window
+- affected scopes
+- audit event shape
+- operator alert
+
+### Reconciliation
+
+Hot-state values that affect spend controls are reconciled from PostgreSQL
+evidence:
+
+1. Usage events append to durable storage.
+2. Ledger workers fold usage into durable buckets.
+3. Reconciliation compares hot budget counters with durable bucket totals.
+4. Differences are repaired when safe.
+5. Hard-capped scopes enter conservative mode when hot state is lower than
+   durable usage or cannot be trusted.
+6. Repairs that affect enforcement write audit evidence.
+
+Rate counters are short-lived and may not need durable repair, but usage and
+budget counters need reconciliation because they affect spend controls.
+
+### Deployment
+
+V1 should support:
+
+- local single-node Redis or Valkey through Docker Compose
+- production managed Redis or Valkey with TLS
+- Sentinel or managed failover when operator infrastructure provides it
+
+The gateway should not require Redis Cluster in v1. If Redis Cluster is used,
+scripts and multi-key operations must keep keys in a compatible hash slot or be
+disabled for policies that require cross-key atomicity.
+
+The Redis-compatible deployment must support the atomic operations required by
+the enabled policies. If the selected deployment mode cannot provide the needed
 atomic compare/increment or lease semantics, that policy cannot be enabled in
 production.
+
+### Observability And Tests
+
+Minimum metrics:
+
+- cache command latency
+- script latency by script id
+- cache error count by operation
+- cache unavailable duration
+- budget conservative mode count
+- fail-limited allowance consumed
+- config invalidation lag
+- worker loaded config version
+- reconciliation repair count
+
+Logs must use key class and scope metadata, not full raw key strings when keys
+could contain hashed affinity or customer-controlled identifiers.
+
+Required tests:
+
+- key construction rejects unsafe input
+- every key class has TTL or an explicit exception
+- atomic scripts enforce limits under concurrent requests
+- hard budget cache loss fails according to policy
+- missed PubSub invalidation converges through polling
+- reconciliation repairs stale hot counters
+- sticky routing degrades safely when cache is unavailable
+- hot-state backend restart during a streaming request does not lose usage
+  evidence
+
+Acceptance gates:
+
+- Redis-compatible hot state is never the source of truth for durable gateway
+  evidence.
+- Each hot-state key has owner, TTL, scope, failure mode, and recovery path.
+- Atomic policies are backed by scripts or single-command guarantees.
+- Production hard budget behavior is conservative under cache loss.
+- Local validation can run Postgres and Redis or Valkey through compose or
+  `testcontainers`.
 
 ## Backup And Restore
 
@@ -657,7 +935,10 @@ Minimum dashboards:
 - config publication lag and runtime snapshot versions
 - secret expiry and credential failure count
 
-Dashboards should use metrics and audit data, not raw prompt capture.
+Built-in realtime dashboards should use Redis-compatible hot state and safe
+operational evidence. Operator-owned long-term dashboards should use
+OpenTelemetry metrics and durable audit/usage data. No dashboard should use raw
+prompt capture.
 
 ## Alerting
 

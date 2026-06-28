@@ -5,6 +5,54 @@
 /// Stable service identifier used in logs, metrics, and deployment metadata.
 pub const SERVICE_NAME: &str = "starweaver-platform";
 
+/// Platform-local authorization primitives.
+pub mod action;
+
+/// Platform-local authentication primitives.
+pub mod auth;
+
+/// Platform-local audit event contracts.
+pub mod audit;
+
+/// Platform startup configuration.
+pub mod config;
+
+/// Platform-local identity provider contracts.
+pub mod identity;
+
+/// Platform-local organization invitation contracts.
+pub mod invitation;
+
+/// Platform-local membership contracts.
+pub mod membership;
+
+/// Platform route metadata.
+pub mod route;
+
+/// Platform-local role binding contracts.
+pub mod role;
+
+/// Platform business resource records.
+pub mod resource;
+
+/// Platform-local secret reference contracts.
+pub mod secret;
+
+/// Platform database migration entry points.
+pub mod migrations;
+
+/// Platform PostgreSQL repository adapters.
+pub mod postgres;
+
+/// Platform HTTP service foundation.
+pub mod service;
+
+/// Platform-local storage boundaries.
+pub mod storage;
+
+/// Platform-local user contracts.
+pub mod user;
+
 /// Returns the stable agent platform service name.
 #[must_use]
 pub const fn service_name() -> &'static str {
@@ -24,7 +72,7 @@ pub enum PlatformPlane {
 
 #[cfg(test)]
 mod tests {
-    use super::{service_name, SERVICE_NAME};
+    use super::{SERVICE_NAME, service_name};
 
     #[test]
     fn service_name_is_stable() {

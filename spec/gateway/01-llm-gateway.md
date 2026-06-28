@@ -40,11 +40,11 @@ notifications, webhook deliveries, event export, or future notification sinks.
 - Restrict OAuth-backed upstream provider support to Codex. Other upstream
   providers use API keys, bearer tokens, cloud IAM, workload identity, external
   secret references, or operator-managed credentials.
-- Support human admin and dashboard login through configured login providers
-  such as GitHub OAuth App for bare deployments and OIDC for enterprise SSO,
-  without mixing login identity with upstream provider credentials.
-- Remain independent from web UI implementation. The UI will be redesigned and
-  must treat this spec as a backend contract, not as a visual design.
+- Support human admin and dashboard login through local single-user bootstrap
+  and configured generic OIDC login providers without mixing login identity
+  with upstream provider credentials.
+- Remain independent from a specific web UI implementation. The admin console
+  UI spec consumes this document as a backend contract, not as visual design.
 
 ## Non-Goals
 
@@ -57,7 +57,7 @@ notifications, webhook deliveries, event export, or future notification sinks.
   or export files.
 - Do not implement paid subscriptions, invoice generation, revenue reporting, or
   product billing.
-- Do not bind the gateway to one frontend implementation.
+- Do not bind the gateway API semantics to one frontend implementation.
 - Do not assume a single organization, a single global provider list, or a flat
   caller-key-only model.
 - Do not make provider-specific cache affinity fields user-controlled when
@@ -202,9 +202,11 @@ lifecycle, and redaction rules. All other upstream OAuth-like providers wait
 for a concrete use case and separate review.
 
 Human login is a separate OAuth/OIDC client surface for admin and dashboard
-users. GitHub OAuth App login supports bare deployments, and OIDC supports
-enterprise SSO. This is covered by `11-login-user-management.md` and does not
-turn the gateway into a generic upstream OAuth broker.
+users. Local single-user mode supports bare-deploy bootstrap, and generic OIDC
+is the standard external login shape. Non-OIDC OAuth providers require an OIDC
+broker or a separately reviewed OAuth adapter before direct login support is
+exposed. This is covered by `11-login-user-management.md` and does not turn the
+gateway into a generic upstream OAuth broker.
 
 ## High-Level Data Flow
 
@@ -212,7 +214,7 @@ turn the gateway into a generic upstream OAuth broker.
 flowchart LR
     admin[Admin API]
     config[(PostgreSQL config)]
-    redis[(Redis hot state)]
+    hot_state[(Redis-compatible hot state)]
     gateway[Gateway node]
     secret[Secret provider]
     upstream[Provider endpoint]
@@ -221,9 +223,9 @@ flowchart LR
 
     admin --> config
     admin --> outbox
-    admin --> redis
+    admin --> hot_state
     config --> gateway
-    redis --> gateway
+    hot_state --> gateway
     gateway --> secret
     secret --> gateway
     gateway --> upstream
@@ -262,11 +264,11 @@ truth:
 
 The gateway has three HTTP API families:
 
-| Family           | Audience                        | Authentication                                   | Examples                                                   |
-| ---------------- | ------------------------------- | ------------------------------------------------ | ---------------------------------------------------------- |
-| protocol ingress | model clients                   | API key, mTLS, service token, or session         | `/v1/responses`, `/v1/chat/completions`, `/v1/messages`    |
-| admin API        | administrators and automation   | API key, admin session, service account, or mTLS | `/admin/v1/provider-endpoints`, `/admin/v1/routing-groups` |
-| internal API     | operators and platform services | internal service identity                        | `/internal/v1/health`, `/internal/v1/config/reload`        |
+| Family           | Audience                        | Authentication                                   | Default external examples                                                |
+| ---------------- | ------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------ |
+| protocol ingress | model clients                   | API key, mTLS, service token, or session         | `/api/v1/responses`, `/api/v1/chat/completions`, `/api/v1/messages`      |
+| admin API        | administrators and automation   | API key, admin session, service account, or mTLS | `/api/admin/v1/provider-endpoints`, `/api/admin/v1/routing-groups`       |
+| internal API     | operators and platform services | internal service identity                        | `/api/internal/v1/health`, `/api/internal/v1/config/reload` when exposed |
 
 Protocol ingress must remain provider-compatible where possible. Admin and
 internal APIs are gateway-owned and versioned independently.

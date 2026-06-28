@@ -23,7 +23,7 @@ framework-heavy service without validated behavior.
 
 ## Non-Goals
 
-- Do not require the future web UI before gateway runtime validation.
+- Do not require the admin console before gateway runtime validation.
 - Do not build every provider family in the first phase.
 - Do not require paid billing workflows.
 - Do not migrate unrelated client SDK, application runtime, or developer CLI code
@@ -188,7 +188,7 @@ Capabilities:
 - admin API for primary resources
 - organization invitations and membership APIs
 - project membership APIs
-- GitHub OAuth App and OIDC login provider and session APIs
+- generic OIDC login provider and session APIs
 - dashboard and model observability read APIs
 - idempotent mutations
 - optimistic concurrency
@@ -203,8 +203,6 @@ Exit criteria:
 - every mutation writes an audit event
 - read APIs never return raw secret values
 - route simulation works without upstream calls
-- GitHub OAuth App login validates state, code exchange, stable user id, and
-  verified email behavior
 - OIDC login validates state, nonce, PKCE, issuer, audience, signature, and
   expiry
 - user disable and session revocation block future admin/dashboard access
@@ -226,6 +224,8 @@ Capabilities:
 
 - readiness and liveness endpoints
 - metrics and trace instrumentation
+- Redis-compatible built-in realtime operations dashboard
+- OpenTelemetry export configuration for user-owned dashboards
 - backup and restore procedure
 - migration safety checks
 - notification replay and dead-letter operations
@@ -236,8 +236,10 @@ Capabilities:
 Exit criteria:
 
 - production profile uses an external or encrypted secret backend
-- dashboards cover request, provider, route, budget, config, and notification
-  health
+- built-in realtime dashboard covers live provider, route, budget, quota,
+  config, and worker health from hot-state data
+- OpenTelemetry export emits provider latency, TTFT, throughput, error,
+  failover, and worker health metrics for user-owned dashboards
 - restore rehearsal succeeds in a test environment
 - migration checks run in CI and at startup
 - incident runbooks exist for credential leak, provider outage, runaway spend,
@@ -344,30 +346,24 @@ Membership and dashboard tests should cover:
 
 Login and user management tests should cover:
 
-| Case                          | Expected Result                                       |
-| ----------------------------- | ----------------------------------------------------- |
-| GitHub OAuth App login start  | state and optional PKCE verifier are created          |
-| GitHub OAuth App callback     | code exchange and user API identity lookup succeed    |
-| GitHub no verified email      | email-targeted invitation and domain allowlist reject |
-| GitHub subject stability      | email/login changes do not create a second identity   |
-| GitHub Enterprise Server URLs | configured auth, token, user, and email APIs are used |
-| GitHub token persistence      | login access token is discarded after identity lookup |
-| OIDC login start              | state, nonce, and PKCE verifier are created           |
-| callback with wrong state     | login rejected and attempt consumed or invalidated    |
-| callback with wrong nonce     | login rejected                                        |
-| callback with wrong issuer    | login rejected                                        |
-| callback with wrong audience  | login rejected                                        |
-| callback with expired token   | login rejected                                        |
-| unknown signing key           | JWKS refresh attempted, then login rejected if absent |
-| first bootstrap login         | tenant owner, default organization, and project exist |
-| invite-only unknown user      | login enters denied or pending setup state            |
-| invitation accepted           | principal, org member, default org, project roles set |
-| user disabled                 | active sessions revoked and new sessions rejected     |
-| logout                        | current session revoked                               |
-| session cookie flags          | HttpOnly, Secure, and SameSite policy applied         |
-| CSRF missing on mutation      | browser mutation rejected                             |
-| account link                  | fresh auth required and external identity linked      |
-| account link by email only    | rejected unless explicit verified-email policy        |
+| Case                         | Expected Result                                       |
+| ---------------------------- | ----------------------------------------------------- |
+| OIDC login start             | state, nonce, and PKCE verifier are created           |
+| callback with wrong state    | login rejected and attempt consumed or invalidated    |
+| callback with wrong nonce    | login rejected                                        |
+| callback with wrong issuer   | login rejected                                        |
+| callback with wrong audience | login rejected                                        |
+| callback with expired token  | login rejected                                        |
+| unknown signing key          | JWKS refresh attempted, then login rejected if absent |
+| first bootstrap login        | tenant owner, default organization, and project exist |
+| invite-only unknown user     | login enters denied or pending setup state            |
+| invitation accepted          | principal, org member, default org, project roles set |
+| user disabled                | active sessions revoked and new sessions rejected     |
+| logout                       | current session revoked                               |
+| session cookie flags         | HttpOnly, Secure, and SameSite policy applied         |
+| CSRF missing on mutation     | browser mutation rejected                             |
+| account link                 | fresh auth required and external identity linked      |
+| account link by email only   | rejected unless explicit verified-email policy        |
 
 ## Model Observability Test Matrix
 
@@ -385,6 +381,24 @@ Model observability tests should cover:
 | rollup lag                        | dashboard response includes freshness warning        |
 | retention boundary                | response marks partial data                          |
 | prompt-bearing event              | dashboard omits raw prompt and completion            |
+
+## Realtime And OTel Observability Test Matrix
+
+Realtime and OpenTelemetry observability tests should cover:
+
+| Case                              | Expected Result                                             |
+| --------------------------------- | ----------------------------------------------------------- |
+| realtime value with TTL           | response includes TTL, freshness timestamp, and source kind |
+| missing hot-state value           | response marks field unavailable and explains fallback      |
+| stale hot-state value             | response marks field stale and avoids durable conclusions   |
+| Redis or Valkey outage            | runtime follows configured fail mode and dashboard degrades |
+| hot-state source metadata         | response never exposes raw hot-state keys                   |
+| OpenTelemetry endpoint validation | invalid protocol, endpoint, or secret reference rejected    |
+| OpenTelemetry label cardinality   | unbounded tenant, user, request, or model labels rejected   |
+| exporter collector outage         | model requests continue and exporter failure metrics rise   |
+| dropped metric accounting         | dropped metric count is reported in exporter health         |
+| disabled exporter                 | built-in realtime dashboard remains available               |
+| metrics backend outage            | authorization, routing, usage, and audit behavior continue  |
 
 ## Notification Test Matrix
 
@@ -490,7 +504,8 @@ Reviewers should confirm:
 - route groups are first-class
 - organizations can be granted provider availability
 - administrators manage upstream credentials
-- future web UI is not implied by current docs
+- admin console work is specified separately and does not change backend
+  resource semantics
 - open-source users can run without a commercial platform
 
 ## Review Checklist: Security
@@ -618,8 +633,8 @@ The minimum complete gateway is not the smallest proxy. It must include:
 
 - tenant and organization resource boundaries
 - default organization, organization membership, and project membership
-- GitHub OAuth App login, OIDC login, opaque server-side sessions, and user
-  management APIs
+- local single-user bootstrap, generic OIDC login, opaque server-side sessions,
+  and user management APIs
 - API key authentication
 - upstream credential references
 - provider endpoint and model target catalog
@@ -628,7 +643,9 @@ The minimum complete gateway is not the smallest proxy. It must include:
 - route decision evidence
 - usage event recording
 - immutable usage attribution by project member when applicable
+- Redis-compatible built-in realtime operations dashboard
 - organization, project, project member, and model dashboard read APIs
+- OpenTelemetry metrics export configuration for user-owned monitoring
 - cost estimate with pricing version or unpriced confidence
 - budget policy hook, even if only one policy mode is implemented
 - redacted logs and audit events
@@ -644,11 +661,12 @@ not as the gateway.
   and uses gateway-owned terminology and resource boundaries.
 - Multi-tenancy, organization provider grants, admin-managed credentials,
   user-owned and service-owned API keys, REST API permissions, routing groups,
-  router strategies, cost-only budgets, GitHub OAuth App login, OIDC login,
-  user management,
-  organization/project membership, project member usage attribution, scoped
-  dashboards, model observability, Codex-only upstream OAuth, and notifications
-  are all covered by implementation phases and tests.
+  router strategies, cost-only budgets, local single-user bootstrap, generic
+  OIDC login, user management, organization/project membership, project member
+  usage attribution, scoped dashboards, Redis-compatible realtime operations
+  dashboard, OpenTelemetry metrics export, model observability, Codex-only
+  upstream OAuth, and notifications are all covered by implementation phases and
+  tests.
 - CI can validate docs, schemas, and Rust crates without live provider secrets.
 - Each phase has objective exit criteria.
 - Security and operational gates are explicit before production deployment.

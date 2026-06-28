@@ -60,12 +60,50 @@ make test
 make docs-check
 make docs-build
 make scripts-check
+make docker-build
+make compose-smoke
 ```
 
 Install local pre-commit hooks with:
 
 ```bash
 make install
+```
+
+The platform service does not enable human login by default, and it does not
+create an OIDC provider automatically. For local or simple self-hosted
+bootstrap, enable the local single-user provider with:
+
+```bash
+export STARWEAVER_PLATFORM_SINGLE_USER_USERNAME=admin
+export STARWEAVER_PLATFORM_SINGLE_USER_PASSWORD='change-me'
+```
+
+When both values are configured, `/auth/v1/single-user/login` creates an opaque
+session and bootstraps the default tenant, organization, project, and owner
+grants. The login response includes CSRF metadata; browser clients must send the
+returned `x-starweaver-platform-csrf-token` value on session mutation APIs.
+Generic OIDC login can be configured later through the admin identity-provider
+APIs. Non-OIDC OAuth providers such as GitHub OAuth App need an OIDC broker or
+a separate OAuth adapter before they can be used directly.
+
+Platform request handling uses bounded request controls. Override the defaults
+with `STARWEAVER_PLATFORM_MAX_BODY_BYTES` and
+`STARWEAVER_PLATFORM_REQUEST_TIMEOUT_MS` when a deployment needs tighter or
+looser HTTP limits.
+
+For local file-backed usage or audit exports, configure an absolute export
+object directory and request `storage_backend: file_object_storage`:
+
+```bash
+export STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_DIR=/var/lib/starweaver/gateway-exports
+```
+
+For a local gateway stack with PostgreSQL, Redis, migration, and `/readyz`
+smoke:
+
+```bash
+make compose-smoke
 ```
 
 ## Documentation

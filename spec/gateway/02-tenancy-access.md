@@ -19,7 +19,7 @@ tenant/project hierarchy.
 - Support API keys and caller credentials that are narrow, revocable, auditable,
   and scoped to projects, model aliases, and REST API actions.
 - Allow policy inheritance while keeping override order deterministic.
-- Keep authorization independent from the future web UI.
+- Keep authorization independent from the admin console implementation.
 
 ## Non-Goals
 
@@ -188,8 +188,8 @@ Principal kinds:
 | `bootstrap`       | initial setup actor used only during install or migration    |
 
 Principal identity should be external-id friendly. The gateway can act as a
-GitHub OAuth App or OIDC login client for human login, but it should not become
-an identity provider. Login and user lifecycle details are defined in
+generic OIDC login client for human login, but it should not become an identity
+provider. Login and user lifecycle details are defined in
 `11-login-user-management.md`.
 
 Principal fields:
@@ -260,21 +260,21 @@ attribution dimension for "person in project" usage.
 
 Fields:
 
-| Field                    | Meaning                                                 |
-| ------------------------ | ------------------------------------------------------- |
-| `project_member_id`      | stable id                                               |
-| `tenant_id`              | tenant                                                  |
-| `organization_id`        | organization                                            |
-| `project_id`             | project                                                 |
-| `organization_member_id` | linked organization membership                          |
-| `principal_id`           | user principal                                          |
-| `role`                   | `project_owner`, `project_admin`, `developer`, `viewer` |
-| `status`                 | `active`, `suspended`, `removed`                        |
-| `joined_at`              | activation timestamp                                    |
-| `removed_at`             | removal timestamp                                       |
-| `created_by`             | actor that added the member                             |
-| `created_at`             | creation timestamp                                      |
-| `updated_at`             | last metadata update                                    |
+| Field                    | Meaning                                                |
+| ------------------------ | ------------------------------------------------------ |
+| `project_member_id`      | stable id                                              |
+| `tenant_id`              | tenant                                                 |
+| `organization_id`        | organization                                           |
+| `project_id`             | project                                                |
+| `organization_member_id` | linked organization membership                         |
+| `principal_id`           | user principal                                         |
+| `role`                   | `project_admin`, `project_developer`, `project_viewer` |
+| `status`                 | `active`, `suspended`, `removed`                       |
+| `joined_at`              | activation timestamp                                   |
+| `removed_at`             | removal timestamp                                      |
+| `created_by`             | actor that added the member                            |
+| `created_at`             | creation timestamp                                     |
+| `updated_at`             | last metadata update                                   |
 
 Project membership controls project-level dashboards, project API key
 management, project budgets, and member-level usage visibility.
@@ -330,8 +330,10 @@ automation. It can authenticate model traffic and authorized REST API calls. It
 is not an upstream provider secret. It has policy grants, limits, expiration,
 and ownership.
 
-`ClientCredential` remains useful as an internal umbrella term for API keys,
-service tokens, mTLS subjects, sessions, and future credential kinds.
+`ClientCredential` remains useful as an internal authentication resolution
+snapshot for API keys, service tokens, mTLS subjects, sessions, and future
+credential kinds. It is not a second persistent API key table. The only
+persistent bearer-style API key resource is `ApiKey`.
 
 Credential kinds:
 
@@ -343,33 +345,32 @@ Credential kinds:
 | `session`          | human admin session or delegated UI session                                |
 | `internal_service` | trusted service-to-gateway calls                                           |
 
-Client credential fields:
+Resolved client credential snapshot fields:
 
-| Field                    | Meaning                                     |
-| ------------------------ | ------------------------------------------- |
-| `client_credential_id`   | stable id                                   |
-| `tenant_id`              | owning tenant                               |
-| `organization_id`        | owning organization                         |
-| `project_id`             | owning project                              |
-| `kind`                   | credential kind                             |
-| `name`                   | human label                                 |
-| `secret_hash`            | hash for API-key style credentials          |
-| `visible_prefix`         | short prefix shown after creation           |
-| `principal_id`           | optional owning service account or user     |
-| `status`                 | `active`, `disabled`, `expired`, `rotating` |
-| `grant_policy_ids`       | policies that narrow this credential        |
-| `allowed_actions`        | optional coarse action allowlist            |
-| `scopes`                 | legacy coarse grants, compiled to actions   |
-| `allowed_model_aliases`  | exact names or patterns                     |
-| `allowed_route_policies` | optional route policy names or ids          |
-| `expires_at`             | optional expiry                             |
-| `last_used_at`           | last successful authentication              |
-| `created_by`             | admin actor                                 |
-| `created_at`             | creation timestamp                          |
-| `updated_at`             | last metadata update                        |
+| Field                  | Meaning                                                     |
+| ---------------------- | ----------------------------------------------------------- |
+| `credential_reference` | source resource id such as API key, session, or token id    |
+| `tenant_id`            | resolved tenant                                             |
+| `organization_id`      | resolved organization when present                          |
+| `project_id`           | resolved project when present                               |
+| `kind`                 | credential kind                                             |
+| `principal_id`         | owning service account, user, internal service, or system   |
+| `api_key_id`           | API key used for authentication when present                |
+| `service_token_id`     | service token used for authentication when present          |
+| `mtls_subject_hash`    | mTLS subject digest when present                            |
+| `session_id`           | server-side session id when present                         |
+| `status`               | active, disabled, expired, rotating, or revoked             |
+| `grant_policy_ids`     | policies that narrow this credential                        |
+| `allowed_actions`      | optional coarse action allowlist after policy compilation   |
+| `allowed_resources`    | optional coarse resource allowlist after policy compilation |
+| `expires_at`           | optional expiry                                             |
+| `resolved_at`          | authentication resolution time                              |
+| `config_version`       | config snapshot version used during resolution              |
 
-Raw credential values are returned only once at creation. Afterwards read APIs
-return prefix, status, scope, ownership, and timestamps.
+Raw API key values are returned only once at `ApiKey` creation. Afterwards read
+APIs return key prefix, status, ownership, grants, and timestamps through the
+`ApiKey` resource. `ClientCredential` snapshots are runtime/authn artifacts and
+should not expose secret hashes, prefixes, or legacy scope fields.
 
 ## API Key Permissions
 
@@ -378,18 +379,20 @@ Every protected request maps to a stable action, resource, and context. API keys
 can be granted model actions, read-only evidence actions, or carefully scoped
 admin/config actions.
 
-| Action                     | Meaning                                                |
-| -------------------------- | ------------------------------------------------------ |
-| `gateway.model.invoke`     | call non-streaming model endpoints                     |
-| `gateway.model.stream`     | call streaming model endpoints                         |
-| `gateway.model.native`     | call provider-native endpoints when explicitly granted |
-| `gateway.usage.read`       | read usage in an allowed scope                         |
-| `gateway.route.debug.read` | read route decisions with redacted upstream details    |
-| `gateway.budget.read`      | read budget state                                      |
-| `gateway.api_key.create`   | create API keys within allowed owner/project scope     |
-| `gateway.api_key.rotate`   | rotate API keys within allowed owner/project scope     |
-| `gateway.api_key.disable`  | disable API keys within allowed owner/project scope    |
-| `gateway.config.apply`     | apply config bundles in allowed scope                  |
+| Action                          | Meaning                                                |
+| ------------------------------- | ------------------------------------------------------ |
+| `gateway.model.invoke`          | call non-streaming model endpoints                     |
+| `gateway.model.stream`          | call streaming model endpoints                         |
+| `gateway.model.native`          | call provider-native endpoints when explicitly granted |
+| `gateway.usage.read`            | read usage in an allowed scope                         |
+| `gateway.route.debug.read`      | read route decisions with redacted upstream details    |
+| `gateway.budget_policy.read`    | read budget policy configuration                       |
+| `gateway.budget_dashboard.read` | read budget dashboard state                            |
+| `gateway.quota_dashboard.read`  | read quota and rate-limit dashboard state              |
+| `gateway.api_key.create`        | create API keys within allowed owner/project scope     |
+| `gateway.api_key.rotate`        | rotate API keys within allowed owner/project scope     |
+| `gateway.api_key.disable`       | disable API keys within allowed owner/project scope    |
+| `gateway.config.apply`          | apply config bundles in allowed scope                  |
 
 Actions are additive only after the owner principal and resource policy allow
 them. A key cannot widen access beyond its owner principal.

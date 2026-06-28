@@ -12,17 +12,22 @@ provider. Human login is how an operator, organization admin, project member,
 or viewer authenticates to the admin and dashboard APIs.
 
 Bare deployments must not require the operator to already own an enterprise
-OIDC provider. The gateway should ship built-in login provider adapters that can
-be enabled by configuration. GitHub OAuth App is the required v1 bare-deploy
-adapter. Generic OIDC is the required v1 enterprise adapter.
+OIDC provider. The gateway ships a local single-user mode that is disabled by
+default and becomes available only when an operator configures a username and
+password through environment variables. External login providers can be enabled
+after bootstrap. Generic OIDC is the standard v1 external login adapter for
+operators that bring Google Workspace, Auth0, Okta, Keycloak, an internal IdP,
+or another compliant OIDC provider. Non-OIDC OAuth providers, including GitHub
+OAuth App, require an OIDC broker or a separately reviewed OAuth adapter before
+direct login support is exposed.
 
 ## Goals
 
-- Support bare-deploy login through a configured GitHub OAuth App.
-- Support enterprise login through configured OIDC providers.
-- Use OAuth 2.0 authorization code flow with provider-appropriate validation:
-  `state` for all providers, PKCE and ID token validation for OIDC providers,
-  and provider API identity verification for GitHub OAuth App.
+- Support bare-deploy bootstrap through an environment-configured local
+  single-user account.
+- Support external login through configured generic OIDC providers.
+- Use OIDC authorization code flow with `state`, PKCE, nonce, issuer, audience,
+  ID token signature, and expiry validation.
 - Keep the gateway as a login client/relying party, not an identity provider.
 - Map external identities into gateway-local principals, organizations,
   projects, roles, sessions, API keys, usage attribution, and audit events.
@@ -33,8 +38,10 @@ adapter. Generic OIDC is the required v1 enterprise adapter.
 
 ## Non-Goals
 
-- Do not build password authentication in v1.
-- Do not store login provider passwords.
+- Do not build a general multi-user password authentication system in v1.
+- Do not store login provider passwords. The local single-user password is read
+  from process environment and is intended for bootstrap and simple self-hosted
+  operation.
 - Do not become a general identity provider or SCIM directory in v1.
 - Do not auto-link accounts by email unless an explicit verified-email policy
   permits it.
@@ -47,12 +54,11 @@ adapter. Generic OIDC is the required v1 enterprise adapter.
 
 | Area                    | V1 Decision                                                                  |
 | ----------------------- | ---------------------------------------------------------------------------- |
-| Bare-deploy provider    | GitHub OAuth App                                                             |
+| Bare-deploy provider    | local single-user password mode, then optional generic OIDC                  |
 | Enterprise provider     | generic OIDC provider config                                                 |
-| Provider adapters       | `github_oauth_app`, `oidc`                                                   |
-| Login protocol          | OAuth 2.0 authorization code flow                                            |
+| Provider adapters       | `oidc`                                                                       |
+| Login protocol          | OIDC authorization code flow                                                 |
 | OIDC validation         | PKCE, state, nonce, issuer, audience, signature, and expiry                  |
-| GitHub validation       | state, callback code exchange, GitHub user id, and verified email lookup     |
 | User identity           | gateway `Principal` linked to one or more `ExternalIdentity` records         |
 | Session type            | opaque server-side session cookie                                            |
 | Session source of truth | PostgreSQL session table with optional Redis/Valkey hot cache                |
@@ -69,48 +75,59 @@ not describe upstream model provider credentials.
 
 V1 supports two login provider kinds:
 
-| Kind               | Primary Use                      | Protocol Shape                             |
-| ------------------ | -------------------------------- | ------------------------------------------ |
-| `github_oauth_app` | bare deployments and small teams | GitHub OAuth App authorization code flow   |
-| `oidc`             | enterprise SSO                   | OIDC authorization code flow with ID token |
+| Kind                   | Primary Use                                   | Protocol Shape                             |
+| ---------------------- | --------------------------------------------- | ------------------------------------------ |
+| `single_user_password` | single-node bootstrap and simple self-hosting | local password check from environment      |
+| `oidc`                 | generic external SSO                          | OIDC authorization code flow with ID token |
 
-For hosted SaaS, the operator may run a shared GitHub OAuth App. For
-self-hosted and single-node deployments, the administrator configures their own
-GitHub OAuth App by supplying the client id, client secret reference, public
-base URL, and optional organization/domain allow rules. The gateway derives the
-callback URL from the public base URL unless the operator overrides it.
+The local single-user provider is not a configurable `IdentityProvider`
+resource. It is exposed by `/auth/v1/providers` only when both
+`STARWEAVER_GATEWAY_SINGLE_USER_USERNAME` and
+`STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD` are non-empty. Login uses
+`POST /auth/v1/single-user/login`, creates an opaque server-side session, and
+bootstraps the default tenant, organization, project, user, membership graph,
+and tenant-owner grants if they do not already exist.
 
-## GitHub OAuth App Login Flow
+For hosted SaaS, the operator may run shared OIDC login providers. For
+self-hosted deployments that want external login, the administrator configures
+an OIDC client by supplying the issuer, client id, client secret reference,
+public base URL, and optional organization/domain allow rules. The gateway
+derives the callback URL from the public base URL unless the operator overrides
+it.
+
+## Single-User Login Flow
 
 ```mermaid
 sequenceDiagram
     participant Browser
     participant Gateway as Gateway Auth API
-    participant GitHub as GitHub OAuth App
-    participant API as GitHub API
     participant DB as PostgreSQL
     participant Authz as Authorization Engine
 
-    Browser->>Gateway: GET /auth/v1/providers/{provider_id}/login
-    Gateway->>DB: create login attempt with state, optional PKCE, redirect target
-    Gateway-->>Browser: redirect to GitHub authorize endpoint
-    Browser->>GitHub: authenticate and authorize
-    GitHub-->>Browser: redirect callback with code and state
-    Browser->>Gateway: GET /auth/v1/providers/{provider_id}/callback
-    Gateway->>DB: load and consume login attempt
-    Gateway->>GitHub: exchange code with client secret and optional PKCE verifier
-    Gateway->>API: fetch stable user id, login, profile, and verified emails
-    Gateway->>DB: upsert external identity and principal
-    Gateway->>DB: resolve default organization and memberships
-    Gateway->>Authz: validate initial session permissions
+    Browser->>Gateway: GET /auth/v1/providers
+    Gateway-->>Browser: local_single_user only when env credentials exist
+    Browser->>Gateway: POST /auth/v1/single-user/login
+    Gateway->>Gateway: constant-time username and password check
+    Gateway->>DB: bootstrap tenant, organization, project, user, memberships
+    Gateway->>Authz: seed tenant-owner grants when missing
     Gateway->>DB: create server-side auth session
-    Gateway-->>Browser: set secure session cookie and redirect to app
+    Gateway-->>Browser: return opaque bearer session and CSRF metadata
 ```
 
-GitHub access tokens returned during login are transient identity lookup
-material. The gateway should discard them after fetching the required identity
-metadata unless a future, separately reviewed integration needs durable GitHub
-API access.
+Required environment variables:
+
+```text
+STARWEAVER_GATEWAY_SINGLE_USER_USERNAME=admin
+STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD=...
+```
+
+Optional environment variables:
+
+```text
+STARWEAVER_GATEWAY_SINGLE_USER_EMAIL=admin@example.com
+STARWEAVER_GATEWAY_SINGLE_USER_DISPLAY_NAME=Admin
+STARWEAVER_GATEWAY_SINGLE_USER_SESSION_TTL_SECONDS=43200
+```
 
 ## OIDC Login Flow
 
@@ -138,89 +155,93 @@ sequenceDiagram
     Gateway-->>Browser: set secure session cookie and redirect to app
 ```
 
+## Deterministic Callback Test Adapter
+
+Local deterministic tests may use `callback_mode: "local_verified_claims"` on
+a login provider. This mode accepts a safe `verified_claims` document only in
+local or test profiles, after a persisted login attempt has been started. It
+still consumes one-time `state`, validates OIDC nonce, issuer, audience, and
+expiry fields, links the external identity to a gateway-local user, and issues
+an opaque server-side session.
+
+This adapter is not a production identity trust path. Production OIDC login must
+validate the ID token signature through issuer-scoped discovery and JWKS.
+
 ## Identity Provider Resource
 
 Fields:
 
-| Field                          | Meaning                                                  |
-| ------------------------------ | -------------------------------------------------------- |
-| `identity_provider_id`         | stable id                                                |
-| `tenant_id`                    | tenant                                                   |
-| `kind`                         | `github_oauth_app` or `oidc`                             |
-| `display_name`                 | operator-facing provider name                            |
-| `client_id`                    | OAuth client id                                          |
-| `client_secret_ref`            | secret reference for confidential clients                |
-| `redirect_uri`                 | registered callback URL                                  |
-| `scopes`                       | provider-specific login scopes                           |
-| `issuer`                       | OIDC issuer URL, only for `oidc`                         |
-| `discovery_url`                | optional OIDC discovery document URL                     |
-| `authorization_url`            | optional explicit OAuth authorization URL                |
-| `token_url`                    | optional explicit OAuth token URL                        |
-| `user_api_url`                 | GitHub user API URL or GitHub Enterprise Server API URL  |
-| `emails_api_url`               | GitHub emails API URL when required                      |
-| `allowed_email_domains`        | optional verified email domain allowlist                 |
-| `allowed_github_organizations` | optional GitHub org allowlist for `github_oauth_app`     |
-| `claim_mapping`                | maps provider claims or API fields into profile fields   |
-| `provisioning_mode`            | `invite_only`, `domain_allowlist`, `self_service_org`    |
-| `default_role_policy_id`       | optional baseline role policy for auto-provisioned users |
-| `status`                       | `active`, `disabled`, `deleted`                          |
-| `created_at`                   | creation timestamp                                       |
-| `updated_at`                   | last metadata update                                     |
+| Field                    | Meaning                                                  |
+| ------------------------ | -------------------------------------------------------- |
+| `identity_provider_id`   | stable id                                                |
+| `tenant_id`              | tenant                                                   |
+| `kind`                   | `oidc`                                                   |
+| `display_name`           | operator-facing provider name                            |
+| `client_id`              | OIDC client id                                           |
+| `client_secret_ref`      | secret reference for confidential clients                |
+| `redirect_uri`           | registered callback URL                                  |
+| `scopes`                 | OIDC login scopes, including `openid`                    |
+| `issuer`                 | OIDC issuer URL                                          |
+| `discovery_url`          | optional OIDC discovery document URL                     |
+| `authorization_url`      | optional explicit OIDC authorization URL                 |
+| `token_url`              | optional explicit OIDC token URL                         |
+| `jwks_url`               | optional explicit OIDC JWKS URL                          |
+| `allowed_email_domains`  | optional verified email domain allowlist                 |
+| `allowed_groups`         | optional group claim allowlist                           |
+| `claim_mapping`          | maps provider claims into profile fields                 |
+| `provisioning_mode`      | `invite_only`, `domain_allowlist`, `self_service_org`    |
+| `default_role_policy_id` | optional baseline role policy for auto-provisioned users |
+| `status`                 | `active`, `disabled`, `deleted`                          |
+| `created_at`             | creation timestamp                                       |
+| `updated_at`             | last metadata update                                     |
 
-Provider discovery data and JWKS should be cached with issuer and cache expiry.
-Workers must re-fetch keys when a token `kid` is unknown and the provider is
-healthy. A failed JWKS refresh should fail login, not bypass signature checks.
-
-GitHub OAuth App providers do not have OIDC discovery or JWKS. They validate
-the callback state, exchange the authorization code, call the configured GitHub
-API endpoints, and use the stable GitHub numeric user id or node id as the
-external identity subject. Email is used only for invitation, allowlist, and
-profile metadata after the gateway verifies it through the provider API.
-
-Recommended GitHub OAuth App scopes:
-
-| Scope        | Use                                          |
-| ------------ | -------------------------------------------- |
-| `read:user`  | profile metadata such as login and avatar    |
-| `user:email` | verified primary or visible email resolution |
-
-Self-hosted GitHub Enterprise Server should be modeled as the same provider
-kind with explicit authorization, token, user, and email API base URLs.
+OIDC providers may be configured with issuer-only discovery or with explicit
+`authorization_url`, `token_url`, and `jwks_url` endpoints for controlled
+deployments. Provider discovery data and JWKS should be cached with issuer and
+cache expiry. Workers must re-fetch keys when a token `kid` is unknown and the
+provider is healthy. A failed JWKS refresh should fail login, not bypass
+signature checks.
 
 ## Bare Deployment Bootstrap
 
 A bare deployment should be able to become usable without an existing
-enterprise SSO tenant.
+enterprise SSO tenant. The minimum path is local single-user mode:
 
-Minimum configuration:
+```text
+STARWEAVER_GATEWAY_SINGLE_USER_USERNAME=admin
+STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD=...
+```
+
+This mode is disabled when either value is absent or empty. It does not create
+additional password users, invitation flows, or reusable password credentials.
+
+After bootstrap, a deployment that wants external identity can add a generic
+OIDC provider.
+
+Generic OIDC configuration:
 
 ```yaml
 public_base_url: https://gateway.example.com
 login_providers:
-  - kind: github_oauth_app
-    identity_provider_id: github
-    display_name: GitHub
-    client_id: "${GATEWAY_LOGIN_GITHUB_CLIENT_ID}"
-    client_secret_ref: "secret://gateway/login/github/client-secret"
-    callback_path: /auth/v1/providers/github/callback
+  - kind: oidc
+    identity_provider_id: company-sso
+    display_name: Company SSO
+    issuer: https://sso.example.com
+    client_id: "${GATEWAY_LOGIN_OIDC_CLIENT_ID}"
+    client_secret_ref: "secret://gateway/login/oidc/client-secret"
+    callback_path: /auth/v1/providers/company-sso/callback
     scopes:
-      - read:user
-      - user:email
-    provisioning_mode: bootstrap
+      - openid
+      - profile
+      - email
+    provisioning_mode: invite_only
 ```
 
-Environment-only development config may use:
-
-```text
-GATEWAY_PUBLIC_BASE_URL=https://gateway.example.com
-GATEWAY_LOGIN_GITHUB_CLIENT_ID=...
-GATEWAY_LOGIN_GITHUB_CLIENT_SECRET=...
-```
-
-For production, prefer `GATEWAY_LOGIN_GITHUB_CLIENT_SECRET_REF` over raw secret
-environment variables. Raw environment secrets are acceptable only for local
-development and simple self-hosted bootstrap when the deployment has no secret
-backend yet.
+When issuer discovery is not available or the operator wants to pin endpoints,
+the same provider can supply explicit `authorization_url`, `token_url`, and
+`jwks_url` values. The gateway still validates issuer, audience, nonce, PKCE,
+token expiry, and JWKS-backed ID token signature before linking a local
+principal.
 
 ## External Identity
 
@@ -228,22 +249,22 @@ backend yet.
 
 Fields:
 
-| Field                     | Meaning                                               |
-| ------------------------- | ----------------------------------------------------- |
-| `external_identity_id`    | stable id                                             |
-| `tenant_id`               | tenant                                                |
-| `identity_provider_id`    | login provider                                        |
-| `provider_key`            | normalized issuer or provider namespace               |
-| `provider_subject`        | stable subject from provider                          |
-| `provider_login_snapshot` | GitHub login or OIDC preferred username at last login |
-| `principal_id`            | linked gateway principal                              |
-| `email_hash`              | normalized email hash when available                  |
-| `email_verified`          | provider asserted email verification                  |
-| `display_name_snapshot`   | display name at last login                            |
-| `last_login_at`           | last successful login                                 |
-| `status`                  | `active`, `disabled`, `unlinked`                      |
-| `created_at`              | creation timestamp                                    |
-| `updated_at`              | last metadata update                                  |
+| Field                     | Meaning                                                |
+| ------------------------- | ------------------------------------------------------ |
+| `external_identity_id`    | stable id                                              |
+| `tenant_id`               | tenant                                                 |
+| `identity_provider_id`    | login provider                                         |
+| `provider_key`            | normalized issuer or provider namespace                |
+| `provider_subject`        | stable subject from provider                           |
+| `provider_login_snapshot` | OIDC preferred username at last login                  |
+| `principal_id`            | linked gateway principal                               |
+| `email_hash`              | normalized email hash when available                   |
+| `email_verified`          | provider asserted email verification                   |
+| `display_name_snapshot`   | display name at last login                             |
+| `last_login_at`           | last successful login                                  |
+| `status`                  | `active`, `disabled`, `deleted`; unlink sets `deleted` |
+| `created_at`              | creation timestamp                                     |
+| `updated_at`              | last metadata update                                   |
 
 Uniqueness:
 
@@ -255,10 +276,9 @@ Uniqueness:
 
 Provider subject rules:
 
-| Provider Kind      | Subject Rule                                                 |
-| ------------------ | ------------------------------------------------------------ |
-| `github_oauth_app` | GitHub numeric user id or node id, never mutable login/email |
-| `oidc`             | OIDC `sub` claim scoped by issuer                            |
+| Provider Kind | Subject Rule                      |
+| ------------- | --------------------------------- |
+| `oidc`        | OIDC `sub` claim scoped by issuer |
 
 ## User Principal And Profile
 
@@ -330,10 +350,9 @@ Invitation tokens must be single-use and revocable.
 
 Project membership can be granted by:
 
-- organization owner
 - organization admin
-- project owner
 - project admin when policy permits
+- gateway operator or tenant admin during controlled bootstrap or repair
 - invitation with project assignment
 - domain allowlist provisioning policy
 
@@ -373,6 +392,10 @@ Session rules:
 
 - cookie value is opaque, random, and stored only as a hash
 - cookie uses `HttpOnly`, `Secure`, and `SameSite=Lax` by default
+- login and session-read responses return CSRF metadata with the header name
+  and session-bound token for browser mutations
+- `POST /auth/v1/logout`, session context updates, and invitation accept
+  require `x-gateway-csrf-token` to match the current session
 - session is rotated after login and account-link operations
 - logout revokes the current session
 - admin users can revoke their own sessions
@@ -390,6 +413,7 @@ Auth endpoints are versioned separately from model ingress.
 | Endpoint                                        | Purpose                                      |
 | ----------------------------------------------- | -------------------------------------------- |
 | `GET /auth/v1/providers`                        | list enabled login providers                 |
+| `POST /auth/v1/single-user/login`               | log in with configured local credentials     |
 | `GET /auth/v1/providers/{provider_id}/login`    | start provider-specific login                |
 | `GET /auth/v1/providers/{provider_id}/callback` | complete provider-specific login             |
 | `POST /auth/v1/logout`                          | revoke current session                       |
@@ -404,9 +428,9 @@ Auth APIs return only safe profile and membership metadata. They do not return
 ID tokens, access tokens, refresh tokens, client secrets, or raw invitation
 tokens.
 
-Provider-specific aliases such as
-`/auth/v1/oauth/github/{provider_id}/login` may exist for frontend routing
-compatibility, but the canonical API is provider-id based.
+Provider-specific aliases are not part of v1. The canonical API is provider-id
+based so configured OIDC providers can represent GitHub Enterprise through an
+OIDC broker without adding provider-specific routes.
 
 ## Admin User Management API
 
@@ -441,8 +465,11 @@ Login and user management introduce explicit actions.
 | `gateway.external_identity.unlink`   | `ExternalIdentity`       |
 | `gateway.session.read`               | `AuthSession`            |
 | `gateway.session.revoke`             | `AuthSession`            |
+| `gateway.session.update`             | `AuthSession`            |
+| `gateway.organization_invite.read`   | `OrganizationInvitation` |
 | `gateway.organization_invite.create` | `OrganizationInvitation` |
 | `gateway.organization_invite.manage` | `OrganizationInvitation` |
+| `gateway.organization_invite.accept` | `OrganizationInvitation` |
 | `gateway.organization_member.read`   | `OrganizationMember`     |
 | `gateway.organization_member.write`  | `OrganizationMember`     |
 | `gateway.project_member.read`        | `ProjectMember`          |
@@ -452,28 +479,25 @@ Self-service session APIs still require policy checks. For example, a user can
 read their own session, but cannot switch to an organization where they lack an
 active membership.
 
+The canonical endpoint and action matrix for `/auth/v1/*` and user-management
+admin APIs is defined in `10-authorization-api-keys.md`. This spec should not
+introduce additional role names or route aliases beyond that matrix.
+
 ## Security Rules
 
 - Validate OIDC issuer, audience, signature, expiration, nonce, PKCE, and
   hosted provider constraints.
-- Validate GitHub OAuth App callbacks with state, authorization code exchange,
-  configured endpoints, stable user id lookup, and verified email lookup.
-- Use PKCE for authorization code flow when the provider supports it. OIDC
-  providers must support PKCE. GitHub OAuth App providers should use PKCE when
-  available and must still use confidential-client token exchange.
+- Require PKCE for OIDC authorization code flow.
 - Store login attempts with state, provider id, redirect target, short expiry,
-  and provider-specific fields such as nonce or PKCE verifier hash.
+  nonce hash, and PKCE verifier hash.
 - Reject callback requests with missing, reused, expired, or mismatched state.
 - Allow callback redirects only to configured application origins or relative
   paths.
 - Treat `email_verified=false` as insufficient for invite matching unless a
   deployment explicitly trusts that provider's subject mapping.
-- For GitHub OAuth App, require a verified email for email-targeted
-  invitations and domain allowlist provisioning. If GitHub returns no verified
-  email, login may create a pending principal only when bootstrap or setup
-  policy permits it.
-- Do not persist GitHub login access tokens unless a future GitHub integration
-  owns a separate token lifecycle, scope review, and revocation model.
+- Do not persist OIDC access tokens or refresh tokens unless a future
+  integration owns a separate token lifecycle, scope review, and revocation
+  model.
 - Rate-limit login starts, callbacks, failed invitations, and account-link
   attempts.
 - Require recent session or stronger assurance for login provider config edits,
@@ -483,10 +507,9 @@ active membership.
 
 ## Framework Direction
 
-Use `oauth2` for GitHub OAuth App authorization URL construction, callback code
-exchange, state handling, and optional PKCE helpers. Use `openidconnect` for
-OIDC discovery, authorization code flow helpers, ID token validation, nonce
-handling, and JWKS validation.
+Use `openidconnect` or equivalent OIDC/JWT/JWKS crates for discovery,
+authorization code flow helpers, state handling, PKCE, ID token validation,
+nonce handling, and JWKS validation.
 
 Session management must remain opaque and server-side. The implementation can
 use a tower/axum session middleware only if it supports the gateway's
@@ -498,19 +521,11 @@ session layer.
 
 Required tests:
 
-- GitHub OAuth App login start creates state and optional PKCE verifier
-- GitHub OAuth App callback rejects wrong state, failed code exchange, missing
-  stable user id, and unavailable user API
-- GitHub OAuth App verified email lookup gates invite acceptance and domain
-  allowlist provisioning
-- GitHub OAuth App subject remains stable across login and email changes
-- GitHub Enterprise Server base URLs are honored for auth, token, user, and
-  email APIs
-- GitHub login access token is not persisted after identity lookup
 - OIDC discovery and JWKS cache behavior
 - login start creates state, nonce, and PKCE verifier
-- callback rejects wrong state, reused state, wrong nonce, wrong issuer, wrong
-  audience, expired token, and unknown signing key
+- callback exchanges the authorization code with the PKCE verifier and rejects
+  wrong state, reused state, wrong nonce, wrong issuer, wrong audience, expired
+  token, symmetric signing algorithms, and unknown signing key
 - verified invite acceptance creates principal, organization member, default
   organization, and optional project memberships
 - unverified email cannot accept an email-targeted invitation
@@ -524,10 +539,10 @@ Required tests:
 
 ## Acceptance Gates
 
-- Bare deployments can enable GitHub OAuth App login with public base URL,
-  client id, and client secret reference.
-- Enterprise deployments can enable OIDC login with discovery, PKCE, nonce, and
-  ID token validation.
+- Bare deployments can bootstrap with local single-user mode without an
+  external IdP.
+- Deployments can enable generic OIDC login with discovery, PKCE, nonce, and ID
+  token validation.
 - Human login OAuth/OIDC is clearly separate from upstream provider OAuth.
 - Users have a default organization before normal admin/dashboard usage.
 - Organization invitations and project assignments are explicit resources.
