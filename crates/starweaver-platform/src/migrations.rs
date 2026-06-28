@@ -32,6 +32,13 @@ pub const ORGANIZATION_INVITATIONS_MIGRATION_VERSION: i64 = 20_260_627_000_004;
 pub const ORGANIZATION_INVITATIONS_SQL: &str =
     include_str!("../migrations/20260627000004_platform_organization_invitations.sql");
 
+/// Platform audit events migration version.
+pub const PLATFORM_AUDIT_EVENTS_MIGRATION_VERSION: i64 = 20_260_627_000_005;
+
+/// SQL source for the platform audit events migration.
+pub const PLATFORM_AUDIT_EVENTS_SQL: &str =
+    include_str!("../migrations/20260627000005_platform_audit_events.sql");
+
 /// Embedded platform schema migrator.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -123,6 +130,7 @@ mod tests {
         migration_versions, missing_versions, CORE_SCHEMA_MIGRATION_VERSION, CORE_SCHEMA_SQL,
         OIDC_LOGIN_ATTEMPTS_MIGRATION_VERSION, OIDC_LOGIN_ATTEMPTS_SQL,
         ORGANIZATION_INVITATIONS_MIGRATION_VERSION, ORGANIZATION_INVITATIONS_SQL,
+        PLATFORM_AUDIT_EVENTS_MIGRATION_VERSION, PLATFORM_AUDIT_EVENTS_SQL,
         SECRET_REFS_OIDC_AUTH_METHOD_MIGRATION_VERSION, SECRET_REFS_OIDC_AUTH_METHOD_SQL,
     };
 
@@ -132,6 +140,7 @@ mod tests {
         assert!(migration_versions().contains(&OIDC_LOGIN_ATTEMPTS_MIGRATION_VERSION));
         assert!(migration_versions().contains(&SECRET_REFS_OIDC_AUTH_METHOD_MIGRATION_VERSION));
         assert!(migration_versions().contains(&ORGANIZATION_INVITATIONS_MIGRATION_VERSION));
+        assert!(migration_versions().contains(&PLATFORM_AUDIT_EVENTS_MIGRATION_VERSION));
     }
 
     #[test]
@@ -145,6 +154,7 @@ mod tests {
                 OIDC_LOGIN_ATTEMPTS_MIGRATION_VERSION,
                 SECRET_REFS_OIDC_AUTH_METHOD_MIGRATION_VERSION,
                 ORGANIZATION_INVITATIONS_MIGRATION_VERSION,
+                PLATFORM_AUDIT_EVENTS_MIGRATION_VERSION,
             ]
         );
 
@@ -153,6 +163,7 @@ mod tests {
             OIDC_LOGIN_ATTEMPTS_MIGRATION_VERSION,
             SECRET_REFS_OIDC_AUTH_METHOD_MIGRATION_VERSION,
             ORGANIZATION_INVITATIONS_MIGRATION_VERSION,
+            PLATFORM_AUDIT_EVENTS_MIGRATION_VERSION,
         ]);
         assert!(missing_versions(&applied).is_empty());
     }
@@ -273,6 +284,36 @@ mod tests {
             assert!(
                 !lower.contains(forbidden),
                 "invitation migration must not store raw token material: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn platform_audit_events_migration_stores_redacted_event_envelopes() {
+        let lower = PLATFORM_AUDIT_EVENTS_SQL.to_ascii_lowercase();
+
+        assert!(lower.contains("create table if not exists platform_audit_events"));
+        assert!(lower.contains("audit_event_id text primary key"));
+        assert!(lower.contains("actor_principal_id text not null"));
+        assert!(lower.contains("action_id text not null"));
+        assert!(lower.contains("resource_kind text not null"));
+        assert!(lower.contains("resource_id text not null"));
+        assert!(lower.contains("event_type text not null"));
+        assert!(lower.contains("redaction text not null"));
+        assert!(lower.contains("platform_audit_events_tenant_created_idx"));
+        assert!(lower.contains("platform_audit_events_resource_idx"));
+
+        for forbidden in [
+            "raw_token",
+            "raw_bearer",
+            "raw_api_key",
+            "raw_password",
+            "token_hash",
+            "client_secret",
+        ] {
+            assert!(
+                !lower.contains(forbidden),
+                "audit migration must not store credential material: {forbidden}"
             );
         }
     }

@@ -29,4 +29,5 @@ url = "2"
 
 [dev-dependencies]
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["rust_crypto", "use_pem"] }
+starweaver-gateway = { path = "../starweaver-gateway" }
 tower = { version = "0.5", features = ["util"] }

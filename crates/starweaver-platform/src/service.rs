@@ -24,7 +24,11 @@ use sqlx::postgres::PgPoolOptions;
 
 use crate::action::{
     ActionGrant, ActorKind, AuthenticatedActor, AuthorizationEngine, AuthorizationRequest,
-    FoundationAuthorizationEngine, PlatformAction, ResourceRef,
+    BuiltInRole, FoundationAuthorizationEngine, PlatformAction, ResourceRef,
+};
+use crate::audit::{
+    InMemoryPlatformAuditStore, PlatformAuditError, PlatformAuditEventRecord,
+    PLATFORM_AUDIT_REDACTION_PROFILE,
 };
 use crate::auth::{
     AuthError, InMemoryPlatformAuthSessionStore, InMemoryPlatformBearerCredentialStore,
@@ -36,10 +40,11 @@ use crate::config::{
 };
 use crate::identity::{
     hash_oidc_login_nonce, hash_oidc_login_state, hash_oidc_pkce_verifier, oidc_discovery_url,
-    resolve_oidc_provider_metadata, validate_oidc_id_token, OidcDiscoveryDocument,
-    OidcLoginAttemptRecord, OidcLoginAttemptStatus, OidcLoginProviderRecord,
+    resolve_oidc_provider_metadata, validate_oidc_id_token, InMemoryPlatformExternalIdentityStore,
+    OidcDiscoveryDocument, OidcLoginAttemptRecord, OidcLoginAttemptStatus, OidcLoginProviderRecord,
     OidcLoginProviderStatus, OidcResolvedProviderMetadata, OidcTokenEndpointAuthMethod,
-    OidcVerifiedClaims,
+    OidcVerifiedClaims, PlatformExternalIdentityError, PlatformExternalIdentityRecord,
+    PlatformExternalIdentityStatus,
 };
 use crate::invitation::{
     hash_platform_invitation_token, AcceptPlatformOrganizationInvitationRequest,
@@ -60,6 +65,10 @@ use crate::postgres::{
 use crate::resource::{
     InMemoryPlatformResourceStore, PlatformResourceRecord, PlatformResourceRepository,
 };
+use crate::role::{
+    InMemoryPlatformRoleBindingStore, PlatformRoleBindingError, PlatformRoleBindingRecord,
+    PlatformRoleBindingStatus, PlatformRoleBindingUpsert,
+};
 use crate::route::{foundation_routes, HttpMethod, RouteMetadata};
 use crate::secret::{
     environment_secret_ref_record, CreatePlatformSecretRefRequest, InMemoryPlatformSecretStore,
@@ -67,6 +76,9 @@ use crate::secret::{
     IN_MEMORY_SECRET_BACKEND,
 };
 use crate::storage::{InMemoryResourceOwnerStore, ResourceOwnerRecord, ResourceOwnerRepository};
+use crate::user::{
+    InMemoryPlatformUserStore, PlatformUserError, PlatformUserRecord, PlatformUserStatus,
+};
 
 const SINGLE_USER_TENANT_ID: &str = "ten_single_user";
 const SINGLE_USER_ORGANIZATION_ID: &str = "org_single_user";
@@ -94,6 +106,10 @@ pub struct PlatformServiceState {
     secrets: InMemoryPlatformSecretStore,
     memberships: InMemoryPlatformMembershipStore,
     invitations: InMemoryPlatformInvitationStore,
+    external_identities: InMemoryPlatformExternalIdentityStore,
+    role_bindings: InMemoryPlatformRoleBindingStore,
+    users: InMemoryPlatformUserStore,
+    audits: InMemoryPlatformAuditStore,
     oidc_logins: InMemoryOidcLoginStore,
     oidc_http: PlatformOidcHttpClient,
     repository_backend: PlatformRepositoryBackendKind,
@@ -480,6 +496,10 @@ impl PlatformServiceState {
             secrets: InMemoryPlatformSecretStore::new(),
             memberships: InMemoryPlatformMembershipStore::new(),
             invitations: InMemoryPlatformInvitationStore::new(),
+            external_identities: InMemoryPlatformExternalIdentityStore::new(),
+            role_bindings: InMemoryPlatformRoleBindingStore::new(),
+            users: InMemoryPlatformUserStore::new(),
+            audits: InMemoryPlatformAuditStore::new(),
             oidc_logins: InMemoryOidcLoginStore::new(),
             oidc_http: PlatformOidcHttpClient::live(),
             repository_backend: PlatformRepositoryBackendKind::InMemory,
@@ -504,6 +524,10 @@ impl PlatformServiceState {
             secrets: InMemoryPlatformSecretStore::new(),
             memberships: InMemoryPlatformMembershipStore::new(),
             invitations: InMemoryPlatformInvitationStore::new(),
+            external_identities: InMemoryPlatformExternalIdentityStore::new(),
+            role_bindings: InMemoryPlatformRoleBindingStore::new(),
+            users: InMemoryPlatformUserStore::new(),
+            audits: InMemoryPlatformAuditStore::new(),
             oidc_logins: InMemoryOidcLoginStore::new(),
             oidc_http: PlatformOidcHttpClient::live(),
             repository_backend: PlatformRepositoryBackendKind::Postgres,
@@ -550,6 +574,27 @@ impl PlatformServiceState {
     #[cfg(test)]
     fn with_invitation_store(mut self, invitations: InMemoryPlatformInvitationStore) -> Self {
         self.invitations = invitations;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_external_identity_store(
+        mut self,
+        external_identities: InMemoryPlatformExternalIdentityStore,
+    ) -> Self {
+        self.external_identities = external_identities;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_role_binding_store(mut self, role_bindings: InMemoryPlatformRoleBindingStore) -> Self {
+        self.role_bindings = role_bindings;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_user_store(mut self, users: InMemoryPlatformUserStore) -> Self {
+        self.users = users;
         self
     }
 
@@ -617,6 +662,24 @@ impl PlatformServiceState {
     #[must_use]
     pub const fn invitations(&self) -> &InMemoryPlatformInvitationStore {
         &self.invitations
+    }
+
+    /// Returns the in-memory external identity store.
+    #[must_use]
+    pub const fn external_identities(&self) -> &InMemoryPlatformExternalIdentityStore {
+        &self.external_identities
+    }
+
+    /// Returns the in-memory role binding store.
+    #[must_use]
+    pub const fn role_bindings(&self) -> &InMemoryPlatformRoleBindingStore {
+        &self.role_bindings
+    }
+
+    /// Returns the in-memory audit event store.
+    #[must_use]
+    pub const fn audits(&self) -> &InMemoryPlatformAuditStore {
+        &self.audits
     }
 
     /// Returns the authorization engine.
@@ -829,6 +892,13 @@ async fn shutdown_signal() {
 /// platform-local stores. Production entrypoints can replace the in-memory
 /// stores with durable resolvers without changing route ownership authorization.
 pub fn router(state: PlatformServiceState) -> Router {
+    admin_routes()
+        .merge(auth_routes())
+        .fallback(dispatch_foundation_request)
+        .with_state(state)
+}
+
+fn auth_routes() -> Router<PlatformServiceState> {
     Router::new()
         .route("/auth/v1/providers", get(list_auth_providers))
         .route(
@@ -840,6 +910,33 @@ pub fn router(state: PlatformServiceState) -> Router {
             get(login_oidc_provider),
         )
         .route(
+            "/auth/v1/providers/{identity_provider_id}/callback",
+            post(oidc_login_callback),
+        )
+        .route(
+            "/auth/v1/invitations/{invitation_token}/preview",
+            get(preview_auth_invitation),
+        )
+        .route(
+            "/auth/v1/invitations/{invitation_token}/accept",
+            post(accept_auth_invitation),
+        )
+        .route("/auth/v1/session", get(get_current_auth_session))
+        .route(
+            "/auth/v1/session/active-organization",
+            post(update_current_auth_session_active_organization),
+        )
+        .route(
+            "/auth/v1/session/active-project",
+            post(update_current_auth_session_active_project),
+        )
+        .route("/auth/v1/logout", post(logout_current_auth_session))
+        .route("/auth/v1/single-user/login", post(single_user_login))
+}
+
+fn admin_routes() -> Router<PlatformServiceState> {
+    Router::new()
+        .route(
             "/admin/v1/identity-providers",
             get(list_oidc_identity_providers).post(create_oidc_identity_provider),
         )
@@ -847,6 +944,45 @@ pub fn router(state: PlatformServiceState) -> Router {
             "/admin/v1/identity-providers/{identity_provider_id}",
             get(get_oidc_identity_provider),
         )
+        .route("/admin/v1/users", get(list_platform_users))
+        .route("/admin/v1/users/{user_id}", get(get_platform_user))
+        .route(
+            "/admin/v1/users/{user_id}/status",
+            post(update_platform_user_status),
+        )
+        .route(
+            "/admin/v1/users/{user_id}/sessions",
+            get(list_user_auth_sessions),
+        )
+        .route(
+            "/admin/v1/users/{user_id}/sessions/{auth_session_id}/revoke",
+            post(revoke_user_auth_session),
+        )
+        .route(
+            "/admin/v1/users/{user_id}/external-identities",
+            get(list_user_external_identities),
+        )
+        .route(
+            "/admin/v1/users/{user_id}/external-identities/{external_identity_id}",
+            get(get_user_external_identity),
+        )
+        .route(
+            "/admin/v1/users/{user_id}/external-identities/{external_identity_id}/unlink",
+            post(unlink_user_external_identity),
+        )
+        .route(
+            "/admin/v1/role-bindings",
+            get(list_role_bindings).post(create_role_binding),
+        )
+        .route(
+            "/admin/v1/role-bindings/{role_binding_id}",
+            get(get_role_binding),
+        )
+        .route(
+            "/admin/v1/role-bindings/{role_binding_id}/status",
+            post(update_role_binding_status),
+        )
+        .route("/admin/v1/audit-events", get(list_platform_audit_events))
         .route(
             "/admin/v1/organizations/{organization_id}/members",
             get(list_organization_members).post(create_organization_member),
@@ -858,6 +994,10 @@ pub fn router(state: PlatformServiceState) -> Router {
         .route(
             "/admin/v1/organizations/{organization_id}/members/{organization_member_id}/status",
             post(update_organization_member_status),
+        )
+        .route(
+            "/admin/v1/organizations/{organization_id}/members/{organization_member_id}/remove",
+            post(remove_organization_member),
         )
         .route(
             "/admin/v1/organizations/{organization_id}/invitations",
@@ -891,31 +1031,6 @@ pub fn router(state: PlatformServiceState) -> Router {
             "/admin/v1/secret-refs/{secret_ref_id}",
             get(get_platform_secret_ref),
         )
-        .route(
-            "/auth/v1/providers/{identity_provider_id}/callback",
-            post(oidc_login_callback),
-        )
-        .route(
-            "/auth/v1/invitations/{invitation_token}/preview",
-            get(preview_auth_invitation),
-        )
-        .route(
-            "/auth/v1/invitations/{invitation_token}/accept",
-            post(accept_auth_invitation),
-        )
-        .route("/auth/v1/session", get(get_current_auth_session))
-        .route(
-            "/auth/v1/session/active-organization",
-            post(update_current_auth_session_active_organization),
-        )
-        .route(
-            "/auth/v1/session/active-project",
-            post(update_current_auth_session_active_project),
-        )
-        .route("/auth/v1/logout", post(logout_current_auth_session))
-        .route("/auth/v1/single-user/login", post(single_user_login))
-        .fallback(dispatch_foundation_request)
-        .with_state(state)
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -961,6 +1076,87 @@ struct UpdateActiveProjectRequest {
 struct UpdateMembershipStatusRequest {
     expected_version: i64,
     status: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct CreateRoleBindingRequest {
+    #[serde(default, rename = "role_binding_id")]
+    binding: Option<String>,
+    #[serde(default, rename = "tenant_id")]
+    tenant: Option<String>,
+    #[serde(default, rename = "organization_id")]
+    organization: Option<String>,
+    #[serde(default, rename = "project_id")]
+    project: Option<String>,
+    #[serde(rename = "principal_id")]
+    principal: String,
+    #[serde(rename = "role_id")]
+    role: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct UpdateRoleBindingStatusRequest {
+    expected_version: i64,
+    status: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct UpdatePlatformUserStatusRequest {
+    expected_version: i64,
+    status: String,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    strong_auth_confirmation: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RevokePlatformAuthSessionRequest {
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    strong_auth_confirmation: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct UnlinkPlatformExternalIdentityRequest {
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    strong_auth_confirmation: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ListPlatformAuditEventsQuery {
+    #[serde(default)]
+    organization_id: Option<String>,
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    event_type: Option<String>,
+    #[serde(default)]
+    action_id: Option<String>,
+    #[serde(default)]
+    resource_kind: Option<String>,
+    #[serde(default)]
+    resource_id: Option<String>,
+    #[serde(default)]
+    actor_principal_id: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    strong_auth_confirmation: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RemoveOrganizationMemberRequest {
+    expected_version: i64,
     #[serde(default)]
     reason: Option<String>,
 }
@@ -1065,7 +1261,8 @@ async fn create_oidc_identity_provider(
         &actor,
         PlatformAction::IdentityProviderWrite,
         &resource,
-    )?;
+    )
+    .await?;
     let provider = oidc_provider_record_from_create_request(request, &tenant_id)?;
     if let Some(secret_ref_id) = provider.client_secret_ref.as_deref() {
         let secret = secret_ref_by_id(&state, secret_ref_id).await?;
@@ -1091,7 +1288,8 @@ async fn list_oidc_identity_providers(
         &actor,
         PlatformAction::IdentityProviderRead,
         &resource,
-    )?;
+    )
+    .await?;
     let providers = oidc_login_providers_for_tenant(&state, &actor.tenant_id).await?;
     Ok(Json(json!({
         "schema": "platform.admin.identity_provider.list.v1",
@@ -1116,10 +1314,350 @@ async fn get_oidc_identity_provider(
         &actor,
         PlatformAction::IdentityProviderRead,
         &resource,
-    )?;
+    )
+    .await?;
     Ok(Json(json!({
         "schema": "platform.admin.identity_provider.v1",
         "resource": oidc_provider_safe_json(&provider),
+    })))
+}
+
+async fn list_platform_users(
+    State(state): State<PlatformServiceState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ServiceError> {
+    let actor = authenticated_actor_from_headers(&state, &headers).await?;
+    let resource = ResourceRef::tenant("User", &actor.tenant_id, &actor.tenant_id);
+    authorize_service_action(&state, &actor, PlatformAction::UserRead, &resource).await?;
+    let users = platform_users_for_tenant(&state, &actor.tenant_id).await?;
+    Ok(Json(json!({
+        "schema": "platform.admin.user.list.v1",
+        "resources": users.iter().map(platform_user_safe_json).collect::<Vec<_>>(),
+    })))
+}
+
+async fn get_platform_user(
+    State(state): State<PlatformServiceState>,
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+) -> Result<Json<Value>, ServiceError> {
+    validate_user_id(&user_id)?;
+    let actor = authenticated_actor_from_headers(&state, &headers).await?;
+    let user = platform_user_by_id(&state, &user_id).await?;
+    ensure_actor_tenant(&actor, &user.tenant_id)?;
+    let resource = platform_user_resource(&user);
+    authorize_service_action(&state, &actor, PlatformAction::UserRead, &resource).await?;
+    Ok(Json(json!({
+        "schema": "platform.admin.user.v1",
+        "resource": platform_user_safe_json(&user),
+    })))
+}
+
+async fn update_platform_user_status(
+    State(state): State<PlatformServiceState>,
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+    Json(request): Json<UpdatePlatformUserStatusRequest>,
+) -> Result<Json<Value>, ServiceError> {
+    validate_user_id(&user_id)?;
+    let actor = authenticated_actor_from_headers(&state, &headers).await?;
+    let before = platform_user_by_id(&state, &user_id).await?;
+    ensure_actor_tenant(&actor, &before.tenant_id)?;
+    let resource = platform_user_resource(&before);
+    authorize_service_action(&state, &actor, PlatformAction::UserWrite, &resource).await?;
+    require_strong_auth_confirmation(request.strong_auth_confirmation.as_deref())?;
+    let status = platform_user_status_from_request(&request.status)?;
+    let updated =
+        set_platform_user_status(&state, &user_id, request.expected_version, status).await?;
+    let disabled_session_count = if updated.status.accepts_access() {
+        0
+    } else {
+        disable_auth_sessions_for_principal(&state, &updated.tenant_id, &updated.user_id).await?
+    };
+    let audit_event = record_platform_audit_event(
+        &state,
+        &actor,
+        PlatformAction::UserWrite,
+        &resource,
+        "platform.user.status.update",
+        request.reason.as_deref(),
+    )
+    .await?;
+    Ok(Json(json!({
+        "schema": "platform.admin.user_mutation.v1",
+        "resource": platform_user_safe_json(&updated),
+        "previous_status": before.status.as_str(),
+        "disabled_session_count": disabled_session_count,
+        "reason_recorded": request.reason.as_deref().is_some_and(|value| !value.trim().is_empty()),
+        "strong_auth_confirmed": true,
+        "audit_event_id": audit_event.audit_event_id,
+    })))
+}
+
+async fn list_user_auth_sessions(
+    State(state): State<PlatformServiceState>,
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+) -> Result<Json<Value>, ServiceError> {
+    validate_user_id(&user_id)?;
+    let actor = authenticated_actor_from_headers(&state, &headers).await?;
+    let user = platform_user_by_id(&state, &user_id).await?;
+    ensure_actor_tenant(&actor, &user.tenant_id)?;
+    let resource = ResourceRef::tenant("AuthSession", &user.tenant_id, &user.user_id);
+    authorize_service_action(&state, &actor, PlatformAction::AuthSessionRead, &resource).await?;
+    let sessions = auth_sessions_for_principal(&state, &user.tenant_id, &user.user_id).await?;
+    Ok(Json(json!({
+        "schema": "platform.admin.user_auth_session.list.v1",
+        "user_id": user.user_id,
+        "resources": sessions.iter().map(auth_session_safe_json).collect::<Vec<_>>(),
+    })))
+}
+
+async fn revoke_user_auth_session(
+    State(state): State<PlatformServiceState>,
+    headers: HeaderMap,
+    Path((user_id, auth_session_id)): Path<(String, String)>,
+    Json(request): Json<RevokePlatformAuthSessionRequest>,
+) -> Result<Json<Value>, ServiceError> {
+    validate_user_id(&user_id)?;
+    let actor = authenticated_actor_from_headers(&state, &headers).await?;
+    let user = platform_user_by_id(&state, &user_id).await?;
+    ensure_actor_tenant(&actor, &user.tenant_id)?;
+    let resource = ResourceRef::tenant("AuthSession", &user.tenant_id, &auth_session_id);
+    authorize_service_action(&state, &actor, PlatformAction::AuthSessionRevoke, &resource).await?;
+    require_strong_auth_confirmation(request.strong_auth_confirmation.as_deref())?;
+    let before = auth_session_by_id(&state, &auth_session_id).await?;
+    ensure_auth_session_belongs_to_user(&before, &user)?;
+    let revoked = revoke_auth_session_by_id(&state, &auth_session_id, &user).await?;
+    let audit_event = record_platform_audit_event(
+        &state,
+        &actor,
+        PlatformAction::AuthSessionRevoke,
+        &resource,
+        "platform.auth_session.revoke",
+        request.reason.as_deref(),
+    )
+    .await?;
+    Ok(Json(json!({
+        "schema": "platform.admin.user_auth_session_mutation.v1",
+        "resource": auth_session_safe_json(&revoked),
+        "previous_status": before.status.as_str(),
+        "reason_recorded": request.reason.as_deref().is_some_and(|value| !value.trim().is_empty()),
+        "strong_auth_confirmed": true,
+        "audit_event_id": audit_event.audit_event_id,
+    })))
+}
+
+async fn list_platform_audit_events(
+    State(state): State<PlatformServiceState>,
+    headers: HeaderMap,
+    Query(query): Query<ListPlatformAuditEventsQuery>,
+) -> Result<Json<Value>, ServiceError> {
+    let actor = authenticated_actor_from_headers(&state, &headers).await?;
+    require_strong_auth_confirmation(query.strong_auth_confirmation.as_deref())?;
+    validate_audit_event_list_query(&query)?;
+    let resource = audit_event_list_resource(&actor, &query)?;
+    authorize_service_action(&state, &actor, PlatformAction::AuditEventRead, &resource).await?;
+    let limit = audit_event_list_limit(query.limit)?;
+    let offset = audit_event_list_offset(query.cursor.as_deref())?;
+    let mut events = platform_audit_events_for_tenant(&state, &actor.tenant_id)
+        .await?
+        .into_iter()
+        .filter(|event| audit_event_matches_query(event, &query))
+        .collect::<Vec<_>>();
+    events.sort_by(|left, right| {
+        right
+            .created_at_unix
+            .cmp(&left.created_at_unix)
+            .then_with(|| right.audit_event_id.cmp(&left.audit_event_id))
+    });
+    let total_filtered_count = events.len();
+    let page = events
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .map(audit_event_safe_json)
+        .collect::<Vec<_>>();
+    let next_offset = offset.saturating_add(page.len());
+    let next_cursor = (next_offset < total_filtered_count).then(|| next_offset.to_string());
+    Ok(Json(json!({
+        "schema": "platform.admin.audit_event.list.v1",
+        "resources": page,
+        "limit": limit,
+        "cursor": query.cursor,
+        "next_cursor": next_cursor,
+        "total_filtered_count": total_filtered_count,
+        "strong_auth_confirmed": true,
+    })))
+}
+
+async fn list_user_external_identities(
+    State(state): State<PlatformServiceState>,
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+) -> Result<Json<Value>, ServiceError> {
+    validate_user_id(&user_id)?;
+    let actor = authenticated_actor_from_headers(&state, &headers).await?;
+    let resource = ResourceRef::tenant("ExternalIdentity", &actor.tenant_id, &user_id);
+    authorize_service_action(
+        &state,
+        &actor,
+        PlatformAction::ExternalIdentityRead,
+        &resource,
+    )
+    .await?;
+    let identities = external_identities_for_principal(&state, &actor.tenant_id, &user_id).await?;
+    Ok(Json(json!({
+        "schema": "platform.admin.external_identity.list.v1",
+        "user_id": user_id,
+        "resources": identities
+            .iter()
+            .map(external_identity_safe_json)
+            .collect::<Vec<_>>(),
+    })))
+}
+
+async fn get_user_external_identity(
+    State(state): State<PlatformServiceState>,
+    headers: HeaderMap,
+    Path((user_id, external_identity_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ServiceError> {
+    validate_user_id(&user_id)?;
+    let actor = authenticated_actor_from_headers(&state, &headers).await?;
+    let identity =
+        external_identity_for_actor(&state, &actor, &user_id, &external_identity_id).await?;
+    let resource = external_identity_resource(&identity);
+    authorize_service_action(
+        &state,
+        &actor,
+        PlatformAction::ExternalIdentityRead,
+        &resource,
+    )
+    .await?;
+    Ok(Json(json!({
+        "schema": "platform.admin.external_identity.v1",
+        "resource": external_identity_safe_json(&identity),
+    })))
+}
+
+async fn unlink_user_external_identity(
+    State(state): State<PlatformServiceState>,
+    headers: HeaderMap,
+    Path((user_id, external_identity_id)): Path<(String, String)>,
+    Json(request): Json<UnlinkPlatformExternalIdentityRequest>,
+) -> Result<Json<Value>, ServiceError> {
+    validate_user_id(&user_id)?;
+    let actor = authenticated_actor_from_headers(&state, &headers).await?;
+    let before =
+        external_identity_for_actor(&state, &actor, &user_id, &external_identity_id).await?;
+    if before.provider_kind == "single_user" {
+        return Err(ServiceError::BadRequest(
+            "single_user_identity_unlink_forbidden",
+        ));
+    }
+    let resource = external_identity_resource(&before);
+    authorize_service_action(
+        &state,
+        &actor,
+        PlatformAction::ExternalIdentityUnlink,
+        &resource,
+    )
+    .await?;
+    require_strong_auth_confirmation(request.strong_auth_confirmation.as_deref())?;
+    let unlinked = unlink_external_identity(&state, &external_identity_id).await?;
+    let audit_event = record_platform_audit_event(
+        &state,
+        &actor,
+        PlatformAction::ExternalIdentityUnlink,
+        &resource,
+        "platform.external_identity.unlink",
+        request.reason.as_deref(),
+    )
+    .await?;
+    Ok(Json(json!({
+        "schema": "platform.admin.external_identity_mutation.v1",
+        "resource": external_identity_safe_json(&unlinked),
+        "previous_status": before.status.as_str(),
+        "reason_recorded": request.reason.as_deref().is_some_and(|value| !value.trim().is_empty()),
+        "strong_auth_confirmed": true,
+        "audit_event_id": audit_event.audit_event_id,
+        "unlinked": unlinked.status == PlatformExternalIdentityStatus::Deleted,
+        "raw_tokens_included": false,
+    })))
+}
+
+async fn list_role_bindings(
+    State(state): State<PlatformServiceState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ServiceError> {
+    let actor = authenticated_actor_from_headers(&state, &headers).await?;
+    let resource = role_binding_collection_resource_for_actor(&actor);
+    authorize_service_action(&state, &actor, PlatformAction::RoleBindingRead, &resource).await?;
+    let bindings = role_bindings_for_tenant(&state, &actor.tenant_id).await?;
+    let resources = bindings
+        .iter()
+        .filter(|binding| role_binding_visible_in_collection(binding, &resource))
+        .map(role_binding_safe_json)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "schema": "platform.admin.role_binding.list.v1",
+        "resources": resources,
+    })))
+}
+
+async fn create_role_binding(
+    State(state): State<PlatformServiceState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateRoleBindingRequest>,
+) -> Result<Json<Value>, ServiceError> {
+    let actor = authenticated_actor_from_headers(&state, &headers).await?;
+    let tenant_id = tenant_from_request_or_actor(request.tenant.as_deref(), &actor)?;
+    let candidate = role_binding_record_from_create_request(request, &tenant_id)?;
+    let resource = role_binding_resource(&candidate);
+    authorize_service_action(&state, &actor, PlatformAction::RoleBindingWrite, &resource).await?;
+    let existing = equivalent_role_binding(&state, &candidate).await?;
+    let requested = existing.as_ref().unwrap_or(&candidate);
+    let binding = upsert_role_binding(&state, requested, &actor).await?;
+    Ok(Json(json!({
+        "schema": "platform.admin.role_binding_mutation.v1",
+        "resource": role_binding_safe_json(&binding),
+        "created": existing.is_none(),
+    })))
+}
+
+async fn get_role_binding(
+    State(state): State<PlatformServiceState>,
+    headers: HeaderMap,
+    Path(role_binding_id): Path<String>,
+) -> Result<Json<Value>, ServiceError> {
+    let actor = authenticated_actor_from_headers(&state, &headers).await?;
+    let binding = role_binding_by_id(&state, &role_binding_id).await?;
+    let resource = role_binding_resource(&binding);
+    authorize_service_action(&state, &actor, PlatformAction::RoleBindingRead, &resource).await?;
+    Ok(Json(json!({
+        "schema": "platform.admin.role_binding.v1",
+        "resource": role_binding_safe_json(&binding),
+    })))
+}
+
+async fn update_role_binding_status(
+    State(state): State<PlatformServiceState>,
+    headers: HeaderMap,
+    Path(role_binding_id): Path<String>,
+    Json(request): Json<UpdateRoleBindingStatusRequest>,
+) -> Result<Json<Value>, ServiceError> {
+    let actor = authenticated_actor_from_headers(&state, &headers).await?;
+    let before = role_binding_by_id(&state, &role_binding_id).await?;
+    let resource = role_binding_resource(&before);
+    authorize_service_action(&state, &actor, PlatformAction::RoleBindingWrite, &resource).await?;
+    let status = role_binding_status_from_request(&request.status)?;
+    let updated =
+        set_role_binding_status(&state, &role_binding_id, request.expected_version, status).await?;
+    Ok(Json(json!({
+        "schema": "platform.admin.role_binding_mutation.v1",
+        "resource": role_binding_safe_json(&updated),
+        "previous_status": before.status.as_str(),
+        "reason_recorded": request.reason.as_deref().is_some_and(|value| !value.trim().is_empty()),
     })))
 }
 
@@ -1135,7 +1673,8 @@ async fn list_organization_members(
         &actor,
         PlatformAction::OrganizationMemberRead,
         &resource,
-    )?;
+    )
+    .await?;
     let members = organization_members_for_organization(&state, &organization_id).await?;
     let resources = members
         .iter()
@@ -1163,7 +1702,8 @@ async fn create_organization_member(
         &actor,
         PlatformAction::OrganizationMemberWrite,
         &resource,
-    )?;
+    )
+    .await?;
     let principal_id = request.principal_id.trim();
     let membership_kind = normalized_membership_kind(request.membership_kind)?;
     let existing_members = organization_members_for_organization(&state, &organization_id).await?;
@@ -1210,7 +1750,8 @@ async fn get_organization_member(
         &actor,
         PlatformAction::OrganizationMemberRead,
         &resource,
-    )?;
+    )
+    .await?;
     Ok(Json(json!({
         "schema": "platform.admin.organization_member.v1",
         "resource": organization_member_safe_json(&member),
@@ -1233,7 +1774,8 @@ async fn update_organization_member_status(
         &actor,
         PlatformAction::OrganizationMemberWrite,
         &resource,
-    )?;
+    )
+    .await?;
     let status = membership_status_from_request(&request.status)?;
     let updated = set_organization_member_status(
         &state,
@@ -1244,11 +1786,61 @@ async fn update_organization_member_status(
     .await?;
     let cascaded_project_member_count =
         cascade_project_memberships_for_organization_member(&state, &updated, status).await?;
+    let cascaded_role_binding_count = if status == PlatformMembershipStatus::Removed {
+        delete_role_bindings_for_organization_principal(&state, &updated).await?
+    } else {
+        0
+    };
     Ok(Json(json!({
         "schema": "platform.admin.organization_member_mutation.v1",
         "resource": organization_member_safe_json(&updated),
         "previous_status": before.status.as_str(),
         "cascaded_project_member_count": cascaded_project_member_count,
+        "cascaded_role_binding_count": cascaded_role_binding_count,
+        "reason_recorded": request.reason.as_deref().is_some_and(|value| !value.trim().is_empty()),
+    })))
+}
+
+async fn remove_organization_member(
+    State(state): State<PlatformServiceState>,
+    headers: HeaderMap,
+    Path((organization_id, organization_member_id)): Path<(String, String)>,
+    Json(request): Json<RemoveOrganizationMemberRequest>,
+) -> Result<Json<Value>, ServiceError> {
+    let actor = authenticated_actor_from_headers(&state, &headers).await?;
+    let before =
+        organization_member_for_actor(&state, &actor, &organization_id, &organization_member_id)
+            .await?;
+    let resource = organization_member_resource(&before);
+    authorize_service_action(
+        &state,
+        &actor,
+        PlatformAction::OrganizationMemberWrite,
+        &resource,
+    )
+    .await?;
+    let updated = set_organization_member_status(
+        &state,
+        &organization_member_id,
+        request.expected_version,
+        PlatformMembershipStatus::Removed,
+    )
+    .await?;
+    let cascaded_project_member_count = cascade_project_memberships_for_organization_member(
+        &state,
+        &updated,
+        PlatformMembershipStatus::Removed,
+    )
+    .await?;
+    let cascaded_role_binding_count =
+        delete_role_bindings_for_organization_principal(&state, &updated).await?;
+    Ok(Json(json!({
+        "schema": "platform.admin.organization_member_mutation.v1",
+        "resource": organization_member_safe_json(&updated),
+        "previous_status": before.status.as_str(),
+        "removed": updated.status == PlatformMembershipStatus::Removed,
+        "cascaded_project_member_count": cascaded_project_member_count,
+        "cascaded_role_binding_count": cascaded_role_binding_count,
         "reason_recorded": request.reason.as_deref().is_some_and(|value| !value.trim().is_empty()),
     })))
 }
@@ -1265,7 +1857,8 @@ async fn list_organization_invitations(
         &actor,
         PlatformAction::OrganizationInvitationRead,
         &resource,
-    )?;
+    )
+    .await?;
     let invitations =
         organization_invitations_for_organization(&state, &actor.tenant_id, &organization_id)
             .await?;
@@ -1292,7 +1885,8 @@ async fn create_organization_invitation(
         &actor,
         PlatformAction::OrganizationInvitationCreate,
         &resource,
-    )?;
+    )
+    .await?;
     let now_unix = current_unix_timestamp();
     let (invitation, raw_token) = organization_invitation_record_from_create_request(
         request,
@@ -1323,7 +1917,8 @@ async fn get_organization_invitation(
         &actor,
         PlatformAction::OrganizationInvitationRead,
         &resource,
-    )?;
+    )
+    .await?;
     Ok(Json(json!({
         "schema": "platform.admin.organization_invitation.v1",
         "resource": organization_invitation_safe_json(&invitation),
@@ -1345,7 +1940,8 @@ async fn revoke_organization_invitation(
         &actor,
         PlatformAction::OrganizationInvitationManage,
         &resource,
-    )?;
+    )
+    .await?;
     let revoked = revoke_organization_invitation_by_id(
         &state,
         &invitation_id,
@@ -1380,7 +1976,7 @@ async fn list_project_members(
             ))
         },
     )?;
-    authorize_service_action(&state, &actor, PlatformAction::ProjectMemberRead, &resource)?;
+    authorize_service_action(&state, &actor, PlatformAction::ProjectMemberRead, &resource).await?;
     let resources = members
         .iter()
         .filter(|member| member.tenant_id == actor.tenant_id)
@@ -1421,7 +2017,8 @@ async fn create_project_member(
         &actor,
         PlatformAction::ProjectMemberWrite,
         &resource,
-    )?;
+    )
+    .await?;
     let existing = existing_project_members.iter().find(|member| {
         member.tenant_id == organization_member.tenant_id
             && member.project_id == project_id
@@ -1458,7 +2055,7 @@ async fn get_project_member(
     let actor = authenticated_actor_from_headers(&state, &headers).await?;
     let member = project_member_for_actor(&state, &actor, &project_id, &project_member_id).await?;
     let resource = project_member_resource(&member);
-    authorize_service_action(&state, &actor, PlatformAction::ProjectMemberRead, &resource)?;
+    authorize_service_action(&state, &actor, PlatformAction::ProjectMemberRead, &resource).await?;
     Ok(Json(json!({
         "schema": "platform.admin.project_member.v1",
         "resource": project_member_safe_json(&member),
@@ -1479,15 +2076,22 @@ async fn update_project_member_status(
         &actor,
         PlatformAction::ProjectMemberWrite,
         &resource,
-    )?;
+    )
+    .await?;
     let status = membership_status_from_request(&request.status)?;
     let updated =
         set_project_member_status(&state, &project_member_id, request.expected_version, status)
             .await?;
+    let cascaded_role_binding_count = if status == PlatformMembershipStatus::Removed {
+        delete_role_bindings_for_project_principal(&state, &updated).await?
+    } else {
+        0
+    };
     Ok(Json(json!({
         "schema": "platform.admin.project_member_mutation.v1",
         "resource": project_member_safe_json(&updated),
         "previous_status": before.status.as_str(),
+        "cascaded_role_binding_count": cascaded_role_binding_count,
         "reason_recorded": request.reason.as_deref().is_some_and(|value| !value.trim().is_empty()),
     })))
 }
@@ -1500,7 +2104,7 @@ async fn create_platform_secret_ref(
     let actor = authenticated_actor_from_headers(&state, &headers).await?;
     let tenant_id = tenant_from_request_or_actor(request.tenant_id.as_deref(), &actor)?;
     let resource = ResourceRef::tenant("SecretRef", &tenant_id, &tenant_id);
-    authorize_service_action(&state, &actor, PlatformAction::SecretRefWrite, &resource)?;
+    authorize_service_action(&state, &actor, PlatformAction::SecretRefWrite, &resource).await?;
     let secret_ref = secret_ref_record_from_create_request(&state, request, &tenant_id, &actor)?;
     upsert_secret_ref(&state, &secret_ref, &actor).await?;
     Ok(Json(json!({
@@ -1515,7 +2119,7 @@ async fn list_platform_secret_refs(
 ) -> Result<Json<Value>, ServiceError> {
     let actor = authenticated_actor_from_headers(&state, &headers).await?;
     let resource = ResourceRef::tenant("SecretRef", &actor.tenant_id, &actor.tenant_id);
-    authorize_service_action(&state, &actor, PlatformAction::SecretRefRead, &resource)?;
+    authorize_service_action(&state, &actor, PlatformAction::SecretRefRead, &resource).await?;
     let refs = secret_refs_for_tenant(&state, &actor.tenant_id).await?;
     Ok(Json(json!({
         "schema": "platform.admin.secret_ref.list.v1",
@@ -1535,7 +2139,7 @@ async fn get_platform_secret_ref(
         &secret_ref.tenant_id,
         &secret_ref.secret_ref_id,
     );
-    authorize_service_action(&state, &actor, PlatformAction::SecretRefRead, &resource)?;
+    authorize_service_action(&state, &actor, PlatformAction::SecretRefRead, &resource).await?;
     Ok(Json(json!({
         "schema": "platform.admin.secret_ref.v1",
         "resource": secret_ref_safe_json(&secret_ref),
@@ -1685,6 +2289,7 @@ async fn oidc_login_callback(
     let session_token = generate_session_token_with_prefix(OIDC_CALLBACK_SESSION_TOKEN_PREFIX);
     let completion =
         oidc_login_completion_record(&provider, &attempt, &claims, &session_token, now_unix);
+    ensure_user_can_login(&state, &completion.user_id).await?;
     complete_oidc_login(&state, &completion).await?;
     Ok(Json(oidc_login_callback_response(
         &provider,
@@ -1809,6 +2414,7 @@ async fn single_user_login(
             "single_user_credentials_invalid",
         ));
     }
+    ensure_user_can_login(&state, SINGLE_USER_ID).await?;
 
     let session_token = generate_session_token();
     let session_id = format!(
@@ -1870,22 +2476,94 @@ fn tenant_from_request_or_actor(
     }
 }
 
-fn authorize_service_action(
+async fn authorize_service_action(
     state: &PlatformServiceState,
     actor: &AuthenticatedActor,
     action: PlatformAction,
     resource: &ResourceRef,
 ) -> Result<(), ServiceError> {
-    let decision = state.authorization.authorize(&AuthorizationRequest {
+    let request = AuthorizationRequest {
         actor: actor.clone(),
         action,
         resource: resource.clone(),
-    });
+    };
+    let decision = state.authorization.authorize(&request);
     if decision.allowed {
-        Ok(())
-    } else {
-        Err(ServiceError::Forbidden(decision.reason))
+        return Ok(());
     }
+    if role_binding_authorization_allows(state, actor, action, resource).await? {
+        return Ok(());
+    }
+    Err(ServiceError::Forbidden(decision.reason))
+}
+
+async fn role_binding_authorization_allows(
+    state: &PlatformServiceState,
+    actor: &AuthenticatedActor,
+    action: PlatformAction,
+    resource: &ResourceRef,
+) -> Result<bool, ServiceError> {
+    let bindings =
+        active_role_bindings_for_principal(state, &actor.tenant_id, &actor.principal_id).await?;
+    let mut grants = Vec::new();
+    for binding in bindings {
+        if role_binding_membership_allows(state, &binding).await? {
+            grants.extend(role_binding_action_grants(&binding));
+        }
+    }
+    let engine = FoundationAuthorizationEngine::new(grants);
+    Ok(engine
+        .authorize(&AuthorizationRequest {
+            actor: actor.clone(),
+            action,
+            resource: resource.clone(),
+        })
+        .allowed)
+}
+
+async fn role_binding_membership_allows(
+    state: &PlatformServiceState,
+    binding: &PlatformRoleBindingRecord,
+) -> Result<bool, ServiceError> {
+    if let Some(project_id) = binding.project_id.as_deref() {
+        let project_members = project_members_for_project(state, project_id).await?;
+        return Ok(project_members.iter().any(|member| {
+            member.tenant_id == binding.tenant_id
+                && member.principal_id == binding.principal_id
+                && member.status.accepts_access()
+        }));
+    }
+    if let Some(organization_id) = binding.organization_id.as_deref() {
+        let organization_members =
+            organization_members_for_organization(state, organization_id).await?;
+        return Ok(organization_members.iter().any(|member| {
+            member.tenant_id == binding.tenant_id
+                && member.principal_id == binding.principal_id
+                && member.status.accepts_access()
+        }));
+    }
+    Ok(true)
+}
+
+fn role_binding_action_grants(binding: &PlatformRoleBindingRecord) -> Vec<ActionGrant> {
+    let Some(role) = binding.built_in_role() else {
+        return Vec::new();
+    };
+    ActionGrant::for_builtin_role(
+        &binding.tenant_id,
+        role_binding_scope_id(binding),
+        &binding.principal_id,
+        role,
+    )
+}
+
+fn role_binding_scope_id(binding: &PlatformRoleBindingRecord) -> &str {
+    binding.project_id.as_deref().unwrap_or_else(|| {
+        binding
+            .organization_id
+            .as_deref()
+            .unwrap_or(binding.tenant_id.as_str())
+    })
 }
 
 fn oidc_provider_record_from_create_request(
@@ -2084,6 +2762,121 @@ async fn record_oidc_login_attempt(
     }
 }
 
+async fn role_bindings_for_tenant(
+    state: &PlatformServiceState,
+    tenant_id: &str,
+) -> Result<Vec<PlatformRoleBindingRecord>, ServiceError> {
+    match state.repository_backend {
+        PlatformRepositoryBackendKind::InMemory => {
+            Ok(state.role_bindings.role_bindings_for_tenant(tenant_id))
+        }
+        PlatformRepositoryBackendKind::Postgres => state
+            .postgres_repository()
+            .ok_or(ServiceError::Internal("postgres_repository_missing"))?
+            .role_bindings_for_tenant(tenant_id)
+            .await
+            .map_err(data_repository_error),
+    }
+}
+
+async fn active_role_bindings_for_principal(
+    state: &PlatformServiceState,
+    tenant_id: &str,
+    principal_id: &str,
+) -> Result<Vec<PlatformRoleBindingRecord>, ServiceError> {
+    match state.repository_backend {
+        PlatformRepositoryBackendKind::InMemory => Ok(state
+            .role_bindings
+            .active_role_bindings_for_principal(tenant_id, principal_id)),
+        PlatformRepositoryBackendKind::Postgres => state
+            .postgres_repository()
+            .ok_or(ServiceError::Internal("postgres_repository_missing"))?
+            .active_role_bindings_for_principal(tenant_id, principal_id)
+            .await
+            .map_err(data_repository_error),
+    }
+}
+
+async fn role_binding_by_id(
+    state: &PlatformServiceState,
+    role_binding_id: &str,
+) -> Result<PlatformRoleBindingRecord, ServiceError> {
+    match state.repository_backend {
+        PlatformRepositoryBackendKind::InMemory => state
+            .role_bindings
+            .role_binding(role_binding_id)
+            .filter(|binding| binding.status != PlatformRoleBindingStatus::Deleted)
+            .ok_or(ServiceError::ResourceNotFound),
+        PlatformRepositoryBackendKind::Postgres => state
+            .postgres_repository()
+            .ok_or(ServiceError::Internal("postgres_repository_missing"))?
+            .role_binding(role_binding_id)
+            .await
+            .map_err(data_repository_error)?
+            .ok_or(ServiceError::ResourceNotFound),
+    }
+}
+
+async fn equivalent_role_binding(
+    state: &PlatformServiceState,
+    candidate: &PlatformRoleBindingRecord,
+) -> Result<Option<PlatformRoleBindingRecord>, ServiceError> {
+    let bindings = role_bindings_for_tenant(state, &candidate.tenant_id).await?;
+    Ok(bindings.into_iter().find(|binding| {
+        binding.organization_id == candidate.organization_id
+            && binding.project_id == candidate.project_id
+            && binding.principal_id == candidate.principal_id
+            && binding.role_id == candidate.role_id
+    }))
+}
+
+async fn upsert_role_binding(
+    state: &PlatformServiceState,
+    record: &PlatformRoleBindingRecord,
+    actor: &AuthenticatedActor,
+) -> Result<PlatformRoleBindingRecord, ServiceError> {
+    let request = PlatformRoleBindingUpsert {
+        role_binding_id: &record.role_binding_id,
+        tenant_id: &record.tenant_id,
+        organization_id: record.organization_id.as_deref(),
+        project_id: record.project_id.as_deref(),
+        principal_id: &record.principal_id,
+        role_id: &record.role_id,
+    };
+    match state.repository_backend {
+        PlatformRepositoryBackendKind::InMemory => state
+            .role_bindings
+            .upsert_role_binding(request)
+            .map_err(role_binding_error_to_service),
+        PlatformRepositoryBackendKind::Postgres => state
+            .postgres_repository()
+            .ok_or(ServiceError::Internal("postgres_repository_missing"))?
+            .upsert_role_binding(request, &actor.principal_id)
+            .await
+            .map_err(data_repository_error),
+    }
+}
+
+async fn set_role_binding_status(
+    state: &PlatformServiceState,
+    role_binding_id: &str,
+    expected_resource_version: i64,
+    status: PlatformRoleBindingStatus,
+) -> Result<PlatformRoleBindingRecord, ServiceError> {
+    match state.repository_backend {
+        PlatformRepositoryBackendKind::InMemory => state
+            .role_bindings
+            .update_role_binding_status(role_binding_id, expected_resource_version, status)
+            .map_err(role_binding_error_to_service),
+        PlatformRepositoryBackendKind::Postgres => state
+            .postgres_repository()
+            .ok_or(ServiceError::Internal("postgres_repository_missing"))?
+            .update_role_binding_status(role_binding_id, expected_resource_version, status)
+            .await
+            .map_err(data_repository_error),
+    }
+}
+
 async fn organization_members_for_organization(
     state: &PlatformServiceState,
     organization_id: &str,
@@ -2196,6 +2989,31 @@ async fn cascade_project_memberships_for_organization_member(
     }
 }
 
+async fn delete_role_bindings_for_organization_principal(
+    state: &PlatformServiceState,
+    organization_member: &PlatformOrganizationMembershipRecord,
+) -> Result<usize, ServiceError> {
+    match state.repository_backend {
+        PlatformRepositoryBackendKind::InMemory => Ok(state
+            .role_bindings
+            .delete_role_bindings_for_organization_principal(
+                &organization_member.tenant_id,
+                &organization_member.organization_id,
+                &organization_member.principal_id,
+            )),
+        PlatformRepositoryBackendKind::Postgres => state
+            .postgres_repository()
+            .ok_or(ServiceError::Internal("postgres_repository_missing"))?
+            .delete_role_bindings_for_organization_principal(
+                &organization_member.tenant_id,
+                &organization_member.organization_id,
+                &organization_member.principal_id,
+            )
+            .await
+            .map_err(data_repository_error),
+    }
+}
+
 async fn project_members_for_project(
     state: &PlatformServiceState,
     project_id: &str,
@@ -2208,6 +3026,31 @@ async fn project_members_for_project(
             .postgres_repository()
             .ok_or(ServiceError::Internal("postgres_repository_missing"))?
             .project_members_for_project(project_id)
+            .await
+            .map_err(data_repository_error),
+    }
+}
+
+async fn delete_role_bindings_for_project_principal(
+    state: &PlatformServiceState,
+    project_member: &PlatformProjectMembershipRecord,
+) -> Result<usize, ServiceError> {
+    match state.repository_backend {
+        PlatformRepositoryBackendKind::InMemory => Ok(state
+            .role_bindings
+            .delete_role_bindings_for_project_principal(
+                &project_member.tenant_id,
+                &project_member.project_id,
+                &project_member.principal_id,
+            )),
+        PlatformRepositoryBackendKind::Postgres => state
+            .postgres_repository()
+            .ok_or(ServiceError::Internal("postgres_repository_missing"))?
+            .delete_role_bindings_for_project_principal(
+                &project_member.tenant_id,
+                &project_member.project_id,
+                &project_member.principal_id,
+            )
             .await
             .map_err(data_repository_error),
     }
@@ -2550,6 +3393,61 @@ async fn secret_refs_for_tenant(
     }
 }
 
+async fn external_identities_for_principal(
+    state: &PlatformServiceState,
+    tenant_id: &str,
+    principal_id: &str,
+) -> Result<Vec<PlatformExternalIdentityRecord>, ServiceError> {
+    match state.repository_backend {
+        PlatformRepositoryBackendKind::InMemory => Ok(state
+            .external_identities
+            .external_identities_for_principal(tenant_id, principal_id)),
+        PlatformRepositoryBackendKind::Postgres => state
+            .postgres_repository()
+            .ok_or(ServiceError::Internal("postgres_repository_missing"))?
+            .external_identities_for_principal(tenant_id, principal_id)
+            .await
+            .map_err(data_repository_error),
+    }
+}
+
+async fn external_identity_by_id(
+    state: &PlatformServiceState,
+    external_identity_id: &str,
+) -> Result<PlatformExternalIdentityRecord, ServiceError> {
+    match state.repository_backend {
+        PlatformRepositoryBackendKind::InMemory => state
+            .external_identities
+            .external_identity(external_identity_id)
+            .ok_or(ServiceError::ResourceNotFound),
+        PlatformRepositoryBackendKind::Postgres => state
+            .postgres_repository()
+            .ok_or(ServiceError::Internal("postgres_repository_missing"))?
+            .external_identity(external_identity_id)
+            .await
+            .map_err(data_repository_error)?
+            .ok_or(ServiceError::ResourceNotFound),
+    }
+}
+
+async fn unlink_external_identity(
+    state: &PlatformServiceState,
+    external_identity_id: &str,
+) -> Result<PlatformExternalIdentityRecord, ServiceError> {
+    match state.repository_backend {
+        PlatformRepositoryBackendKind::InMemory => state
+            .external_identities
+            .unlink_external_identity(external_identity_id)
+            .map_err(external_identity_error_to_service),
+        PlatformRepositoryBackendKind::Postgres => state
+            .postgres_repository()
+            .ok_or(ServiceError::Internal("postgres_repository_missing"))?
+            .unlink_external_identity(external_identity_id)
+            .await
+            .map_err(data_repository_error),
+    }
+}
+
 async fn resolve_platform_secret(
     state: &PlatformServiceState,
     secret_ref_id: &str,
@@ -2584,11 +3482,41 @@ fn validate_organization_id(organization_id: &str) -> Result<(), ServiceError> {
     }
 }
 
+fn validate_user_id(user_id: &str) -> Result<(), ServiceError> {
+    if user_id.starts_with("usr_") {
+        Ok(())
+    } else {
+        Err(ServiceError::BadRequest("user_id_invalid"))
+    }
+}
+
+fn validate_principal_id(principal_id: &str) -> Result<(), ServiceError> {
+    if principal_id.starts_with("usr_")
+        || principal_id.starts_with("svc_")
+        || principal_id.starts_with("sys_")
+    {
+        Ok(())
+    } else {
+        Err(ServiceError::BadRequest("principal_id_invalid"))
+    }
+}
+
 fn validate_project_id(project_id: &str) -> Result<(), ServiceError> {
     if project_id.starts_with("prj_") {
         Ok(())
     } else {
         Err(ServiceError::BadRequest("project_id_invalid"))
+    }
+}
+
+fn validate_optional_non_empty(
+    value: Option<&str>,
+    code: &'static str,
+) -> Result<(), ServiceError> {
+    if value.is_some_and(|value| value.trim().is_empty()) {
+        Err(ServiceError::BadRequest(code))
+    } else {
+        Ok(())
     }
 }
 
@@ -2625,6 +3553,73 @@ fn project_scope_resource(
     ))
 }
 
+fn role_binding_record_from_create_request(
+    request: CreateRoleBindingRequest,
+    tenant_id: &str,
+) -> Result<PlatformRoleBindingRecord, ServiceError> {
+    let record = PlatformRoleBindingRecord {
+        role_binding_id: normalized_optional_string(request.binding)
+            .unwrap_or_else(|| new_prefixed_id("rb")),
+        tenant_id: tenant_id.to_owned(),
+        organization_id: normalized_optional_string(request.organization),
+        project_id: normalized_optional_string(request.project),
+        principal_id: request.principal.trim().to_owned(),
+        role_id: request.role.trim().to_owned(),
+        status: PlatformRoleBindingStatus::Active,
+        resource_version: 1,
+    };
+    crate::role::validate_role_binding(&record).map_err(role_binding_error_to_service)?;
+    Ok(record)
+}
+
+fn role_binding_status_from_request(
+    value: &str,
+) -> Result<PlatformRoleBindingStatus, ServiceError> {
+    PlatformRoleBindingStatus::from_id(value.trim())
+        .ok_or(ServiceError::BadRequest("role_binding_status_invalid"))
+}
+
+fn role_binding_collection_resource_for_actor(actor: &AuthenticatedActor) -> ResourceRef {
+    if let (Some(organization_id), Some(project_id)) = (
+        actor.organization_id.as_deref(),
+        actor.project_id.as_deref(),
+    ) {
+        return ResourceRef::project(
+            "RoleBinding",
+            &actor.tenant_id,
+            organization_id,
+            project_id,
+            project_id,
+        );
+    }
+    if let Some(organization_id) = actor.organization_id.as_deref() {
+        return ResourceRef {
+            kind: "RoleBinding".to_owned(),
+            tenant_id: actor.tenant_id.clone(),
+            organization_id: Some(organization_id.to_owned()),
+            project_id: None,
+            resource_id: organization_id.to_owned(),
+        };
+    }
+    ResourceRef::tenant("RoleBinding", &actor.tenant_id, &actor.tenant_id)
+}
+
+fn role_binding_visible_in_collection(
+    binding: &PlatformRoleBindingRecord,
+    collection: &ResourceRef,
+) -> bool {
+    if binding.tenant_id != collection.tenant_id {
+        return false;
+    }
+    if let Some(project_id) = collection.project_id.as_deref() {
+        return binding.project_id.as_deref() == Some(project_id);
+    }
+    if let Some(organization_id) = collection.organization_id.as_deref() {
+        return binding.organization_id.as_deref() == Some(organization_id);
+    }
+    true
+}
+
 async fn organization_member_for_actor(
     state: &PlatformServiceState,
     actor: &AuthenticatedActor,
@@ -2648,6 +3643,20 @@ async fn project_member_for_actor(
     let member = project_member_by_id(state, project_member_id).await?;
     if member.tenant_id == actor.tenant_id && member.project_id == project_id {
         Ok(member)
+    } else {
+        Err(ServiceError::ResourceNotFound)
+    }
+}
+
+async fn external_identity_for_actor(
+    state: &PlatformServiceState,
+    actor: &AuthenticatedActor,
+    user_id: &str,
+    external_identity_id: &str,
+) -> Result<PlatformExternalIdentityRecord, ServiceError> {
+    let identity = external_identity_by_id(state, external_identity_id).await?;
+    if identity.tenant_id == actor.tenant_id && identity.principal_id == user_id {
+        Ok(identity)
     } else {
         Err(ServiceError::ResourceNotFound)
     }
@@ -2684,6 +3693,39 @@ fn project_member_resource(member: &PlatformProjectMembershipRecord) -> Resource
         &member.organization_id,
         &member.project_id,
         &member.project_member_id,
+    )
+}
+
+fn role_binding_resource(binding: &PlatformRoleBindingRecord) -> ResourceRef {
+    if let Some(project_id) = binding.project_id.as_deref() {
+        return ResourceRef::project(
+            "RoleBinding",
+            &binding.tenant_id,
+            binding
+                .organization_id
+                .as_deref()
+                .unwrap_or(binding.tenant_id.as_str()),
+            project_id,
+            &binding.role_binding_id,
+        );
+    }
+    if let Some(organization_id) = binding.organization_id.as_deref() {
+        return ResourceRef {
+            kind: "RoleBinding".to_owned(),
+            tenant_id: binding.tenant_id.clone(),
+            organization_id: Some(organization_id.to_owned()),
+            project_id: None,
+            resource_id: binding.role_binding_id.clone(),
+        };
+    }
+    ResourceRef::tenant("RoleBinding", &binding.tenant_id, &binding.role_binding_id)
+}
+
+fn external_identity_resource(identity: &PlatformExternalIdentityRecord) -> ResourceRef {
+    ResourceRef::tenant(
+        "ExternalIdentity",
+        &identity.tenant_id,
+        &identity.external_identity_id,
     )
 }
 
@@ -2878,6 +3920,49 @@ fn project_member_safe_json(member: &PlatformProjectMembershipRecord) -> Value {
     })
 }
 
+fn role_binding_safe_json(binding: &PlatformRoleBindingRecord) -> Value {
+    let scope_kind = if binding.project_id.is_some() {
+        "project"
+    } else if binding.organization_id.is_some() {
+        "organization"
+    } else {
+        "tenant"
+    };
+    json!({
+        "kind": "role_binding",
+        "id": binding.role_binding_id,
+        "role_binding_id": binding.role_binding_id,
+        "tenant_id": binding.tenant_id,
+        "organization_id": binding.organization_id,
+        "project_id": binding.project_id,
+        "principal_id": binding.principal_id,
+        "role_id": binding.role_id,
+        "scope_kind": scope_kind,
+        "scope_id": role_binding_scope_id(binding),
+        "status": binding.status.as_str(),
+        "resource_version": binding.resource_version,
+    })
+}
+
+fn platform_user_safe_json(user: &PlatformUserRecord) -> Value {
+    json!({
+        "kind": "user",
+        "id": user.user_id,
+        "user_id": user.user_id,
+        "tenant_id": user.tenant_id,
+        "default_organization_id": user.default_organization_id,
+        "default_project_id": user.default_project_id,
+        "primary_email": user.primary_email,
+        "display_name": user.display_name,
+        "status": user.status.as_str(),
+        "resource_version": user.resource_version,
+    })
+}
+
+fn platform_user_resource(user: &PlatformUserRecord) -> ResourceRef {
+    ResourceRef::tenant("User", &user.tenant_id, &user.user_id)
+}
+
 fn organization_invitation_safe_json(invitation: &PlatformOrganizationInvitationRecord) -> Value {
     json!({
         "kind": "organization_invitation",
@@ -2979,6 +4064,26 @@ fn secret_ref_safe_json(secret_ref: &PlatformSecretRefRecord) -> Value {
     })
 }
 
+fn external_identity_safe_json(identity: &PlatformExternalIdentityRecord) -> Value {
+    json!({
+        "kind": "external_identity",
+        "id": identity.external_identity_id,
+        "external_identity_id": identity.external_identity_id,
+        "tenant_id": identity.tenant_id,
+        "principal_id": identity.principal_id,
+        "identity_provider_id": identity.identity_provider_id,
+        "provider_kind": identity.provider_kind,
+        "provider_subject": identity.provider_subject,
+        "email": identity.email,
+        "email_verified": identity.email_verified,
+        "status": identity.status.as_str(),
+        "raw_provider_token_included": false,
+        "access_token_included": false,
+        "refresh_token_included": false,
+        "client_secret_included": false,
+    })
+}
+
 fn mask_secret_ref_id(secret_ref_id: &str) -> String {
     if secret_ref_id.starts_with("sec_") {
         "sec_***".to_owned()
@@ -3016,6 +4121,10 @@ fn generate_invitation_token() -> String {
 fn membership_status_from_request(value: &str) -> Result<PlatformMembershipStatus, ServiceError> {
     PlatformMembershipStatus::from_id(value.trim())
         .ok_or(ServiceError::BadRequest("membership_status_invalid"))
+}
+
+fn platform_user_status_from_request(value: &str) -> Result<PlatformUserStatus, ServiceError> {
+    PlatformUserStatus::from_id(value.trim()).ok_or(ServiceError::BadRequest("user_status_invalid"))
 }
 
 fn normalized_membership_kind(value: Option<String>) -> Result<String, ServiceError> {
@@ -3086,6 +4195,483 @@ const fn secret_error_to_service(error: PlatformSecretError) -> ServiceError {
     }
 }
 
+const fn external_identity_error_to_service(error: PlatformExternalIdentityError) -> ServiceError {
+    match error {
+        PlatformExternalIdentityError::InvalidExternalIdentityId => ServiceError::ResourceNotFound,
+        PlatformExternalIdentityError::PrincipalMismatch => {
+            ServiceError::Forbidden("external_identity_principal_mismatch")
+        }
+        PlatformExternalIdentityError::InvalidTenantId
+        | PlatformExternalIdentityError::InvalidPrincipalId
+        | PlatformExternalIdentityError::InvalidProviderId
+        | PlatformExternalIdentityError::InvalidProviderKind
+        | PlatformExternalIdentityError::SubjectRequired
+        | PlatformExternalIdentityError::InvalidEmail
+        | PlatformExternalIdentityError::InvalidStatus => ServiceError::BadRequest(error.as_str()),
+    }
+}
+
+const fn role_binding_error_to_service(error: PlatformRoleBindingError) -> ServiceError {
+    match error {
+        PlatformRoleBindingError::StaleResourceVersion => {
+            ServiceError::BadRequest("stale_resource_version")
+        }
+        PlatformRoleBindingError::InvalidRoleBindingId
+        | PlatformRoleBindingError::InvalidTenantId
+        | PlatformRoleBindingError::InvalidOrganizationId
+        | PlatformRoleBindingError::InvalidProjectId
+        | PlatformRoleBindingError::InvalidPrincipalId
+        | PlatformRoleBindingError::InvalidRoleId
+        | PlatformRoleBindingError::InvalidScope
+        | PlatformRoleBindingError::InvalidStatus => ServiceError::BadRequest(error.as_str()),
+    }
+}
+
+const fn user_error_to_service(error: PlatformUserError) -> ServiceError {
+    match error {
+        PlatformUserError::UnknownUser => ServiceError::ResourceNotFound,
+        PlatformUserError::StaleResourceVersion => {
+            ServiceError::BadRequest("stale_resource_version")
+        }
+        PlatformUserError::InvalidUserId
+        | PlatformUserError::InvalidTenantId
+        | PlatformUserError::InvalidOrganizationId
+        | PlatformUserError::InvalidProjectId
+        | PlatformUserError::InvalidEmail
+        | PlatformUserError::InvalidDisplayName
+        | PlatformUserError::InvalidStatus
+        | PlatformUserError::InvalidResourceVersion => ServiceError::BadRequest(error.as_str()),
+    }
+}
+
+async fn platform_users_for_tenant(
+    state: &PlatformServiceState,
+    tenant_id: &str,
+) -> Result<Vec<PlatformUserRecord>, ServiceError> {
+    match state.repository_backend {
+        PlatformRepositoryBackendKind::InMemory => Ok(state.users.users_for_tenant(tenant_id)),
+        PlatformRepositoryBackendKind::Postgres => state
+            .postgres_repository()
+            .ok_or(ServiceError::Internal("postgres_repository_missing"))?
+            .users_for_tenant(tenant_id)
+            .await
+            .map_err(data_repository_error),
+    }
+}
+
+async fn platform_user_by_id(
+    state: &PlatformServiceState,
+    user_id: &str,
+) -> Result<PlatformUserRecord, ServiceError> {
+    match state.repository_backend {
+        PlatformRepositoryBackendKind::InMemory => state
+            .users
+            .user(user_id)
+            .ok_or(ServiceError::ResourceNotFound),
+        PlatformRepositoryBackendKind::Postgres => state
+            .postgres_repository()
+            .ok_or(ServiceError::Internal("postgres_repository_missing"))?
+            .user(user_id)
+            .await
+            .map_err(data_repository_error)?
+            .ok_or(ServiceError::ResourceNotFound),
+    }
+}
+
+async fn platform_user_by_id_including_deleted(
+    state: &PlatformServiceState,
+    user_id: &str,
+) -> Result<Option<PlatformUserRecord>, ServiceError> {
+    match state.repository_backend {
+        PlatformRepositoryBackendKind::InMemory => Ok(state.users.user_including_deleted(user_id)),
+        PlatformRepositoryBackendKind::Postgres => state
+            .postgres_repository()
+            .ok_or(ServiceError::Internal("postgres_repository_missing"))?
+            .user_including_deleted(user_id)
+            .await
+            .map_err(data_repository_error),
+    }
+}
+
+async fn ensure_user_can_login(
+    state: &PlatformServiceState,
+    user_id: &str,
+) -> Result<(), ServiceError> {
+    let Some(user) = platform_user_by_id_including_deleted(state, user_id).await? else {
+        return Ok(());
+    };
+    if user.status.accepts_access() {
+        Ok(())
+    } else {
+        Err(ServiceError::AuthenticationFailed("principal_disabled"))
+    }
+}
+
+async fn set_platform_user_status(
+    state: &PlatformServiceState,
+    user_id: &str,
+    expected_version: i64,
+    status: PlatformUserStatus,
+) -> Result<PlatformUserRecord, ServiceError> {
+    match state.repository_backend {
+        PlatformRepositoryBackendKind::InMemory => state
+            .users
+            .update_user_status(user_id, expected_version, status)
+            .map_err(user_error_to_service),
+        PlatformRepositoryBackendKind::Postgres => state
+            .postgres_repository()
+            .ok_or(ServiceError::Internal("postgres_repository_missing"))?
+            .update_user_status(user_id, expected_version, status)
+            .await
+            .map_err(data_repository_error),
+    }
+}
+
+async fn auth_sessions_for_principal(
+    state: &PlatformServiceState,
+    tenant_id: &str,
+    principal_id: &str,
+) -> Result<Vec<PlatformAuthSessionRecord>, ServiceError> {
+    match state.repository_backend {
+        PlatformRepositoryBackendKind::InMemory => Ok(state
+            .auth_sessions
+            .auth_sessions_for_principal(tenant_id, principal_id)),
+        PlatformRepositoryBackendKind::Postgres => state
+            .postgres_repository()
+            .ok_or(ServiceError::Internal("postgres_repository_missing"))?
+            .auth_sessions_for_principal(tenant_id, principal_id)
+            .await
+            .map_err(data_repository_error),
+    }
+}
+
+async fn auth_session_by_id(
+    state: &PlatformServiceState,
+    auth_session_id: &str,
+) -> Result<PlatformAuthSessionRecord, ServiceError> {
+    match state.repository_backend {
+        PlatformRepositoryBackendKind::InMemory => state
+            .auth_sessions
+            .auth_session(auth_session_id)
+            .ok_or(ServiceError::ResourceNotFound),
+        PlatformRepositoryBackendKind::Postgres => state
+            .postgres_repository()
+            .ok_or(ServiceError::Internal("postgres_repository_missing"))?
+            .auth_session(auth_session_id)
+            .await
+            .map_err(data_repository_error)?
+            .ok_or(ServiceError::ResourceNotFound),
+    }
+}
+
+async fn revoke_auth_session_by_id(
+    state: &PlatformServiceState,
+    auth_session_id: &str,
+    user: &PlatformUserRecord,
+) -> Result<PlatformAuthSessionRecord, ServiceError> {
+    match state.repository_backend {
+        PlatformRepositoryBackendKind::InMemory => state
+            .auth_sessions
+            .revoke_auth_session_by_id(auth_session_id)
+            .map_err(|error| admin_auth_session_error(&error)),
+        PlatformRepositoryBackendKind::Postgres => state
+            .postgres_repository()
+            .ok_or(ServiceError::Internal("postgres_repository_missing"))?
+            .revoke_auth_session_by_id(auth_session_id, &user.tenant_id, &user.user_id)
+            .await
+            .map_err(admin_auth_repository_error),
+    }
+}
+
+async fn disable_auth_sessions_for_principal(
+    state: &PlatformServiceState,
+    tenant_id: &str,
+    principal_id: &str,
+) -> Result<usize, ServiceError> {
+    match state.repository_backend {
+        PlatformRepositoryBackendKind::InMemory => Ok(state
+            .auth_sessions
+            .disable_auth_sessions_for_principal(tenant_id, principal_id)),
+        PlatformRepositoryBackendKind::Postgres => {
+            let count = state
+                .postgres_repository()
+                .ok_or(ServiceError::Internal("postgres_repository_missing"))?
+                .disable_auth_sessions_for_principal(tenant_id, principal_id)
+                .await
+                .map_err(auth_repository_error)?;
+            Ok(usize::try_from(count).unwrap_or(usize::MAX))
+        }
+    }
+}
+
+async fn platform_audit_events_for_tenant(
+    state: &PlatformServiceState,
+    tenant_id: &str,
+) -> Result<Vec<PlatformAuditEventRecord>, ServiceError> {
+    match state.repository_backend {
+        PlatformRepositoryBackendKind::InMemory => {
+            Ok(state.audits.audit_events_for_tenant(tenant_id))
+        }
+        PlatformRepositoryBackendKind::Postgres => state
+            .postgres_repository()
+            .ok_or(ServiceError::Internal("postgres_repository_missing"))?
+            .audit_events_for_tenant(tenant_id)
+            .await
+            .map_err(data_repository_error),
+    }
+}
+
+fn require_strong_auth_confirmation(value: Option<&str>) -> Result<(), ServiceError> {
+    if value.is_some_and(|value| value.trim() == "confirm") {
+        Ok(())
+    } else {
+        Err(ServiceError::Forbidden("strong_auth_confirmation_required"))
+    }
+}
+
+async fn record_platform_audit_event(
+    state: &PlatformServiceState,
+    actor: &AuthenticatedActor,
+    action: PlatformAction,
+    resource: &ResourceRef,
+    event_type: &str,
+    reason: Option<&str>,
+) -> Result<PlatformAuditEventRecord, ServiceError> {
+    let record = PlatformAuditEventRecord {
+        audit_event_id: new_prefixed_id("audit"),
+        tenant_id: resource.tenant_id.clone(),
+        organization_id: resource.organization_id.clone(),
+        project_id: resource.project_id.clone(),
+        actor_principal_id: actor.principal_id.clone(),
+        actor_kind: actor.actor_kind,
+        action_id: action.as_str().to_owned(),
+        resource_kind: resource.kind.clone(),
+        resource_id: resource.resource_id.clone(),
+        event_type: event_type.to_owned(),
+        reason: trimmed_optional(reason),
+        redaction: PLATFORM_AUDIT_REDACTION_PROFILE.to_owned(),
+        created_at_unix: current_unix_timestamp(),
+    };
+    match state.repository_backend {
+        PlatformRepositoryBackendKind::InMemory => state
+            .audits
+            .record_audit_event(record.clone())
+            .map_err(audit_error_to_service)?,
+        PlatformRepositoryBackendKind::Postgres => state
+            .postgres_repository()
+            .ok_or(ServiceError::Internal("postgres_repository_missing"))?
+            .record_audit_event(&record)
+            .await
+            .map_err(data_repository_error)?,
+    }
+    Ok(record)
+}
+
+fn validate_audit_event_list_query(
+    query: &ListPlatformAuditEventsQuery,
+) -> Result<(), ServiceError> {
+    if let Some(organization_id) = query.organization_id.as_deref() {
+        validate_organization_id(organization_id)?;
+    }
+    if let Some(project_id) = query.project_id.as_deref() {
+        validate_project_id(project_id)?;
+        if query.organization_id.is_none() {
+            return Err(ServiceError::BadRequest("organization_id_required"));
+        }
+    }
+    if let Some(principal_id) = query.actor_principal_id.as_deref() {
+        validate_principal_id(principal_id)?;
+    }
+    if let Some(action_id) = query.action_id.as_deref() {
+        let action_id = action_id.trim();
+        if action_id.is_empty() || PlatformAction::from_action_id(action_id).is_none() {
+            return Err(ServiceError::BadRequest("audit_action_id_invalid"));
+        }
+    }
+    validate_optional_non_empty(query.event_type.as_deref(), "audit_event_type_invalid")?;
+    validate_optional_non_empty(
+        query.resource_kind.as_deref(),
+        "audit_resource_kind_invalid",
+    )?;
+    validate_optional_non_empty(query.resource_id.as_deref(), "audit_resource_id_invalid")?;
+    Ok(())
+}
+
+fn audit_event_list_resource(
+    actor: &AuthenticatedActor,
+    query: &ListPlatformAuditEventsQuery,
+) -> Result<ResourceRef, ServiceError> {
+    if let Some(project_id) = query.project_id.as_deref() {
+        let organization_id = query
+            .organization_id
+            .as_deref()
+            .ok_or(ServiceError::BadRequest("organization_id_required"))?;
+        validate_project_id(project_id)?;
+        return Ok(ResourceRef::project(
+            "AuditEvent",
+            &actor.tenant_id,
+            organization_id,
+            project_id,
+            project_id,
+        ));
+    }
+    if let Some(organization_id) = query.organization_id.as_deref() {
+        return organization_scope_resource(actor, organization_id, "AuditEvent");
+    }
+    Ok(ResourceRef::tenant(
+        "AuditEvent",
+        &actor.tenant_id,
+        &actor.tenant_id,
+    ))
+}
+
+fn audit_event_safe_json(record: &PlatformAuditEventRecord) -> Value {
+    json!({
+        "kind": "audit_event",
+        "id": &record.audit_event_id,
+        "audit_event_id": &record.audit_event_id,
+        "tenant_id": &record.tenant_id,
+        "organization_id": &record.organization_id,
+        "project_id": &record.project_id,
+        "actor_principal_id": &record.actor_principal_id,
+        "actor_kind": actor_kind_name(record.actor_kind),
+        "action_id": &record.action_id,
+        "resource_kind": &record.resource_kind,
+        "resource_id": &record.resource_id,
+        "event_type": &record.event_type,
+        "reason": &record.reason,
+        "redaction": &record.redaction,
+        "created_at_unix": record.created_at_unix,
+    })
+}
+
+fn audit_event_matches_query(
+    record: &PlatformAuditEventRecord,
+    query: &ListPlatformAuditEventsQuery,
+) -> bool {
+    matches_optional_filter(
+        query.organization_id.as_ref(),
+        record.organization_id.as_deref(),
+    ) && matches_optional_filter(query.project_id.as_ref(), record.project_id.as_deref())
+        && matches_optional_filter(query.event_type.as_ref(), Some(record.event_type.as_str()))
+        && matches_optional_filter(query.action_id.as_ref(), Some(record.action_id.as_str()))
+        && matches_optional_filter(
+            query.resource_kind.as_ref(),
+            Some(record.resource_kind.as_str()),
+        )
+        && matches_optional_filter(
+            query.resource_id.as_ref(),
+            Some(record.resource_id.as_str()),
+        )
+        && matches_optional_filter(
+            query.actor_principal_id.as_ref(),
+            Some(record.actor_principal_id.as_str()),
+        )
+}
+
+fn matches_optional_filter(filter: Option<&String>, value: Option<&str>) -> bool {
+    filter.is_none_or(|filter| value == Some(filter.as_str()))
+}
+
+fn audit_event_list_limit(limit: Option<usize>) -> Result<usize, ServiceError> {
+    const DEFAULT_LIMIT: usize = 50;
+    const MAX_LIMIT: usize = 200;
+    match limit.unwrap_or(DEFAULT_LIMIT) {
+        0 => Err(ServiceError::BadRequest(
+            "audit_event_limit_must_be_positive",
+        )),
+        value if value > MAX_LIMIT => Err(ServiceError::BadRequest(
+            "audit_event_limit_exceeds_maximum",
+        )),
+        value => Ok(value),
+    }
+}
+
+fn audit_event_list_offset(cursor: Option<&str>) -> Result<usize, ServiceError> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    if cursor.trim().is_empty() {
+        return Err(ServiceError::BadRequest("audit_event_cursor_invalid"));
+    }
+    cursor
+        .parse::<usize>()
+        .map_err(|_| ServiceError::BadRequest("audit_event_cursor_invalid"))
+}
+
+fn trimmed_optional(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+const fn audit_error_to_service(error: PlatformAuditError) -> ServiceError {
+    match error {
+        PlatformAuditError::InvalidAuditEventId
+        | PlatformAuditError::InvalidTenantId
+        | PlatformAuditError::InvalidOrganizationId
+        | PlatformAuditError::InvalidProjectId
+        | PlatformAuditError::InvalidPrincipalId
+        | PlatformAuditError::InvalidActionId
+        | PlatformAuditError::InvalidResourceKind
+        | PlatformAuditError::InvalidResourceId
+        | PlatformAuditError::InvalidEventType
+        | PlatformAuditError::InvalidReason
+        | PlatformAuditError::InvalidRedaction
+        | PlatformAuditError::InvalidTimestamp => ServiceError::BadRequest(error.as_str()),
+    }
+}
+
+fn ensure_actor_tenant(actor: &AuthenticatedActor, tenant_id: &str) -> Result<(), ServiceError> {
+    if actor.tenant_id == tenant_id {
+        Ok(())
+    } else {
+        Err(ServiceError::Forbidden("tenant_mismatch"))
+    }
+}
+
+fn ensure_auth_session_belongs_to_user(
+    session: &PlatformAuthSessionRecord,
+    user: &PlatformUserRecord,
+) -> Result<(), ServiceError> {
+    if session.actor.tenant_id == user.tenant_id && session.actor.principal_id == user.user_id {
+        Ok(())
+    } else {
+        Err(ServiceError::ResourceNotFound)
+    }
+}
+
+const fn admin_auth_session_error(error: &AuthError) -> ServiceError {
+    match *error {
+        AuthError::SessionNotFound | AuthError::EmptySessionId => ServiceError::ResourceNotFound,
+        AuthError::SessionRevoked => ServiceError::BadRequest("auth_session_revoked"),
+        AuthError::SessionExpired => ServiceError::BadRequest("auth_session_expired"),
+        AuthError::PrincipalDisabled => ServiceError::BadRequest("principal_disabled"),
+        AuthError::EmptyBearerToken
+        | AuthError::EmptyTokenHash
+        | AuthError::EmptyCredentialId
+        | AuthError::EmptyCredentialTokenHash
+        | AuthError::EmptyMtlsIdentityId
+        | AuthError::EmptyMtlsSubject
+        | AuthError::CredentialNotFound
+        | AuthError::MtlsIdentityNotFound
+        | AuthError::CredentialRevoked
+        | AuthError::MtlsIdentityRevoked
+        | AuthError::CredentialExpired
+        | AuthError::MtlsIdentityExpired
+        | AuthError::CredentialDisabled
+        | AuthError::MtlsIdentityDisabled => ServiceError::BadRequest(error.as_str()),
+    }
+}
+
+fn admin_auth_repository_error(error: PlatformRepositoryError) -> ServiceError {
+    match error {
+        PlatformRepositoryError::Auth(error) => admin_auth_session_error(&error),
+        other => auth_repository_error(other),
+    }
+}
+
 async fn record_single_user_session(
     state: &PlatformServiceState,
     record: PlatformAuthSessionRecord,
@@ -3108,6 +4694,47 @@ fn record_single_user_memberships(state: &PlatformServiceState) -> Result<(), Se
     if state.repository_backend == PlatformRepositoryBackendKind::Postgres {
         return Ok(());
     }
+    state
+        .users
+        .record_user(PlatformUserRecord {
+            user_id: SINGLE_USER_ID.to_owned(),
+            tenant_id: SINGLE_USER_TENANT_ID.to_owned(),
+            default_organization_id: Some(SINGLE_USER_ORGANIZATION_ID.to_owned()),
+            default_project_id: Some(SINGLE_USER_PROJECT_ID.to_owned()),
+            primary_email: state
+                .single_user_auth
+                .as_ref()
+                .and_then(PlatformSingleUserConfig::user_primary_email)
+                .map(ToOwned::to_owned),
+            display_name: state.single_user_auth.as_ref().map_or_else(
+                || "single-user".to_owned(),
+                |config| config.user_display_name().to_owned(),
+            ),
+            status: PlatformUserStatus::Active,
+            resource_version: 1,
+        })
+        .map_err(user_error_to_service)?;
+    state
+        .external_identities
+        .record_external_identity(PlatformExternalIdentityRecord {
+            external_identity_id: SINGLE_USER_EXTERNAL_IDENTITY_ID.to_owned(),
+            tenant_id: SINGLE_USER_TENANT_ID.to_owned(),
+            principal_id: SINGLE_USER_ID.to_owned(),
+            identity_provider_id: SINGLE_USER_IDENTITY_PROVIDER_ID.to_owned(),
+            provider_kind: "single_user".to_owned(),
+            provider_subject: state.single_user_auth.as_ref().map_or_else(
+                || "single_user".to_owned(),
+                |config| config.username().to_owned(),
+            ),
+            email: state
+                .single_user_auth
+                .as_ref()
+                .and_then(PlatformSingleUserConfig::user_primary_email)
+                .map(ToOwned::to_owned),
+            email_verified: false,
+            status: PlatformExternalIdentityStatus::Active,
+        })
+        .map_err(external_identity_error_to_service)?;
     state
         .memberships
         .record_organization_member(PlatformOrganizationMembershipRecord {
@@ -3133,7 +4760,20 @@ fn record_single_user_memberships(state: &PlatformServiceState) -> Result<(), Se
             status: PlatformMembershipStatus::Active,
             resource_version: 1,
         })
-        .map_err(membership_error_to_service)
+        .map_err(membership_error_to_service)?;
+    state
+        .role_bindings
+        .record_role_binding(PlatformRoleBindingRecord {
+            role_binding_id: SINGLE_USER_ROLE_BINDING_ID.to_owned(),
+            tenant_id: SINGLE_USER_TENANT_ID.to_owned(),
+            organization_id: None,
+            project_id: None,
+            principal_id: SINGLE_USER_ID.to_owned(),
+            role_id: BuiltInRole::TenantOwner.as_str().to_owned(),
+            status: PlatformRoleBindingStatus::Active,
+            resource_version: 1,
+        })
+        .map_err(role_binding_error_to_service)
 }
 
 async fn auth_session_from_headers(
@@ -3285,6 +4925,8 @@ fn auth_session_response_json(session: &PlatformAuthSessionRecord) -> Value {
 
 fn auth_session_safe_json(session: &PlatformAuthSessionRecord) -> Value {
     json!({
+        "kind": "auth_session",
+        "id": session.session_id,
         "session_id": session.session_id,
         "status": session.status.as_str(),
         "actor": actor_json(&session.actor),
@@ -3573,6 +5215,38 @@ async fn complete_oidc_login(
 ) -> Result<(), ServiceError> {
     match state.repository_backend {
         PlatformRepositoryBackendKind::InMemory => {
+            let existing_user = state.users.user_including_deleted(&completion.user_id);
+            state
+                .users
+                .record_user(PlatformUserRecord {
+                    user_id: completion.user_id.clone(),
+                    tenant_id: completion.tenant_id.clone(),
+                    default_organization_id: Some(completion.organization_id.clone()),
+                    default_project_id: Some(completion.project_id.clone()),
+                    primary_email: completion.email.clone(),
+                    display_name: completion.user_display_name.clone(),
+                    status: existing_user
+                        .as_ref()
+                        .map_or(PlatformUserStatus::Active, |user| user.status),
+                    resource_version: existing_user
+                        .as_ref()
+                        .map_or(1, |user| user.resource_version + 1),
+                })
+                .map_err(user_error_to_service)?;
+            state
+                .external_identities
+                .upsert_external_identity(PlatformExternalIdentityRecord {
+                    external_identity_id: completion.external_identity_id.clone(),
+                    tenant_id: completion.tenant_id.clone(),
+                    principal_id: completion.user_id.clone(),
+                    identity_provider_id: completion.identity_provider_id.clone(),
+                    provider_kind: "oidc".to_owned(),
+                    provider_subject: completion.provider_subject.clone(),
+                    email: completion.email.clone(),
+                    email_verified: completion.email_verified,
+                    status: PlatformExternalIdentityStatus::Active,
+                })
+                .map_err(external_identity_error_to_service)?;
             state.oidc_logins.consume_attempt(completion)?;
             state
                 .auth_sessions
@@ -3603,7 +5277,20 @@ async fn complete_oidc_login(
                     status: PlatformMembershipStatus::Active,
                     resource_version: 1,
                 })
-                .map_err(membership_error_to_service)
+                .map_err(membership_error_to_service)?;
+            state
+                .role_bindings
+                .record_role_binding(PlatformRoleBindingRecord {
+                    role_binding_id: completion.organization_role_binding_id.clone(),
+                    tenant_id: completion.tenant_id.clone(),
+                    organization_id: Some(completion.organization_id.clone()),
+                    project_id: None,
+                    principal_id: completion.user_id.clone(),
+                    role_id: BuiltInRole::OrganizationAdmin.as_str().to_owned(),
+                    status: PlatformRoleBindingStatus::Active,
+                    resource_version: 1,
+                })
+                .map_err(role_binding_error_to_service)
         }
         PlatformRepositoryBackendKind::Postgres => state
             .postgres_repository()
@@ -3769,14 +5456,7 @@ async fn handle_foundation_request(
     let matched = match_route(method, path).ok_or(ServiceError::RouteNotFound)?;
     let actor = authenticated_actor_from_headers(state, headers).await?;
     let resource = authorization_resource(state, &actor, &matched).await?;
-    let decision = state.authorization.authorize(&AuthorizationRequest {
-        actor: actor.clone(),
-        action: matched.route.action,
-        resource: resource.clone(),
-    });
-    if !decision.allowed {
-        return Err(ServiceError::Forbidden(decision.reason));
-    }
+    authorize_service_action(state, &actor, matched.route.action, &resource).await?;
     let business = business_resource(state, &matched).await?;
     Ok(authorized_response(
         &actor,
@@ -4024,6 +5704,7 @@ fn authorized_response(
             "action": matched.route.action.as_str(),
             "resource_kind": matched.route.resource_kind,
             "resource_id_path_param": matched.route.resource_id_path_param,
+            "access": matched.route.access.as_str(),
             "user_actor_required": matched.route.user_actor_required,
         },
         "actor": {
@@ -4092,6 +5773,12 @@ fn auth_repository_error(error: PlatformRepositoryError) -> ServiceError {
     match error {
         PlatformRepositoryError::Auth(error) => ServiceError::AuthenticationFailed(error.as_str()),
         PlatformRepositoryError::Identity(error) => ServiceError::BadRequest(error.as_str()),
+        PlatformRepositoryError::ExternalIdentity(error) => {
+            external_identity_error_to_service(error)
+        }
+        PlatformRepositoryError::RoleBinding(error) => role_binding_error_to_service(error),
+        PlatformRepositoryError::User(error) => user_error_to_service(error),
+        PlatformRepositoryError::Audit(error) => audit_error_to_service(error),
         PlatformRepositoryError::Membership(error) => membership_error_to_service(error),
         PlatformRepositoryError::Invitation(error) => invitation_error_to_service(error),
         PlatformRepositoryError::Secret(error) => secret_error_to_service(error),
@@ -4122,6 +5809,15 @@ fn auth_repository_error(error: PlatformRepositoryError) -> ServiceError {
         }
         PlatformRepositoryError::UnknownInvitationStatus(_) => {
             ServiceError::Internal("unknown_invitation_status")
+        }
+        PlatformRepositoryError::UnknownExternalIdentityStatus(_) => {
+            ServiceError::Internal("unknown_external_identity_status")
+        }
+        PlatformRepositoryError::UnknownRoleBindingStatus(_) => {
+            ServiceError::Internal("unknown_role_binding_status")
+        }
+        PlatformRepositoryError::UnknownUserStatus(_) => {
+            ServiceError::Internal("unknown_user_status")
         }
         PlatformRepositoryError::OidcLoginAttemptUnavailable(_) => {
             ServiceError::AuthenticationFailed("oidc_login_attempt_unavailable")
@@ -4145,6 +5841,12 @@ fn data_repository_error(error: PlatformRepositoryError) -> ServiceError {
         PlatformRepositoryError::Database(_) => ServiceError::Internal("database_error"),
         PlatformRepositoryError::Auth(error) => ServiceError::Internal(error.as_str()),
         PlatformRepositoryError::Identity(error) => ServiceError::BadRequest(error.as_str()),
+        PlatformRepositoryError::ExternalIdentity(error) => {
+            external_identity_error_to_service(error)
+        }
+        PlatformRepositoryError::RoleBinding(error) => role_binding_error_to_service(error),
+        PlatformRepositoryError::User(error) => user_error_to_service(error),
+        PlatformRepositoryError::Audit(error) => audit_error_to_service(error),
         PlatformRepositoryError::Membership(error) => membership_error_to_service(error),
         PlatformRepositoryError::Invitation(error) => invitation_error_to_service(error),
         PlatformRepositoryError::Secret(error) => secret_error_to_service(error),
@@ -4176,6 +5878,15 @@ fn data_repository_error(error: PlatformRepositoryError) -> ServiceError {
         }
         PlatformRepositoryError::UnknownInvitationStatus(_) => {
             ServiceError::Internal("unknown_invitation_status")
+        }
+        PlatformRepositoryError::UnknownExternalIdentityStatus(_) => {
+            ServiceError::Internal("unknown_external_identity_status")
+        }
+        PlatformRepositoryError::UnknownRoleBindingStatus(_) => {
+            ServiceError::Internal("unknown_role_binding_status")
+        }
+        PlatformRepositoryError::UnknownUserStatus(_) => {
+            ServiceError::Internal("unknown_user_status")
         }
         PlatformRepositoryError::OidcLoginAttemptUnavailable(_) => {
             ServiceError::AuthenticationFailed("oidc_login_attempt_unavailable")
@@ -4207,6 +5918,7 @@ mod tests {
         ActionGrant, ActorKind, AuthenticatedActor, AuthorizationEngine, AuthorizationRequest,
         BuiltInRole, FoundationAuthorizationEngine, PlatformAction, ResourceRef, RoleScopeKind,
     };
+    use crate::audit::{PlatformAuditEventRecord, PLATFORM_AUDIT_REDACTION_PROFILE};
     use crate::auth::{
         InMemoryPlatformAuthSessionStore, InMemoryPlatformBearerCredentialStore,
         InMemoryPlatformMtlsIdentityStore, PlatformAuthSessionRecord,
@@ -4216,8 +5928,10 @@ mod tests {
     };
     use crate::config::{PlatformConfig, PlatformSingleUserConfig};
     use crate::identity::{
-        oidc_discovery_url, OidcLoginAttemptRecord, OidcLoginAttemptStart, OidcLoginProviderRecord,
-        OidcLoginProviderStatus, OidcTokenEndpointAuthMethod,
+        oidc_discovery_url, InMemoryPlatformExternalIdentityStore, OidcLoginAttemptRecord,
+        OidcLoginAttemptStart, OidcLoginProviderRecord, OidcLoginProviderStatus,
+        OidcTokenEndpointAuthMethod, PlatformExternalIdentityRecord,
+        PlatformExternalIdentityStatus,
     };
     use crate::invitation::{
         hash_platform_invitation_token, InMemoryPlatformInvitationStore, PlatformInvitationStatus,
@@ -4233,6 +5947,9 @@ mod tests {
         InMemoryPlatformResourceStore, PlatformResourceData, PlatformResourceRecord,
         PlatformResourceRepository, RunRecord,
     };
+    use crate::role::{
+        InMemoryPlatformRoleBindingStore, PlatformRoleBindingRecord, PlatformRoleBindingStatus,
+    };
     use crate::secret::{
         CreatePlatformSecretRefRequest, InMemoryPlatformSecretStore, IN_MEMORY_SECRET_BACKEND,
     };
@@ -4246,14 +5963,17 @@ mod tests {
     use crate::storage::{
         InMemoryResourceOwnerStore, ResourceOwnerRecord, ResourceOwnerRepository,
     };
+    use crate::user::{InMemoryPlatformUserStore, PlatformUserRecord, PlatformUserStatus};
 
     const TENANT_ID: &str = "ten_test";
     const ORGANIZATION_ID: &str = "org_test";
     const PROJECT_ID: &str = "prj_test";
     const OTHER_PROJECT_ID: &str = "prj_other";
     const USER_ID: &str = "usr_test";
+    const TARGET_USER_ID: &str = "usr_target";
     const SERVICE_ACCOUNT_ID: &str = "svc_test";
     const USER_TOKEN: &str = "platform-user-session-token";
+    const TARGET_TOKEN: &str = "platform-target-session-token";
     const SERVICE_ACCOUNT_TOKEN: &str = "platform-service-account-session-token";
     const API_KEY_TOKEN: &str = "platform-api-key-token";
     const MTLS_SUBJECT: &str = "spiffe://platform.test/ns/default/sa/platform-worker";
@@ -4947,6 +6667,7 @@ mod tests {
             .project_id
             .as_deref()
             .is_some_and(|id| id.starts_with("prj_oidc_")));
+        assert_oidc_external_identity_recorded(&state, &actor.principal_id);
 
         let requests = oidc_http.requests();
         assert_eq!(requests.len(), 3);
@@ -5170,6 +6891,179 @@ mod tests {
         .await;
         assert_eq!(response.status, StatusCode::FORBIDDEN);
         assert_eq!(response.body["error"]["code"], "missing_action_grant");
+    }
+
+    #[tokio::test]
+    async fn admin_external_identity_list_get_are_tenant_scoped() {
+        let state = project_state(USER_ID, BuiltInRole::TenantOwner, [])
+            .with_external_identity_store(external_identity_store());
+
+        let list = request_json(
+            state.clone(),
+            Method::GET,
+            "/admin/v1/users/usr_test/external-identities",
+            auth_headers(USER_TOKEN),
+        )
+        .await;
+        assert_eq!(list.status, StatusCode::OK, "{:?}", list.body);
+        assert_eq!(
+            list.body["schema"],
+            "platform.admin.external_identity.list.v1"
+        );
+        assert_eq!(list.body["resources"].as_array().map(Vec::len), Some(2));
+        for resource in list.body["resources"]
+            .as_array()
+            .unwrap_or_else(|| panic!("list should return resources"))
+        {
+            assert_eq!(resource["access_token_included"], false);
+            assert_eq!(resource["refresh_token_included"], false);
+            assert_eq!(resource["client_secret_included"], false);
+        }
+
+        let get = request_json(
+            state.clone(),
+            Method::GET,
+            "/admin/v1/users/usr_test/external-identities/xid_test",
+            auth_headers(USER_TOKEN),
+        )
+        .await;
+        assert_eq!(get.status, StatusCode::OK, "{:?}", get.body);
+        assert_eq!(get.body["resource"]["external_identity_id"], "xid_test");
+        assert_eq!(get.body["resource"]["provider_kind"], "oidc");
+        assert_eq!(get.body["resource"]["email_verified"], true);
+        assert_eq!(get.body["resource"]["access_token_included"], false);
+        assert_eq!(get.body["resource"]["refresh_token_included"], false);
+        assert_eq!(get.body["resource"]["client_secret_included"], false);
+
+        let wrong_user = request_json(
+            state.clone(),
+            Method::GET,
+            "/admin/v1/users/usr_other/external-identities/xid_test",
+            auth_headers(USER_TOKEN),
+        )
+        .await;
+        assert_eq!(wrong_user.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_external_identity_unlink_requires_confirmation_and_audits() {
+        let state = project_state(USER_ID, BuiltInRole::TenantOwner, [])
+            .with_external_identity_store(external_identity_store());
+
+        let unlink = request_json_body(
+            state.clone(),
+            Method::POST,
+            "/admin/v1/users/usr_test/external-identities/xid_test/unlink",
+            auth_headers(USER_TOKEN),
+            json!({}),
+        )
+        .await;
+        assert_eq!(unlink.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            unlink.body["error"]["code"],
+            "strong_auth_confirmation_required"
+        );
+
+        let unlink = request_json_body(
+            state.clone(),
+            Method::POST,
+            "/admin/v1/users/usr_test/external-identities/xid_test/unlink",
+            auth_headers(USER_TOKEN),
+            json!({
+                "reason": "Operator unlink.",
+                "strong_auth_confirmation": "confirm"
+            }),
+        )
+        .await;
+        assert_eq!(unlink.status, StatusCode::OK, "{:?}", unlink.body);
+        assert_eq!(
+            unlink.body["schema"],
+            "platform.admin.external_identity_mutation.v1"
+        );
+        assert_eq!(unlink.body["resource"]["status"], "deleted");
+        assert_eq!(unlink.body["unlinked"], true);
+        assert_eq!(unlink.body["reason_recorded"], true);
+        assert_eq!(unlink.body["strong_auth_confirmed"], true);
+        assert_eq!(unlink.body["raw_tokens_included"], false);
+        let audit_event_id = unlink.body["audit_event_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("audit_event_id should be a string"));
+        assert!(audit_event_id.starts_with("audit_"));
+        let audit_events = state.audits().audit_events_for_tenant(TENANT_ID);
+        assert_eq!(audit_events.len(), 1);
+        assert_eq!(audit_events[0].audit_event_id, audit_event_id);
+        assert_eq!(
+            audit_events[0].event_type,
+            "platform.external_identity.unlink"
+        );
+        assert_eq!(
+            audit_events[0].action_id,
+            "platform.external_identity.unlink"
+        );
+        assert_eq!(audit_events[0].resource_kind, "ExternalIdentity");
+        assert_eq!(audit_events[0].resource_id, "xid_test");
+        assert_eq!(audit_events[0].reason.as_deref(), Some("Operator unlink."));
+
+        let after_unlink = request_json(
+            state.clone(),
+            Method::GET,
+            "/admin/v1/users/usr_test/external-identities",
+            auth_headers(USER_TOKEN),
+        )
+        .await;
+        assert_eq!(
+            after_unlink.status,
+            StatusCode::OK,
+            "{:?}",
+            after_unlink.body
+        );
+        assert_eq!(
+            after_unlink.body["resources"].as_array().map(Vec::len),
+            Some(1)
+        );
+
+        let single_user_unlink = request_json_body(
+            state,
+            Method::POST,
+            "/admin/v1/users/usr_test/external-identities/xid_single_user/unlink",
+            auth_headers(USER_TOKEN),
+            json!({
+                "strong_auth_confirmation": "confirm"
+            }),
+        )
+        .await;
+        assert_eq!(single_user_unlink.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            single_user_unlink.body["error"]["code"],
+            "single_user_identity_unlink_forbidden"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_external_identity_requires_matching_grant() {
+        let state = project_state(USER_ID, BuiltInRole::ProjectViewer, [])
+            .with_external_identity_store(external_identity_store());
+
+        let list = request_json(
+            state.clone(),
+            Method::GET,
+            "/admin/v1/users/usr_test/external-identities",
+            auth_headers(USER_TOKEN),
+        )
+        .await;
+        assert_eq!(list.status, StatusCode::FORBIDDEN);
+        assert_eq!(list.body["error"]["code"], "missing_action_grant");
+
+        let unlink = request_json_body(
+            state,
+            Method::POST,
+            "/admin/v1/users/usr_test/external-identities/xid_test/unlink",
+            auth_headers(USER_TOKEN),
+            json!({}),
+        )
+        .await;
+        assert_eq!(unlink.status, StatusCode::FORBIDDEN);
+        assert_eq!(unlink.body["error"]["code"], "missing_action_grant");
     }
 
     #[tokio::test]
@@ -5463,6 +7357,491 @@ mod tests {
         .await;
         assert_eq!(create.status, StatusCode::FORBIDDEN);
         assert_eq!(create.body["error"]["code"], "missing_action_grant");
+    }
+
+    #[tokio::test]
+    async fn admin_role_binding_create_updates_dynamic_authorization() {
+        let state = role_binding_admin_and_target_state(
+            InMemoryPlatformRoleBindingStore::new(),
+            [run_resource("run_dynamic", PROJECT_ID, "running")],
+        );
+
+        let before = request_json(
+            state.clone(),
+            Method::GET,
+            "/v1/runs/run_dynamic",
+            auth_headers(TARGET_TOKEN),
+        )
+        .await;
+        assert_eq!(before.status, StatusCode::FORBIDDEN);
+        assert_eq!(before.body["error"]["code"], "missing_action_grant");
+
+        let created = request_json_body(
+            state.clone(),
+            Method::POST,
+            "/admin/v1/role-bindings",
+            auth_headers(USER_TOKEN),
+            json!({
+                "role_binding_id": "rb_target_project_viewer",
+                "organization_id": ORGANIZATION_ID,
+                "project_id": PROJECT_ID,
+                "principal_id": TARGET_USER_ID,
+                "role_id": "project_viewer"
+            }),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::OK, "{:?}", created.body);
+        assert_eq!(
+            created.body["schema"],
+            "platform.admin.role_binding_mutation.v1"
+        );
+        assert_eq!(created.body["created"], true);
+        assert_eq!(created.body["resource"]["scope_kind"], "project");
+        assert_eq!(created.body["resource"]["status"], "active");
+
+        let after = request_json(
+            state.clone(),
+            Method::GET,
+            "/v1/runs/run_dynamic",
+            auth_headers(TARGET_TOKEN),
+        )
+        .await;
+        assert_eq!(after.status, StatusCode::OK, "{:?}", after.body);
+        assert_eq!(
+            after.body["business_resource"]["resource_id"],
+            "run_dynamic"
+        );
+
+        let replay = request_json_body(
+            state,
+            Method::POST,
+            "/admin/v1/role-bindings",
+            auth_headers(USER_TOKEN),
+            json!({
+                "role_binding_id": "rb_replay",
+                "organization_id": ORGANIZATION_ID,
+                "project_id": PROJECT_ID,
+                "principal_id": TARGET_USER_ID,
+                "role_id": "project_viewer"
+            }),
+        )
+        .await;
+        assert_eq!(replay.status, StatusCode::OK, "{:?}", replay.body);
+        assert_eq!(replay.body["created"], false);
+        assert_eq!(
+            replay.body["resource"]["role_binding_id"],
+            "rb_target_project_viewer"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_role_binding_status_disable_revokes_dynamic_authorization() {
+        let role_bindings = role_binding_store([role_binding_record(
+            "rb_target_project_viewer",
+            Some(ORGANIZATION_ID),
+            Some(PROJECT_ID),
+            TARGET_USER_ID,
+            BuiltInRole::ProjectViewer,
+        )]);
+        let state = role_binding_admin_and_target_state(
+            role_bindings,
+            [run_resource("run_dynamic_disable", PROJECT_ID, "running")],
+        );
+
+        let before = request_json(
+            state.clone(),
+            Method::GET,
+            "/v1/runs/run_dynamic_disable",
+            auth_headers(TARGET_TOKEN),
+        )
+        .await;
+        assert_eq!(before.status, StatusCode::OK, "{:?}", before.body);
+
+        let disabled = request_json_body(
+            state.clone(),
+            Method::POST,
+            "/admin/v1/role-bindings/rb_target_project_viewer/status",
+            auth_headers(USER_TOKEN),
+            json!({
+                "expected_version": 1,
+                "status": "disabled",
+                "reason": "Disable temporary access."
+            }),
+        )
+        .await;
+        assert_eq!(disabled.status, StatusCode::OK, "{:?}", disabled.body);
+        assert_eq!(disabled.body["resource"]["status"], "disabled");
+        assert_eq!(disabled.body["resource"]["resource_version"], 2);
+        assert_eq!(disabled.body["reason_recorded"], true);
+
+        let after = request_json(
+            state,
+            Method::GET,
+            "/v1/runs/run_dynamic_disable",
+            auth_headers(TARGET_TOKEN),
+        )
+        .await;
+        assert_eq!(after.status, StatusCode::FORBIDDEN);
+        assert_eq!(after.body["error"]["code"], "missing_action_grant");
+    }
+
+    #[tokio::test]
+    async fn admin_user_status_disable_marks_sessions_principal_disabled() {
+        let state =
+            role_binding_admin_and_target_state(InMemoryPlatformRoleBindingStore::new(), []);
+
+        let users = request_json(
+            state.clone(),
+            Method::GET,
+            "/admin/v1/users",
+            auth_headers(USER_TOKEN),
+        )
+        .await;
+        assert_eq!(users.status, StatusCode::OK, "{:?}", users.body);
+        assert_eq!(users.body["schema"], "platform.admin.user.list.v1");
+        assert_eq!(
+            users.body["resources"]
+                .as_array()
+                .unwrap_or_else(|| panic!("user list resources should be an array"))
+                .len(),
+            2
+        );
+
+        let target = request_json(
+            state.clone(),
+            Method::GET,
+            "/admin/v1/users/usr_target",
+            auth_headers(USER_TOKEN),
+        )
+        .await;
+        assert_eq!(target.status, StatusCode::OK, "{:?}", target.body);
+        assert_eq!(target.body["resource"]["status"], "active");
+        assert_eq!(target.body["resource"]["resource_version"], 1);
+
+        let disabled = request_json_body(
+            state.clone(),
+            Method::POST,
+            "/admin/v1/users/usr_target/status",
+            auth_headers(USER_TOKEN),
+            json!({
+                "expected_version": 1,
+                "status": "disabled",
+                "reason": "Disable compromised user."
+            }),
+        )
+        .await;
+        assert_eq!(
+            disabled.status,
+            StatusCode::FORBIDDEN,
+            "{:?}",
+            disabled.body
+        );
+        assert_eq!(
+            disabled.body["error"]["code"],
+            "strong_auth_confirmation_required"
+        );
+
+        let disabled = request_json_body(
+            state.clone(),
+            Method::POST,
+            "/admin/v1/users/usr_target/status",
+            auth_headers(USER_TOKEN),
+            json!({
+                "expected_version": 1,
+                "status": "disabled",
+                "reason": "Disable compromised user.",
+                "strong_auth_confirmation": "confirm"
+            }),
+        )
+        .await;
+        assert_eq!(disabled.status, StatusCode::OK, "{:?}", disabled.body);
+        assert_eq!(disabled.body["resource"]["status"], "disabled");
+        assert_eq!(disabled.body["resource"]["resource_version"], 2);
+        assert_eq!(disabled.body["previous_status"], "active");
+        assert_eq!(disabled.body["disabled_session_count"], 1);
+        assert_eq!(disabled.body["reason_recorded"], true);
+        assert_eq!(disabled.body["strong_auth_confirmed"], true);
+        let audit_event_id = disabled.body["audit_event_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("audit_event_id should be a string"));
+        assert!(audit_event_id.starts_with("audit_"));
+        let audit_events = state.audits().audit_events_for_tenant(TENANT_ID);
+        assert_eq!(audit_events.len(), 1);
+        assert_eq!(audit_events[0].audit_event_id, audit_event_id);
+        assert_eq!(audit_events[0].event_type, "platform.user.status.update");
+        assert_eq!(audit_events[0].action_id, "platform.user.write");
+        assert_eq!(audit_events[0].resource_kind, "User");
+        assert_eq!(audit_events[0].resource_id, TARGET_USER_ID);
+        assert_eq!(
+            audit_events[0].reason.as_deref(),
+            Some("Disable compromised user.")
+        );
+        assert!(!format!("{audit_events:?}").contains(TARGET_TOKEN));
+
+        let target_session = request_json(
+            state,
+            Method::GET,
+            "/auth/v1/session",
+            auth_headers(TARGET_TOKEN),
+        )
+        .await;
+        assert_eq!(target_session.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(target_session.body["error"]["code"], "principal_disabled");
+    }
+
+    #[tokio::test]
+    async fn admin_user_session_list_and_revoke_are_redacted() {
+        let state =
+            role_binding_admin_and_target_state(InMemoryPlatformRoleBindingStore::new(), []);
+
+        let sessions = request_json(
+            state.clone(),
+            Method::GET,
+            "/admin/v1/users/usr_target/sessions",
+            auth_headers(USER_TOKEN),
+        )
+        .await;
+        assert_eq!(sessions.status, StatusCode::OK, "{:?}", sessions.body);
+        assert_eq!(
+            sessions.body["schema"],
+            "platform.admin.user_auth_session.list.v1"
+        );
+        assert_eq!(
+            sessions.body["resources"]
+                .as_array()
+                .unwrap_or_else(|| panic!("session list resources should be an array"))
+                .len(),
+            1
+        );
+        assert_eq!(sessions.body["resources"][0]["session_id"], "sess_target");
+        assert_eq!(sessions.body["resources"][0]["status"], "active");
+        assert_eq!(
+            sessions.body["resources"][0]["session_token_hash_included"],
+            false
+        );
+        assert_eq!(
+            sessions.body["resources"][0]["raw_session_token_included"],
+            false
+        );
+        assert!(sessions.body["resources"][0].get("access_token").is_none());
+
+        let revoked = request_json_body(
+            state.clone(),
+            Method::POST,
+            "/admin/v1/users/usr_target/sessions/sess_target/revoke",
+            auth_headers(USER_TOKEN),
+            json!({
+                "reason": "Operator revoke."
+            }),
+        )
+        .await;
+        assert_eq!(revoked.status, StatusCode::FORBIDDEN, "{:?}", revoked.body);
+        assert_eq!(
+            revoked.body["error"]["code"],
+            "strong_auth_confirmation_required"
+        );
+
+        let revoked = request_json_body(
+            state.clone(),
+            Method::POST,
+            "/admin/v1/users/usr_target/sessions/sess_target/revoke",
+            auth_headers(USER_TOKEN),
+            json!({
+                "reason": "Operator revoke.",
+                "strong_auth_confirmation": "confirm"
+            }),
+        )
+        .await;
+        assert_eq!(revoked.status, StatusCode::OK, "{:?}", revoked.body);
+        assert_eq!(
+            revoked.body["schema"],
+            "platform.admin.user_auth_session_mutation.v1"
+        );
+        assert_eq!(revoked.body["resource"]["status"], "revoked");
+        assert_eq!(revoked.body["previous_status"], "active");
+        assert_eq!(revoked.body["reason_recorded"], true);
+        assert_eq!(revoked.body["strong_auth_confirmed"], true);
+        let audit_event_id = revoked.body["audit_event_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("audit_event_id should be a string"));
+        assert!(audit_event_id.starts_with("audit_"));
+        let audit_events = state.audits().audit_events_for_tenant(TENANT_ID);
+        assert_eq!(audit_events.len(), 1);
+        assert_eq!(audit_events[0].audit_event_id, audit_event_id);
+        assert_eq!(audit_events[0].event_type, "platform.auth_session.revoke");
+        assert_eq!(audit_events[0].action_id, "platform.auth_session.revoke");
+        assert_eq!(audit_events[0].resource_kind, "AuthSession");
+        assert_eq!(audit_events[0].resource_id, "sess_target");
+        assert_eq!(audit_events[0].reason.as_deref(), Some("Operator revoke."));
+        assert!(!format!("{audit_events:?}").contains(TARGET_TOKEN));
+
+        let target_session = request_json(
+            state,
+            Method::GET,
+            "/auth/v1/session",
+            auth_headers(TARGET_TOKEN),
+        )
+        .await;
+        assert_eq!(target_session.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(target_session.body["error"]["code"], "auth_session_revoked");
+    }
+
+    #[tokio::test]
+    async fn admin_audit_event_list_requires_confirmation_and_filters() {
+        let state = audit_event_list_state();
+
+        let missing_confirmation = request_json(
+            state.clone(),
+            Method::GET,
+            "/admin/v1/audit-events",
+            auth_headers(USER_TOKEN),
+        )
+        .await;
+        assert_eq!(missing_confirmation.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            missing_confirmation.body["error"]["code"],
+            "strong_auth_confirmation_required"
+        );
+
+        let first_page = request_json(
+            state.clone(),
+            Method::GET,
+            "/admin/v1/audit-events?strong_auth_confirmation=confirm&limit=1",
+            auth_headers(USER_TOKEN),
+        )
+        .await;
+        assert_eq!(first_page.status, StatusCode::OK, "{:?}", first_page.body);
+        assert_eq!(
+            first_page.body["schema"],
+            "platform.admin.audit_event.list.v1"
+        );
+        assert_eq!(first_page.body["strong_auth_confirmed"], true);
+        assert_eq!(first_page.body["total_filtered_count"], 3);
+        assert_eq!(first_page.body["next_cursor"], "1");
+        assert_eq!(
+            first_page.body["resources"][0]["audit_event_id"],
+            "audit_new_session"
+        );
+        assert_eq!(
+            first_page.body["resources"][0]["event_type"],
+            "platform.auth_session.revoke"
+        );
+        assert_eq!(first_page.body["resources"][0]["actor_kind"], "user");
+        assert!(first_page.body["resources"][0].get("token_hash").is_none());
+        assert!(first_page.body["resources"][0]
+            .get("raw_session_token")
+            .is_none());
+
+        let second_page = request_json(
+            state.clone(),
+            Method::GET,
+            "/admin/v1/audit-events?strong_auth_confirmation=confirm&limit=1&cursor=1",
+            auth_headers(USER_TOKEN),
+        )
+        .await;
+        assert_eq!(second_page.status, StatusCode::OK, "{:?}", second_page.body);
+        assert_eq!(
+            second_page.body["resources"][0]["audit_event_id"],
+            "audit_middle_external_identity"
+        );
+        assert_eq!(second_page.body["next_cursor"], "2");
+
+        let body_text = serde_json::to_string(&first_page.body)
+            .unwrap_or_else(|error| panic!("audit list body should serialize: {error}"));
+        assert!(!body_text.contains(TARGET_TOKEN));
+    }
+
+    #[tokio::test]
+    async fn admin_audit_event_list_filters_and_validates_cursor() {
+        let state = audit_event_list_state();
+
+        let filtered = request_json(
+            state.clone(),
+            Method::GET,
+            "/admin/v1/audit-events?strong_auth_confirmation=confirm&event_type=platform.user.status.update&resource_kind=User",
+            auth_headers(USER_TOKEN),
+        )
+        .await;
+        assert_eq!(filtered.status, StatusCode::OK, "{:?}", filtered.body);
+        assert_eq!(filtered.body["total_filtered_count"], 1);
+        assert_eq!(filtered.body["resources"][0]["resource_id"], TARGET_USER_ID);
+
+        let invalid_cursor = request_json(
+            state.clone(),
+            Method::GET,
+            "/admin/v1/audit-events?strong_auth_confirmation=confirm&cursor=abc",
+            auth_headers(USER_TOKEN),
+        )
+        .await;
+        assert_eq!(invalid_cursor.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            invalid_cursor.body["error"]["code"],
+            "audit_event_cursor_invalid"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_organization_member_remove_cascades_role_bindings() {
+        let role_bindings = role_binding_store([
+            role_binding_record(
+                "rb_target_org_admin",
+                Some(ORGANIZATION_ID),
+                None,
+                TARGET_USER_ID,
+                BuiltInRole::OrganizationAdmin,
+            ),
+            role_binding_record(
+                "rb_target_project_viewer",
+                Some(ORGANIZATION_ID),
+                Some(PROJECT_ID),
+                TARGET_USER_ID,
+                BuiltInRole::ProjectViewer,
+            ),
+        ]);
+        let state = project_state(USER_ID, BuiltInRole::OrganizationAdmin, [])
+            .with_membership_store(membership_store_for_principal(
+                "om_target",
+                "pm_target",
+                TARGET_USER_ID,
+            ))
+            .with_role_binding_store(role_bindings);
+
+        let removed = request_json_body(
+            state.clone(),
+            Method::POST,
+            "/admin/v1/organizations/org_test/members/om_target/remove",
+            auth_headers(USER_TOKEN),
+            json!({
+                "expected_version": 1,
+                "reason": "Remove departed user."
+            }),
+        )
+        .await;
+        assert_eq!(removed.status, StatusCode::OK, "{:?}", removed.body);
+        assert_eq!(removed.body["resource"]["status"], "removed");
+        assert_eq!(removed.body["removed"], true);
+        assert_eq!(removed.body["cascaded_project_member_count"], 1);
+        assert_eq!(removed.body["cascaded_role_binding_count"], 2);
+        assert_eq!(removed.body["reason_recorded"], true);
+
+        let project_member = request_json(
+            state.clone(),
+            Method::GET,
+            "/admin/v1/projects/prj_test/members/pm_target",
+            auth_headers(USER_TOKEN),
+        )
+        .await;
+        assert_eq!(
+            project_member.status,
+            StatusCode::OK,
+            "{:?}",
+            project_member.body
+        );
+        assert_eq!(project_member.body["resource"]["status"], "removed");
+        assert!(state
+            .role_bindings()
+            .active_role_bindings_for_principal(TENANT_ID, TARGET_USER_ID)
+            .is_empty());
     }
 
     #[tokio::test]
@@ -6507,6 +8886,199 @@ mod tests {
         store
     }
 
+    fn membership_store_for_principal(
+        organization_member_id: &str,
+        project_member_id: &str,
+        principal_id: &str,
+    ) -> InMemoryPlatformMembershipStore {
+        let store = InMemoryPlatformMembershipStore::new();
+        store
+            .record_organization_member(PlatformOrganizationMembershipRecord {
+                organization_member_id: organization_member_id.to_owned(),
+                tenant_id: TENANT_ID.to_owned(),
+                organization_id: ORGANIZATION_ID.to_owned(),
+                principal_id: principal_id.to_owned(),
+                membership_kind: "user".to_owned(),
+                status: PlatformMembershipStatus::Active,
+                resource_version: 1,
+            })
+            .unwrap_or_else(|error| panic!("organization membership should be valid: {error:?}"));
+        store
+            .record_project_member(PlatformProjectMembershipRecord {
+                project_member_id: project_member_id.to_owned(),
+                tenant_id: TENANT_ID.to_owned(),
+                organization_id: ORGANIZATION_ID.to_owned(),
+                project_id: PROJECT_ID.to_owned(),
+                principal_id: principal_id.to_owned(),
+                organization_member_id: Some(organization_member_id.to_owned()),
+                membership_kind: "user".to_owned(),
+                status: PlatformMembershipStatus::Active,
+                resource_version: 1,
+            })
+            .unwrap_or_else(|error| panic!("project membership should be valid: {error:?}"));
+        store
+    }
+
+    fn role_binding_admin_and_target_state<const N: usize>(
+        role_bindings: InMemoryPlatformRoleBindingStore,
+        resources: [PlatformResourceRecord; N],
+    ) -> PlatformServiceState {
+        let owner_store = InMemoryResourceOwnerStore::new();
+        let resource_store = InMemoryPlatformResourceStore::new();
+        for resource in resources {
+            assert_eq!(
+                owner_store.record_resource_owner(resource.owner.clone()),
+                Ok(())
+            );
+            assert_eq!(resource_store.record_platform_resource(resource), Ok(()));
+        }
+        let auth_sessions = InMemoryPlatformAuthSessionStore::new();
+        assert_eq!(
+            auth_sessions.record_auth_session(PlatformAuthSessionRecord::active(
+                "sess_admin",
+                USER_TOKEN,
+                authenticated_actor(ActorKind::User, USER_ID),
+            )),
+            Ok(())
+        );
+        assert_eq!(
+            auth_sessions.record_auth_session(PlatformAuthSessionRecord::active(
+                "sess_target",
+                TARGET_TOKEN,
+                authenticated_actor(ActorKind::User, TARGET_USER_ID),
+            )),
+            Ok(())
+        );
+        let grants =
+            ActionGrant::for_builtin_role(TENANT_ID, TENANT_ID, USER_ID, BuiltInRole::TenantOwner);
+        PlatformServiceState::with_resources(
+            owner_store,
+            auth_sessions,
+            InMemoryPlatformBearerCredentialStore::new(),
+            resource_store,
+            FoundationAuthorizationEngine::new(grants),
+        )
+        .with_membership_store(membership_store_for_principal(
+            "om_target",
+            "pm_target",
+            TARGET_USER_ID,
+        ))
+        .with_role_binding_store(role_bindings)
+        .with_user_store(user_store([USER_ID, TARGET_USER_ID]))
+    }
+
+    fn user_store<const N: usize>(user_ids: [&str; N]) -> InMemoryPlatformUserStore {
+        let store = InMemoryPlatformUserStore::new();
+        for user_id in user_ids {
+            store
+                .record_user(PlatformUserRecord {
+                    user_id: user_id.to_owned(),
+                    tenant_id: TENANT_ID.to_owned(),
+                    default_organization_id: Some(ORGANIZATION_ID.to_owned()),
+                    default_project_id: Some(PROJECT_ID.to_owned()),
+                    primary_email: Some(format!("{user_id}@example.com")),
+                    display_name: user_id.to_owned(),
+                    status: PlatformUserStatus::Active,
+                    resource_version: 1,
+                })
+                .unwrap_or_else(|error| panic!("user should be valid: {error:?}"));
+        }
+        store
+    }
+
+    fn platform_audit_event(
+        audit_event_id: &str,
+        event_type: &str,
+        action_id: &str,
+        resource_kind: &str,
+        resource_id: &str,
+        created_at_unix: i64,
+    ) -> PlatformAuditEventRecord {
+        PlatformAuditEventRecord {
+            audit_event_id: audit_event_id.to_owned(),
+            tenant_id: TENANT_ID.to_owned(),
+            organization_id: Some(ORGANIZATION_ID.to_owned()),
+            project_id: Some(PROJECT_ID.to_owned()),
+            actor_principal_id: USER_ID.to_owned(),
+            actor_kind: ActorKind::User,
+            action_id: action_id.to_owned(),
+            resource_kind: resource_kind.to_owned(),
+            resource_id: resource_id.to_owned(),
+            event_type: event_type.to_owned(),
+            reason: Some("Operator confirmed request.".to_owned()),
+            redaction: PLATFORM_AUDIT_REDACTION_PROFILE.to_owned(),
+            created_at_unix,
+        }
+    }
+
+    fn audit_event_list_state() -> PlatformServiceState {
+        let state =
+            role_binding_admin_and_target_state(InMemoryPlatformRoleBindingStore::new(), []);
+        for event in [
+            platform_audit_event(
+                "audit_old_user",
+                "platform.user.status.update",
+                "platform.user.write",
+                "User",
+                TARGET_USER_ID,
+                100,
+            ),
+            platform_audit_event(
+                "audit_new_session",
+                "platform.auth_session.revoke",
+                "platform.auth_session.revoke",
+                "AuthSession",
+                "sess_target",
+                300,
+            ),
+            platform_audit_event(
+                "audit_middle_external_identity",
+                "platform.external_identity.unlink",
+                "platform.external_identity.unlink",
+                "ExternalIdentity",
+                "xid_target",
+                200,
+            ),
+        ] {
+            state
+                .audits()
+                .record_audit_event(event)
+                .unwrap_or_else(|error| panic!("audit event should record: {error:?}"));
+        }
+        state
+    }
+
+    fn role_binding_store<const N: usize>(
+        records: [PlatformRoleBindingRecord; N],
+    ) -> InMemoryPlatformRoleBindingStore {
+        let store = InMemoryPlatformRoleBindingStore::new();
+        for record in records {
+            store
+                .record_role_binding(record)
+                .unwrap_or_else(|error| panic!("role binding should be valid: {error:?}"));
+        }
+        store
+    }
+
+    fn role_binding_record(
+        role_binding_id: &str,
+        organization_id: Option<&str>,
+        project_id: Option<&str>,
+        principal_id: &str,
+        role: BuiltInRole,
+    ) -> PlatformRoleBindingRecord {
+        PlatformRoleBindingRecord {
+            role_binding_id: role_binding_id.to_owned(),
+            tenant_id: TENANT_ID.to_owned(),
+            organization_id: organization_id.map(ToOwned::to_owned),
+            project_id: project_id.map(ToOwned::to_owned),
+            principal_id: principal_id.to_owned(),
+            role_id: role.as_str().to_owned(),
+            status: PlatformRoleBindingStatus::Active,
+            resource_version: 1,
+        }
+    }
+
     fn membership_store_with_removed_organization_member() -> InMemoryPlatformMembershipStore {
         let store = membership_store();
         store
@@ -6559,6 +9131,48 @@ mod tests {
                 panic!("suspended organization member should be valid: {error:?}")
             });
         store
+    }
+
+    fn external_identity_store() -> InMemoryPlatformExternalIdentityStore {
+        let store = InMemoryPlatformExternalIdentityStore::new();
+        store
+            .record_external_identity(PlatformExternalIdentityRecord {
+                external_identity_id: "xid_test".to_owned(),
+                tenant_id: TENANT_ID.to_owned(),
+                principal_id: USER_ID.to_owned(),
+                identity_provider_id: "idp_oidc".to_owned(),
+                provider_kind: "oidc".to_owned(),
+                provider_subject: "oidc-subject-123".to_owned(),
+                email: Some("user@example.com".to_owned()),
+                email_verified: true,
+                status: PlatformExternalIdentityStatus::Active,
+            })
+            .unwrap_or_else(|error| panic!("external identity should be valid: {error:?}"));
+        store
+            .record_external_identity(PlatformExternalIdentityRecord {
+                external_identity_id: "xid_single_user".to_owned(),
+                tenant_id: TENANT_ID.to_owned(),
+                principal_id: USER_ID.to_owned(),
+                identity_provider_id: "idp_single_user".to_owned(),
+                provider_kind: "single_user".to_owned(),
+                provider_subject: "admin".to_owned(),
+                email: None,
+                email_verified: false,
+                status: PlatformExternalIdentityStatus::Active,
+            })
+            .unwrap_or_else(|error| panic!("single-user identity should be valid: {error:?}"));
+        store
+    }
+
+    fn assert_oidc_external_identity_recorded(state: &PlatformServiceState, principal_id: &str) {
+        let identities = state
+            .external_identities()
+            .external_identities_for_principal(TENANT_ID, principal_id);
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].provider_kind, "oidc");
+        assert_eq!(identities[0].provider_subject, "oidc-user-456");
+        assert_eq!(identities[0].email.as_deref(), Some("owner@example.com"));
+        assert!(identities[0].email_verified);
     }
 
     fn invitation_store() -> InMemoryPlatformInvitationStore {

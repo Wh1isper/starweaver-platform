@@ -142,6 +142,13 @@ Before extracting any shared auth/authz crate, add contract tests that prove:
 - session revocation and user disable behavior are visible to both services
   through the shared contract without sharing router internals
 
+The first cross-service contract test lives in the platform crate integration
+tests. It intentionally imports the gateway as a development-only dependency
+and does not add a runtime dependency between services. The current coverage
+proves action namespace separation, shared tenant/organization/project scope
+labels, service-specific actor gates, resource-kind compatibility, and
+built-in role namespace isolation.
+
 ## Migration Rules
 
 Any future extraction must follow these rules:
@@ -166,6 +173,13 @@ item-filtering, opaque bearer session/API-key/service-token authentication,
 route metadata, resource ownership, safe business resource projections, and
 foundation HTTP handler tests for conversations, runs, approvals, environment
 attachments, deferred tools, and evidence archives.
+
+Initial Stage 13 contract tests now compare gateway and platform auth/authz
+surfaces without extracting code. They verify that `gateway.*` and `platform.*`
+actions remain disjoint, shared scope labels keep the same tenant,
+organization, and project semantics, service-specific credential gates do not
+widen sensitive permissions, resource-kind mismatches fail in both engines, and
+built-in tenant-owner roles expand only to their own service namespace.
 
 The agent platform also has a service-local durable schema foundation for
 identity providers, generic OIDC external identities, auth sessions, bearer

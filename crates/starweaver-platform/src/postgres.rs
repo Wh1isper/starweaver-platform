@@ -6,14 +6,19 @@ use sqlx::postgres::{PgPool, PgRow};
 use sqlx::{Postgres, Row, Transaction};
 
 use crate::action::{ActorKind, AuthenticatedActor, BuiltInRole};
+use crate::audit::{
+    validate_platform_audit_event_record, PlatformAuditError, PlatformAuditEventRecord,
+};
 use crate::auth::{
     hash_bearer_credential_token, hash_session_token, AuthError, PlatformAuthSessionRecord,
     PlatformAuthSessionStatus, PlatformBearerCredentialRecord, PlatformMtlsIdentityRecord,
 };
 use crate::identity::{
-    hash_oidc_login_state, validate_oidc_login_attempt_record, validate_oidc_login_provider_base,
-    OidcLoginAttemptRecord, OidcLoginAttemptStatus, OidcLoginProviderRecord,
-    OidcLoginProviderStatus, OidcTokenEndpointAuthMethod, OidcValidationError,
+    hash_oidc_login_state, validate_external_identity, validate_oidc_login_attempt_record,
+    validate_oidc_login_provider_base, OidcLoginAttemptRecord, OidcLoginAttemptStatus,
+    OidcLoginProviderRecord, OidcLoginProviderStatus, OidcTokenEndpointAuthMethod,
+    OidcValidationError, PlatformExternalIdentityError, PlatformExternalIdentityRecord,
+    PlatformExternalIdentityStatus,
 };
 use crate::invitation::{
     validate_organization_invitation, AcceptPlatformOrganizationInvitationRequest,
@@ -30,12 +35,19 @@ use crate::resource::{
     EvidenceArchiveRecord, PlatformResourceData, PlatformResourceError, PlatformResourceRecord,
     RunRecord,
 };
+use crate::role::{
+    validate_role_binding, PlatformRoleBindingError, PlatformRoleBindingRecord,
+    PlatformRoleBindingStatus, PlatformRoleBindingUpsert,
+};
 use crate::secret::{
     resolve_environment_secret, validate_secret_ref_record, PlatformSecretError,
     PlatformSecretRefRecord, PlatformSecretRefStatus, PlatformSecretValue,
     ENVIRONMENT_SECRET_BACKEND,
 };
 use crate::storage::{ResourceOwnerRecord, StoreError};
+use crate::user::{
+    validate_platform_user_record, PlatformUserError, PlatformUserRecord, PlatformUserStatus,
+};
 
 /// Result type returned by `PostgreSQL` platform repository adapters.
 pub type Result<T> = std::result::Result<T, PlatformRepositoryError>;
@@ -136,6 +148,178 @@ RETURNING
     status,
     (expires_at IS NOT NULL AND expires_at <= now()) AS token_expired
 ";
+
+const LIST_AUTH_SESSIONS_FOR_PRINCIPAL_SQL: &str = r"
+SELECT
+    auth_session_id,
+    token_hash,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    actor_kind,
+    status,
+    (expires_at IS NOT NULL AND expires_at <= now()) AS token_expired
+FROM platform_auth_sessions
+WHERE tenant_id = $1
+  AND principal_id = $2
+ORDER BY auth_session_id
+";
+
+const SELECT_AUTH_SESSION_BY_ID_SQL: &str = r"
+SELECT
+    auth_session_id,
+    token_hash,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    actor_kind,
+    status,
+    (expires_at IS NOT NULL AND expires_at <= now()) AS token_expired
+FROM platform_auth_sessions
+WHERE auth_session_id = $1
+";
+
+const REVOKE_AUTH_SESSION_BY_ID_SQL: &str = r"
+UPDATE platform_auth_sessions
+SET
+    status = 'revoked',
+    revoked_at = now(),
+    resource_version = resource_version + 1,
+    updated_at = now()
+WHERE auth_session_id = $1
+  AND tenant_id = $2
+  AND principal_id = $3
+  AND status = 'active'
+RETURNING
+    auth_session_id,
+    token_hash,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    actor_kind,
+    status,
+    (expires_at IS NOT NULL AND expires_at <= now()) AS token_expired
+";
+
+const DISABLE_AUTH_SESSIONS_FOR_PRINCIPAL_SQL: &str = r"
+UPDATE platform_auth_sessions
+SET
+    status = 'principal_disabled',
+    resource_version = resource_version + 1,
+    updated_at = now()
+WHERE tenant_id = $1
+  AND principal_id = $2
+  AND status = 'active'
+";
+
+const LIST_PLATFORM_USERS_SQL: &str = r"
+SELECT
+    user_id,
+    tenant_id,
+    default_organization_id,
+    default_project_id,
+    primary_email,
+    display_name,
+    status,
+    resource_version
+FROM platform_users
+WHERE tenant_id = $1
+  AND status <> 'deleted'
+ORDER BY user_id
+";
+
+const SELECT_PLATFORM_USER_SQL: &str = r"
+SELECT
+    user_id,
+    tenant_id,
+    default_organization_id,
+    default_project_id,
+    primary_email,
+    display_name,
+    status,
+    resource_version
+FROM platform_users
+WHERE user_id = $1
+  AND status <> 'deleted'
+";
+
+const SELECT_PLATFORM_USER_INCLUDING_DELETED_SQL: &str = r"
+SELECT
+    user_id,
+    tenant_id,
+    default_organization_id,
+    default_project_id,
+    primary_email,
+    display_name,
+    status,
+    resource_version
+FROM platform_users
+WHERE user_id = $1
+";
+
+const UPDATE_PLATFORM_USER_STATUS_SQL: &str = r"
+UPDATE platform_users
+SET
+    status = $2,
+    resource_version = resource_version + 1,
+    updated_at = now()
+WHERE user_id = $1
+  AND resource_version = $3
+  AND status <> 'deleted'
+RETURNING
+    user_id,
+    tenant_id,
+    default_organization_id,
+    default_project_id,
+    primary_email,
+    display_name,
+    status,
+    resource_version
+	";
+
+const RECORD_PLATFORM_AUDIT_EVENT_SQL: &str = r"
+INSERT INTO platform_audit_events (
+    audit_event_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    actor_principal_id,
+    actor_kind,
+    action_id,
+    resource_kind,
+    resource_id,
+    event_type,
+    reason,
+    redaction,
+    created_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11, ''), $12, to_timestamp($13))
+ON CONFLICT (audit_event_id)
+DO NOTHING
+	";
+
+const LIST_PLATFORM_AUDIT_EVENTS_FOR_TENANT_SQL: &str = r"
+SELECT
+    audit_event_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    actor_principal_id,
+    actor_kind,
+    action_id,
+    resource_kind,
+    resource_id,
+    event_type,
+    reason,
+    redaction,
+    extract(epoch from created_at)::bigint AS created_at_unix
+FROM platform_audit_events
+WHERE tenant_id = $1
+ORDER BY created_at DESC, audit_event_id DESC
+	";
 
 const RECORD_BEARER_CREDENTIAL_SQL: &str = r"
 INSERT INTO platform_bearer_credentials (
@@ -392,6 +576,187 @@ FROM platform_secret_refs
 WHERE tenant_id = $1
   AND status <> 'deleted'
 ORDER BY secret_ref_id
+";
+
+const LIST_EXTERNAL_IDENTITIES_FOR_PRINCIPAL_SQL: &str = r"
+SELECT
+    external_identity_id,
+    tenant_id,
+    principal_id,
+    identity_provider_id,
+    provider_kind,
+    provider_subject,
+    email,
+    email_verified,
+    status
+FROM platform_external_identities
+WHERE tenant_id = $1
+  AND principal_id = $2
+  AND status <> 'deleted'
+ORDER BY external_identity_id
+";
+
+const SELECT_EXTERNAL_IDENTITY_SQL: &str = r"
+SELECT
+    external_identity_id,
+    tenant_id,
+    principal_id,
+    identity_provider_id,
+    provider_kind,
+    provider_subject,
+    email,
+    email_verified,
+    status
+FROM platform_external_identities
+WHERE external_identity_id = $1
+  AND status <> 'deleted'
+";
+
+const UNLINK_EXTERNAL_IDENTITY_SQL: &str = r"
+UPDATE platform_external_identities
+SET
+    status = 'deleted',
+    updated_at = now()
+WHERE external_identity_id = $1
+  AND status <> 'deleted'
+RETURNING
+    external_identity_id,
+    tenant_id,
+    principal_id,
+    identity_provider_id,
+    provider_kind,
+    provider_subject,
+    email,
+    email_verified,
+    status
+";
+
+const LIST_ROLE_BINDINGS_SQL: &str = r"
+SELECT
+    role_binding_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    role_id,
+    status,
+    resource_version
+FROM platform_role_bindings
+WHERE tenant_id = $1
+  AND status <> 'deleted'
+ORDER BY role_binding_id
+";
+
+const ACTIVE_ROLE_BINDINGS_FOR_PRINCIPAL_SQL: &str = r"
+SELECT
+    role_binding_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    role_id,
+    status,
+    resource_version
+FROM platform_role_bindings
+WHERE tenant_id = $1
+  AND principal_id = $2
+  AND status = 'active'
+ORDER BY role_binding_id
+";
+
+const SELECT_ROLE_BINDING_SQL: &str = r"
+SELECT
+    role_binding_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    role_id,
+    status,
+    resource_version
+FROM platform_role_bindings
+WHERE role_binding_id = $1
+  AND status <> 'deleted'
+";
+
+const UPSERT_ROLE_BINDING_SQL: &str = r"
+INSERT INTO platform_role_bindings (
+    role_binding_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    role_id,
+    status,
+    created_by,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, now(), now())
+ON CONFLICT (role_binding_id)
+DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
+    organization_id = EXCLUDED.organization_id,
+    project_id = EXCLUDED.project_id,
+    principal_id = EXCLUDED.principal_id,
+    role_id = EXCLUDED.role_id,
+    status = 'active',
+    resource_version = platform_role_bindings.resource_version + 1,
+    updated_at = now()
+RETURNING
+    role_binding_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    role_id,
+    status,
+    resource_version
+";
+
+const UPDATE_ROLE_BINDING_STATUS_SQL: &str = r"
+UPDATE platform_role_bindings
+SET
+    status = $2,
+    resource_version = resource_version + 1,
+    updated_at = now()
+WHERE role_binding_id = $1
+  AND resource_version = $3
+RETURNING
+    role_binding_id,
+    tenant_id,
+    organization_id,
+    project_id,
+    principal_id,
+    role_id,
+    status,
+    resource_version
+";
+
+const DELETE_ROLE_BINDINGS_FOR_ORGANIZATION_PRINCIPAL_SQL: &str = r"
+UPDATE platform_role_bindings
+SET
+    status = 'deleted',
+    resource_version = resource_version + 1,
+    updated_at = now()
+WHERE tenant_id = $1
+  AND organization_id = $2
+  AND principal_id = $3
+  AND status <> 'deleted'
+RETURNING role_binding_id
+";
+
+const DELETE_ROLE_BINDINGS_FOR_PROJECT_PRINCIPAL_SQL: &str = r"
+UPDATE platform_role_bindings
+SET
+    status = 'deleted',
+    resource_version = resource_version + 1,
+    updated_at = now()
+WHERE tenant_id = $1
+  AND project_id = $2
+  AND principal_id = $3
+  AND status <> 'deleted'
+RETURNING role_binding_id
 ";
 
 const LIST_ORGANIZATION_MEMBERS_SQL: &str = r"
@@ -924,7 +1289,7 @@ DO UPDATE SET
     tenant_id = EXCLUDED.tenant_id,
     principal_kind = 'user',
     display_name = EXCLUDED.display_name,
-    status = 'active',
+    status = platform_principals.status,
     resource_version = platform_principals.resource_version + 1,
     updated_at = now()
 ";
@@ -949,7 +1314,7 @@ DO UPDATE SET
     default_project_id = EXCLUDED.default_project_id,
     primary_email = EXCLUDED.primary_email,
     display_name = EXCLUDED.display_name,
-    status = 'active',
+    status = platform_users.status,
     resource_version = platform_users.resource_version + 1,
     updated_at = now()
 ";
@@ -1521,6 +1886,14 @@ pub enum PlatformRepositoryError {
     Invitation(PlatformInvitationError),
     /// Secret-reference validation or resolution failed.
     Secret(PlatformSecretError),
+    /// External identity validation failed.
+    ExternalIdentity(PlatformExternalIdentityError),
+    /// Role-binding validation failed.
+    RoleBinding(PlatformRoleBindingError),
+    /// User validation failed.
+    User(PlatformUserError),
+    /// Audit-event validation failed.
+    Audit(PlatformAuditError),
     /// Database operation failed.
     Database(String),
     /// Actor kind stored in `PostgreSQL` is not recognized.
@@ -1541,6 +1914,12 @@ pub enum PlatformRepositoryError {
     UnknownMembershipStatus(String),
     /// Invitation status stored in `PostgreSQL` is not recognized.
     UnknownInvitationStatus(String),
+    /// External identity status stored in `PostgreSQL` is not recognized.
+    UnknownExternalIdentityStatus(String),
+    /// Role-binding status stored in `PostgreSQL` is not recognized.
+    UnknownRoleBindingStatus(String),
+    /// User status stored in `PostgreSQL` is not recognized.
+    UnknownUserStatus(String),
     /// `OIDC` login attempt cannot be consumed.
     OidcLoginAttemptUnavailable(String),
     /// `OIDC` external identity already points at a different principal.
@@ -1563,6 +1942,10 @@ impl PlatformRepositoryError {
             Self::Membership(error) => error.as_str(),
             Self::Invitation(error) => error.as_str(),
             Self::Secret(error) => error.as_str(),
+            Self::ExternalIdentity(error) => error.as_str(),
+            Self::RoleBinding(error) => error.as_str(),
+            Self::User(error) => error.as_str(),
+            Self::Audit(error) => error.as_str(),
             Self::Database(_) => "database_error",
             Self::UnknownActorKind(_) => "unknown_actor_kind",
             Self::UnknownSessionStatus(_) => "unknown_session_status",
@@ -1573,6 +1956,9 @@ impl PlatformRepositoryError {
             Self::UnknownSecretRefStatus(_) => "unknown_secret_ref_status",
             Self::UnknownMembershipStatus(_) => "unknown_membership_status",
             Self::UnknownInvitationStatus(_) => "unknown_invitation_status",
+            Self::UnknownExternalIdentityStatus(_) => "unknown_external_identity_status",
+            Self::UnknownRoleBindingStatus(_) => "unknown_role_binding_status",
+            Self::UnknownUserStatus(_) => "unknown_user_status",
             Self::OidcLoginAttemptUnavailable(_) => "oidc_login_attempt_unavailable",
             Self::OidcExternalIdentityPrincipalMismatch(_) => {
                 "oidc_external_identity_principal_mismatch"
@@ -1597,6 +1983,14 @@ impl Display for PlatformRepositoryError {
                 write!(formatter, "invitation repository error: {error:?}")
             }
             Self::Secret(error) => write!(formatter, "secret repository error: {error:?}"),
+            Self::ExternalIdentity(error) => {
+                write!(formatter, "external identity repository error: {error:?}")
+            }
+            Self::RoleBinding(error) => {
+                write!(formatter, "role binding repository error: {error:?}")
+            }
+            Self::User(error) => write!(formatter, "user repository error: {error:?}"),
+            Self::Audit(error) => write!(formatter, "audit repository error: {error:?}"),
             Self::Database(message) => write!(formatter, "database repository error: {message}"),
             Self::UnknownActorKind(value) => write!(formatter, "unknown actor kind: {value}"),
             Self::UnknownSessionStatus(value) => {
@@ -1623,6 +2017,13 @@ impl Display for PlatformRepositoryError {
             Self::UnknownInvitationStatus(value) => {
                 write!(formatter, "unknown invitation status: {value}")
             }
+            Self::UnknownExternalIdentityStatus(value) => {
+                write!(formatter, "unknown external identity status: {value}")
+            }
+            Self::UnknownRoleBindingStatus(value) => {
+                write!(formatter, "unknown role binding status: {value}")
+            }
+            Self::UnknownUserStatus(value) => write!(formatter, "unknown user status: {value}"),
             Self::OidcLoginAttemptUnavailable(value) => {
                 write!(formatter, "OIDC login attempt unavailable: {value}")
             }
@@ -1689,6 +2090,30 @@ impl From<PlatformInvitationError> for PlatformRepositoryError {
 impl From<PlatformSecretError> for PlatformRepositoryError {
     fn from(error: PlatformSecretError) -> Self {
         Self::Secret(error)
+    }
+}
+
+impl From<PlatformExternalIdentityError> for PlatformRepositoryError {
+    fn from(error: PlatformExternalIdentityError) -> Self {
+        Self::ExternalIdentity(error)
+    }
+}
+
+impl From<PlatformRoleBindingError> for PlatformRepositoryError {
+    fn from(error: PlatformRoleBindingError) -> Self {
+        Self::RoleBinding(error)
+    }
+}
+
+impl From<PlatformUserError> for PlatformRepositoryError {
+    fn from(error: PlatformUserError) -> Self {
+        Self::User(error)
+    }
+}
+
+impl From<PlatformAuditError> for PlatformRepositoryError {
+    fn from(error: PlatformAuditError) -> Self {
+        Self::Audit(error)
     }
 }
 
@@ -1993,6 +2418,201 @@ impl PostgresPlatformRepository {
         active_auth_session_from_row(&row)
     }
 
+    /// Lists durable auth sessions for one tenant principal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried or
+    /// a stored session shape is invalid.
+    pub async fn auth_sessions_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_id: &str,
+    ) -> Result<Vec<PlatformAuthSessionRecord>> {
+        let rows = sqlx::query(LIST_AUTH_SESSIONS_FOR_PRINCIPAL_SQL)
+            .bind(tenant_id)
+            .bind(principal_id)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(auth_session_from_row).collect()
+    }
+
+    /// Loads a durable auth session by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried or
+    /// a stored session shape is invalid.
+    pub async fn auth_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<PlatformAuthSessionRecord>> {
+        let row = sqlx::query(SELECT_AUTH_SESSION_BY_ID_SQL)
+            .bind(session_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| auth_session_from_row(&row)).transpose()
+    }
+
+    /// Revokes an active durable auth session by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when the session is not active, does
+    /// not belong to the requested tenant principal, or `PostgreSQL` cannot be
+    /// queried.
+    pub async fn revoke_auth_session_by_id(
+        &self,
+        session_id: &str,
+        tenant_id: &str,
+        principal_id: &str,
+    ) -> Result<PlatformAuthSessionRecord> {
+        let Some(row) = sqlx::query(REVOKE_AUTH_SESSION_BY_ID_SQL)
+            .bind(session_id)
+            .bind(tenant_id)
+            .bind(principal_id)
+            .fetch_optional(&self.pool)
+            .await?
+        else {
+            return Err(AuthError::SessionNotFound.into());
+        };
+        auth_session_from_row(&row)
+    }
+
+    /// Marks active sessions for one tenant principal as principal-disabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be updated.
+    pub async fn disable_auth_sessions_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_id: &str,
+    ) -> Result<u64> {
+        let result = sqlx::query(DISABLE_AUTH_SESSIONS_FOR_PRINCIPAL_SQL)
+            .bind(tenant_id)
+            .bind(principal_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Lists non-deleted platform users for one tenant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried or
+    /// a stored user shape is invalid.
+    pub async fn users_for_tenant(&self, tenant_id: &str) -> Result<Vec<PlatformUserRecord>> {
+        let rows = sqlx::query(LIST_PLATFORM_USERS_SQL)
+            .bind(tenant_id)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(platform_user_from_row).collect()
+    }
+
+    /// Loads a non-deleted platform user by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried or
+    /// a stored user shape is invalid.
+    pub async fn user(&self, user_id: &str) -> Result<Option<PlatformUserRecord>> {
+        let row = sqlx::query(SELECT_PLATFORM_USER_SQL)
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| platform_user_from_row(&row)).transpose()
+    }
+
+    /// Loads a platform user by id, including deleted users.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried or
+    /// a stored user shape is invalid.
+    pub async fn user_including_deleted(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<PlatformUserRecord>> {
+        let row = sqlx::query(SELECT_PLATFORM_USER_INCLUDING_DELETED_SQL)
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| platform_user_from_row(&row)).transpose()
+    }
+
+    /// Updates a platform user's status using optimistic concurrency.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when the user is unknown, the expected
+    /// version is stale, validation fails, or `PostgreSQL` rejects the update.
+    pub async fn update_user_status(
+        &self,
+        user_id: &str,
+        expected_version: i64,
+        status: PlatformUserStatus,
+    ) -> Result<PlatformUserRecord> {
+        if expected_version < 1 {
+            return Err(PlatformUserError::InvalidResourceVersion.into());
+        }
+        let Some(row) = sqlx::query(UPDATE_PLATFORM_USER_STATUS_SQL)
+            .bind(user_id)
+            .bind(status.as_str())
+            .bind(expected_version)
+            .fetch_optional(&self.pool)
+            .await?
+        else {
+            return Err(PlatformUserError::StaleResourceVersion.into());
+        };
+        platform_user_from_row(&row)
+    }
+
+    /// Records a redacted platform audit event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when validation fails or `PostgreSQL`
+    /// rejects the write.
+    pub async fn record_audit_event(&self, record: &PlatformAuditEventRecord) -> Result<()> {
+        validate_platform_audit_event_record(record)?;
+        sqlx::query(RECORD_PLATFORM_AUDIT_EVENT_SQL)
+            .bind(&record.audit_event_id)
+            .bind(&record.tenant_id)
+            .bind(record.organization_id.as_deref())
+            .bind(record.project_id.as_deref())
+            .bind(&record.actor_principal_id)
+            .bind(actor_kind_as_str(record.actor_kind))
+            .bind(&record.action_id)
+            .bind(&record.resource_kind)
+            .bind(&record.resource_id)
+            .bind(&record.event_type)
+            .bind(record.reason.as_deref().unwrap_or(""))
+            .bind(&record.redaction)
+            .bind(record.created_at_unix)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Lists redacted platform audit events for one tenant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried or
+    /// a stored event shape is invalid.
+    pub async fn audit_events_for_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<PlatformAuditEventRecord>> {
+        let rows = sqlx::query(LIST_PLATFORM_AUDIT_EVENTS_FOR_TENANT_SQL)
+            .bind(tenant_id)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(platform_audit_event_from_row).collect()
+    }
+
     /// Records or replaces an API key or service-token bearer credential.
     ///
     /// # Errors
@@ -2261,6 +2881,214 @@ impl PostgresPlatformRepository {
             .fetch_all(&self.pool)
             .await?;
         rows.iter().map(secret_ref_from_row).collect()
+    }
+
+    /// Lists non-deleted external identities for one principal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried or
+    /// a stored record shape is invalid.
+    pub async fn external_identities_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_id: &str,
+    ) -> Result<Vec<PlatformExternalIdentityRecord>> {
+        let rows = sqlx::query(LIST_EXTERNAL_IDENTITIES_FOR_PRINCIPAL_SQL)
+            .bind(tenant_id)
+            .bind(principal_id)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(external_identity_from_row).collect()
+    }
+
+    /// Loads a non-deleted external identity by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried or
+    /// a stored record shape is invalid.
+    pub async fn external_identity(
+        &self,
+        external_identity_id: &str,
+    ) -> Result<Option<PlatformExternalIdentityRecord>> {
+        let row = sqlx::query(SELECT_EXTERNAL_IDENTITY_SQL)
+            .bind(external_identity_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| external_identity_from_row(&row)).transpose()
+    }
+
+    /// Marks an external identity deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when the identity is already absent or
+    /// deleted, `PostgreSQL` cannot be queried, or the returned record is invalid.
+    pub async fn unlink_external_identity(
+        &self,
+        external_identity_id: &str,
+    ) -> Result<PlatformExternalIdentityRecord> {
+        let row = sqlx::query(UNLINK_EXTERNAL_IDENTITY_SQL)
+            .bind(external_identity_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else {
+            return Err(PlatformExternalIdentityError::InvalidExternalIdentityId.into());
+        };
+        external_identity_from_row(&row)
+    }
+
+    /// Lists non-deleted role bindings for one tenant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried or
+    /// a stored record shape is invalid.
+    pub async fn role_bindings_for_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<PlatformRoleBindingRecord>> {
+        let rows = sqlx::query(LIST_ROLE_BINDINGS_SQL)
+            .bind(tenant_id)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(role_binding_from_row).collect()
+    }
+
+    /// Lists active role bindings for one principal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried or
+    /// a stored record shape is invalid.
+    pub async fn active_role_bindings_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_id: &str,
+    ) -> Result<Vec<PlatformRoleBindingRecord>> {
+        let rows = sqlx::query(ACTIVE_ROLE_BINDINGS_FOR_PRINCIPAL_SQL)
+            .bind(tenant_id)
+            .bind(principal_id)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(role_binding_from_row).collect()
+    }
+
+    /// Loads a non-deleted role binding by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried or
+    /// a stored record shape is invalid.
+    pub async fn role_binding(
+        &self,
+        role_binding_id: &str,
+    ) -> Result<Option<PlatformRoleBindingRecord>> {
+        let row = sqlx::query(SELECT_ROLE_BINDING_SQL)
+            .bind(role_binding_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| role_binding_from_row(&row)).transpose()
+    }
+
+    /// Creates or reactivates a role binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when validation fails or `PostgreSQL`
+    /// rejects the write.
+    pub async fn upsert_role_binding(
+        &self,
+        request: PlatformRoleBindingUpsert<'_>,
+        created_by: &str,
+    ) -> Result<PlatformRoleBindingRecord> {
+        let candidate = PlatformRoleBindingRecord {
+            role_binding_id: request.role_binding_id.to_owned(),
+            tenant_id: request.tenant_id.to_owned(),
+            organization_id: request.organization_id.map(ToOwned::to_owned),
+            project_id: request.project_id.map(ToOwned::to_owned),
+            principal_id: request.principal_id.to_owned(),
+            role_id: request.role_id.to_owned(),
+            status: PlatformRoleBindingStatus::Active,
+            resource_version: 1,
+        };
+        validate_role_binding(&candidate)?;
+        let row = sqlx::query(UPSERT_ROLE_BINDING_SQL)
+            .bind(request.role_binding_id)
+            .bind(request.tenant_id)
+            .bind(request.organization_id)
+            .bind(request.project_id)
+            .bind(request.principal_id)
+            .bind(request.role_id)
+            .bind(created_by)
+            .fetch_one(&self.pool)
+            .await?;
+        role_binding_from_row(&row)
+    }
+
+    /// Updates a role binding status with optimistic concurrency.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when validation fails, the expected
+    /// version is stale, or `PostgreSQL` rejects the write.
+    pub async fn update_role_binding_status(
+        &self,
+        role_binding_id: &str,
+        expected_resource_version: i64,
+        status: PlatformRoleBindingStatus,
+    ) -> Result<PlatformRoleBindingRecord> {
+        let row = sqlx::query(UPDATE_ROLE_BINDING_STATUS_SQL)
+            .bind(role_binding_id)
+            .bind(status.as_str())
+            .bind(expected_resource_version)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else {
+            return Err(PlatformRoleBindingError::StaleResourceVersion.into());
+        };
+        role_binding_from_row(&row)
+    }
+
+    /// Deletes non-deleted role bindings under one organization for a principal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried.
+    pub async fn delete_role_bindings_for_organization_principal(
+        &self,
+        tenant_id: &str,
+        organization_id: &str,
+        principal_id: &str,
+    ) -> Result<usize> {
+        let rows = sqlx::query(DELETE_ROLE_BINDINGS_FOR_ORGANIZATION_PRINCIPAL_SQL)
+            .bind(tenant_id)
+            .bind(organization_id)
+            .bind(principal_id)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.len())
+    }
+
+    /// Deletes non-deleted role bindings under one project for a principal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformRepositoryError`] when `PostgreSQL` cannot be queried.
+    pub async fn delete_role_bindings_for_project_principal(
+        &self,
+        tenant_id: &str,
+        project_id: &str,
+        principal_id: &str,
+    ) -> Result<usize> {
+        let rows = sqlx::query(DELETE_ROLE_BINDINGS_FOR_PROJECT_PRINCIPAL_SQL)
+            .bind(tenant_id)
+            .bind(project_id)
+            .bind(principal_id)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.len())
     }
 
     /// Resolves raw secret material through a stored environment-backed ref.
@@ -2739,6 +3567,8 @@ impl PostgresPlatformRepository {
                 record.login_attempt_id.clone(),
             ));
         }
+        ensure_oidc_login_user_allows_access_in_transaction(&mut transaction, &record.user_id)
+            .await?;
 
         sqlx::query(UPSERT_OIDC_USER_ORGANIZATION_SQL)
             .bind(&record.organization_id)
@@ -3110,6 +3940,23 @@ async fn record_business_resource_in_transaction(
     Ok(())
 }
 
+async fn ensure_oidc_login_user_allows_access_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+) -> Result<()> {
+    if let Some(row) = sqlx::query(SELECT_PLATFORM_USER_INCLUDING_DELETED_SQL)
+        .bind(user_id)
+        .fetch_optional(&mut **transaction)
+        .await?
+    {
+        let user = platform_user_from_row(&row)?;
+        if !user.status.accepts_access() {
+            return Err(AuthError::PrincipalDisabled.into());
+        }
+    }
+    Ok(())
+}
+
 fn validate_auth_session_record(record: &PlatformAuthSessionRecord) -> Result<()> {
     if record.session_id.trim().is_empty() {
         return Err(AuthError::EmptySessionId.into());
@@ -3354,6 +4201,21 @@ fn secret_ref_status_from_str(value: &str) -> Result<PlatformSecretRefStatus> {
     }
 }
 
+fn external_identity_status_from_str(value: &str) -> Result<PlatformExternalIdentityStatus> {
+    PlatformExternalIdentityStatus::from_id(value)
+        .ok_or_else(|| PlatformRepositoryError::UnknownExternalIdentityStatus(value.to_owned()))
+}
+
+fn role_binding_status_from_str(value: &str) -> Result<PlatformRoleBindingStatus> {
+    PlatformRoleBindingStatus::from_id(value)
+        .ok_or_else(|| PlatformRepositoryError::UnknownRoleBindingStatus(value.to_owned()))
+}
+
+fn user_status_from_str(value: &str) -> Result<PlatformUserStatus> {
+    PlatformUserStatus::from_id(value)
+        .ok_or_else(|| PlatformRepositoryError::UnknownUserStatus(value.to_owned()))
+}
+
 fn membership_status_from_str(value: &str) -> Result<PlatformMembershipStatus> {
     PlatformMembershipStatus::from_id(value)
         .ok_or_else(|| PlatformRepositoryError::UnknownMembershipStatus(value.to_owned()))
@@ -3402,6 +4264,42 @@ fn active_auth_session_from_row(row: &PgRow) -> Result<PlatformAuthSessionRecord
     }
 }
 
+fn platform_user_from_row(row: &PgRow) -> Result<PlatformUserRecord> {
+    let record = PlatformUserRecord {
+        user_id: row.try_get("user_id")?,
+        tenant_id: row.try_get("tenant_id")?,
+        default_organization_id: row.try_get("default_organization_id")?,
+        default_project_id: row.try_get("default_project_id")?,
+        primary_email: row.try_get("primary_email")?,
+        display_name: row.try_get("display_name")?,
+        status: user_status_from_str(&row.try_get::<String, _>("status")?)?,
+        resource_version: row.try_get("resource_version")?,
+    };
+    validate_platform_user_record(&record)?;
+    Ok(record)
+}
+
+fn platform_audit_event_from_row(row: &PgRow) -> Result<PlatformAuditEventRecord> {
+    let actor_kind = actor_kind_from_str(&row.try_get::<String, _>("actor_kind")?)?;
+    let record = PlatformAuditEventRecord {
+        audit_event_id: row.try_get("audit_event_id")?,
+        tenant_id: row.try_get("tenant_id")?,
+        organization_id: row.try_get("organization_id")?,
+        project_id: row.try_get("project_id")?,
+        actor_principal_id: row.try_get("actor_principal_id")?,
+        actor_kind,
+        action_id: row.try_get("action_id")?,
+        resource_kind: row.try_get("resource_kind")?,
+        resource_id: row.try_get("resource_id")?,
+        event_type: row.try_get("event_type")?,
+        reason: row.try_get("reason")?,
+        redaction: row.try_get("redaction")?,
+        created_at_unix: row.try_get("created_at_unix")?,
+    };
+    validate_platform_audit_event_record(&record)?;
+    Ok(record)
+}
+
 fn oidc_login_provider_from_row(row: &PgRow) -> Result<OidcLoginProviderRecord> {
     let status = oidc_login_provider_status_from_str(&row.try_get::<String, _>("status")?)?;
     let token_endpoint_auth_method = oidc_token_endpoint_auth_method_from_str(
@@ -3444,6 +4342,39 @@ fn secret_ref_from_row(row: &PgRow) -> Result<PlatformSecretRefRecord> {
         status,
     };
     validate_secret_ref_record(&record)?;
+    Ok(record)
+}
+
+fn external_identity_from_row(row: &PgRow) -> Result<PlatformExternalIdentityRecord> {
+    let status = external_identity_status_from_str(&row.try_get::<String, _>("status")?)?;
+    let record = PlatformExternalIdentityRecord {
+        external_identity_id: row.try_get("external_identity_id")?,
+        tenant_id: row.try_get("tenant_id")?,
+        principal_id: row.try_get("principal_id")?,
+        identity_provider_id: row.try_get("identity_provider_id")?,
+        provider_kind: row.try_get("provider_kind")?,
+        provider_subject: row.try_get("provider_subject")?,
+        email: row.try_get("email")?,
+        email_verified: row.try_get("email_verified")?,
+        status,
+    };
+    validate_external_identity(&record)?;
+    Ok(record)
+}
+
+fn role_binding_from_row(row: &PgRow) -> Result<PlatformRoleBindingRecord> {
+    let status = role_binding_status_from_str(&row.try_get::<String, _>("status")?)?;
+    let record = PlatformRoleBindingRecord {
+        role_binding_id: row.try_get("role_binding_id")?,
+        tenant_id: row.try_get("tenant_id")?,
+        organization_id: row.try_get("organization_id")?,
+        project_id: row.try_get("project_id")?,
+        principal_id: row.try_get("principal_id")?,
+        role_id: row.try_get("role_id")?,
+        status,
+        resource_version: row.try_get("resource_version")?,
+    };
+    validate_role_binding(&record)?;
     Ok(record)
 }
 
@@ -3572,6 +4503,10 @@ const fn business_resource_table(data: &PlatformResourceData) -> &'static str {
 #[cfg(test)]
 mod tests {
     use crate::action::{ActorKind, AuthenticatedActor};
+    use crate::audit::{
+        validate_platform_audit_event_record, PlatformAuditError, PlatformAuditEventRecord,
+        PLATFORM_AUDIT_REDACTION_PROFILE,
+    };
     use crate::auth::{
         hash_bearer_credential_token, hash_session_token, AuthError, PlatformAuthSessionRecord,
         PlatformAuthSessionStatus, PlatformBearerCredentialKind, PlatformBearerCredentialRecord,
@@ -3589,28 +4524,39 @@ mod tests {
         validate_bearer_credential_record, validate_mtls_identity_record,
         validate_oidc_login_completion_record, validate_platform_resource_record,
         OidcLoginCompletionRecord, PlatformRepositoryError, ACCEPT_ORGANIZATION_INVITATION_SQL,
-        BOOTSTRAP_SINGLE_USER_EXTERNAL_IDENTITY_SQL, BOOTSTRAP_SINGLE_USER_IDENTITY_PROVIDER_SQL,
+        ACTIVE_ROLE_BINDINGS_FOR_PRINCIPAL_SQL, BOOTSTRAP_SINGLE_USER_EXTERNAL_IDENTITY_SQL,
+        BOOTSTRAP_SINGLE_USER_IDENTITY_PROVIDER_SQL,
         BOOTSTRAP_SINGLE_USER_ORGANIZATION_MEMBERSHIP_SQL, BOOTSTRAP_SINGLE_USER_ORGANIZATION_SQL,
         BOOTSTRAP_SINGLE_USER_PRINCIPAL_SQL, BOOTSTRAP_SINGLE_USER_PROJECT_MEMBERSHIP_SQL,
         BOOTSTRAP_SINGLE_USER_PROJECT_SQL, BOOTSTRAP_SINGLE_USER_ROLE_BINDING_SQL,
         BOOTSTRAP_SINGLE_USER_TENANT_SQL, BOOTSTRAP_SINGLE_USER_USER_SQL,
         CASCADE_PROJECT_MEMBERS_FOR_ORGANIZATION_MEMBER_SQL, CONSUME_OIDC_LOGIN_ATTEMPT_SQL,
-        INSERT_ORGANIZATION_INVITATION_SQL, LIST_OIDC_LOGIN_PROVIDERS_SQL,
-        LIST_ORGANIZATION_INVITATIONS_SQL, LIST_ORGANIZATION_MEMBERS_SQL, LIST_PROJECT_MEMBERS_SQL,
-        LIST_SECRET_REFS_SQL, RECORD_AUTH_SESSION_SQL, RECORD_BEARER_CREDENTIAL_SQL,
-        RECORD_MTLS_IDENTITY_SQL, RECORD_OIDC_AUTH_SESSION_SQL, RECORD_OIDC_LOGIN_ATTEMPT_SQL,
-        RECORD_RESOURCE_OWNER_SQL, REVOKE_ORGANIZATION_INVITATION_SQL,
+        DELETE_ROLE_BINDINGS_FOR_ORGANIZATION_PRINCIPAL_SQL,
+        DELETE_ROLE_BINDINGS_FOR_PROJECT_PRINCIPAL_SQL, DISABLE_AUTH_SESSIONS_FOR_PRINCIPAL_SQL,
+        INSERT_ORGANIZATION_INVITATION_SQL, LIST_AUTH_SESSIONS_FOR_PRINCIPAL_SQL,
+        LIST_EXTERNAL_IDENTITIES_FOR_PRINCIPAL_SQL, LIST_OIDC_LOGIN_PROVIDERS_SQL,
+        LIST_ORGANIZATION_INVITATIONS_SQL, LIST_ORGANIZATION_MEMBERS_SQL,
+        LIST_PLATFORM_AUDIT_EVENTS_FOR_TENANT_SQL, LIST_PLATFORM_USERS_SQL,
+        LIST_PROJECT_MEMBERS_SQL, LIST_ROLE_BINDINGS_SQL, LIST_SECRET_REFS_SQL,
+        RECORD_AUTH_SESSION_SQL, RECORD_BEARER_CREDENTIAL_SQL, RECORD_MTLS_IDENTITY_SQL,
+        RECORD_OIDC_AUTH_SESSION_SQL, RECORD_OIDC_LOGIN_ATTEMPT_SQL,
+        RECORD_PLATFORM_AUDIT_EVENT_SQL, RECORD_RESOURCE_OWNER_SQL, REVOKE_AUTH_SESSION_BY_ID_SQL,
+        REVOKE_ORGANIZATION_INVITATION_SQL, SELECT_AUTH_SESSION_BY_ID_SQL,
         SELECT_AUTH_SESSION_BY_TOKEN_SQL, SELECT_BEARER_CREDENTIAL_BY_TOKEN_SQL,
-        SELECT_MTLS_IDENTITY_BY_SUBJECT_SQL, SELECT_OIDC_LOGIN_ATTEMPT_BY_STATE_SQL,
-        SELECT_OIDC_LOGIN_PROVIDER_SQL, SELECT_ORGANIZATION_INVITATION_BY_TOKEN_HASH_SQL,
-        SELECT_ORGANIZATION_INVITATION_SQL, SELECT_ORGANIZATION_MEMBER_SQL,
-        SELECT_PROJECT_MEMBER_SQL, SELECT_SECRET_REF_SQL, UPDATE_ORGANIZATION_MEMBER_STATUS_SQL,
-        UPDATE_PROJECT_MEMBER_STATUS_SQL, UPSERT_INVITED_ORGANIZATION_MEMBER_SQL,
+        SELECT_EXTERNAL_IDENTITY_SQL, SELECT_MTLS_IDENTITY_BY_SUBJECT_SQL,
+        SELECT_OIDC_LOGIN_ATTEMPT_BY_STATE_SQL, SELECT_OIDC_LOGIN_PROVIDER_SQL,
+        SELECT_ORGANIZATION_INVITATION_BY_TOKEN_HASH_SQL, SELECT_ORGANIZATION_INVITATION_SQL,
+        SELECT_ORGANIZATION_MEMBER_SQL, SELECT_PLATFORM_USER_INCLUDING_DELETED_SQL,
+        SELECT_PLATFORM_USER_SQL, SELECT_PROJECT_MEMBER_SQL, SELECT_ROLE_BINDING_SQL,
+        SELECT_SECRET_REF_SQL, UNLINK_EXTERNAL_IDENTITY_SQL, UPDATE_ORGANIZATION_MEMBER_STATUS_SQL,
+        UPDATE_PLATFORM_USER_STATUS_SQL, UPDATE_PROJECT_MEMBER_STATUS_SQL,
+        UPDATE_ROLE_BINDING_STATUS_SQL, UPSERT_INVITED_ORGANIZATION_MEMBER_SQL,
         UPSERT_INVITED_PROJECT_MEMBER_SQL, UPSERT_OIDC_EXTERNAL_IDENTITY_SQL,
         UPSERT_OIDC_LOGIN_PROVIDER_SQL, UPSERT_OIDC_ORGANIZATION_ADMIN_ROLE_SQL,
         UPSERT_OIDC_ORGANIZATION_MEMBERSHIP_SQL, UPSERT_OIDC_PROJECT_MEMBERSHIP_SQL,
         UPSERT_OIDC_USER_ORGANIZATION_SQL, UPSERT_OIDC_USER_PRINCIPAL_SQL,
-        UPSERT_OIDC_USER_PROJECT_SQL, UPSERT_OIDC_USER_SQL, UPSERT_SECRET_REF_SQL,
+        UPSERT_OIDC_USER_PROJECT_SQL, UPSERT_OIDC_USER_SQL, UPSERT_ROLE_BINDING_SQL,
+        UPSERT_SECRET_REF_SQL,
     };
     use crate::resource::{
         ApprovalRecord, ConversationRecord, DeferredToolRecord, EnvironmentAttachmentRecord,
@@ -3630,6 +4576,9 @@ mod tests {
         for query in [
             RECORD_AUTH_SESSION_SQL,
             SELECT_AUTH_SESSION_BY_TOKEN_SQL,
+            LIST_AUTH_SESSIONS_FOR_PRINCIPAL_SQL,
+            SELECT_AUTH_SESSION_BY_ID_SQL,
+            REVOKE_AUTH_SESSION_BY_ID_SQL,
             RECORD_BEARER_CREDENTIAL_SQL,
             SELECT_BEARER_CREDENTIAL_BY_TOKEN_SQL,
             RECORD_MTLS_IDENTITY_SQL,
@@ -3647,6 +4596,60 @@ mod tests {
         assert!(RECORD_BEARER_CREDENTIAL_SQL.contains("ON CONFLICT (credential_id)"));
         assert!(RECORD_MTLS_IDENTITY_SQL.contains("ON CONFLICT (mtls_identity_id)"));
         assert!(SELECT_MTLS_IDENTITY_BY_SUBJECT_SQL.contains("WHERE subject = $1"));
+    }
+
+    #[test]
+    fn admin_user_and_session_queries_are_tenant_scoped_and_versioned() {
+        for query in [
+            LIST_PLATFORM_USERS_SQL,
+            SELECT_PLATFORM_USER_SQL,
+            SELECT_PLATFORM_USER_INCLUDING_DELETED_SQL,
+            UPDATE_PLATFORM_USER_STATUS_SQL,
+        ] {
+            assert!(query.contains("platform_users"));
+            assert!(query.contains("resource_version"));
+        }
+        assert!(LIST_PLATFORM_USERS_SQL.contains("WHERE tenant_id = $1"));
+        assert!(LIST_PLATFORM_USERS_SQL.contains("status <> 'deleted'"));
+        assert!(SELECT_PLATFORM_USER_SQL.contains("WHERE user_id = $1"));
+        assert!(SELECT_PLATFORM_USER_SQL.contains("status <> 'deleted'"));
+        assert!(!SELECT_PLATFORM_USER_INCLUDING_DELETED_SQL.contains("status <> 'deleted'"));
+        assert!(UPDATE_PLATFORM_USER_STATUS_SQL.contains("resource_version = $3"));
+        assert!(UPDATE_PLATFORM_USER_STATUS_SQL.contains("status <> 'deleted'"));
+
+        assert!(LIST_AUTH_SESSIONS_FOR_PRINCIPAL_SQL.contains("WHERE tenant_id = $1"));
+        assert!(LIST_AUTH_SESSIONS_FOR_PRINCIPAL_SQL.contains("principal_id = $2"));
+        assert!(REVOKE_AUTH_SESSION_BY_ID_SQL.contains("auth_session_id = $1"));
+        assert!(REVOKE_AUTH_SESSION_BY_ID_SQL.contains("tenant_id = $2"));
+        assert!(REVOKE_AUTH_SESSION_BY_ID_SQL.contains("principal_id = $3"));
+        assert!(REVOKE_AUTH_SESSION_BY_ID_SQL.contains("status = 'active'"));
+        assert!(DISABLE_AUTH_SESSIONS_FOR_PRINCIPAL_SQL.contains("status = 'principal_disabled'"));
+    }
+
+    #[test]
+    fn platform_audit_queries_store_redacted_envelopes_only() {
+        for query in [
+            RECORD_PLATFORM_AUDIT_EVENT_SQL,
+            LIST_PLATFORM_AUDIT_EVENTS_FOR_TENANT_SQL,
+        ] {
+            assert!(query.contains("platform_audit_events"));
+            assert!(query.contains("audit_event_id"));
+            assert!(query.contains("actor_principal_id"));
+            assert!(query.contains("action_id"));
+            assert!(query.contains("resource_kind"));
+            assert!(query.contains("resource_id"));
+            assert!(query.contains("event_type"));
+            assert!(query.contains("redaction"));
+
+            let lower = query.to_ascii_lowercase();
+            assert!(!lower.contains("raw_token"));
+            assert!(!lower.contains("raw_bearer"));
+            assert!(!lower.contains("raw_api_key"));
+            assert!(!lower.contains("raw_password"));
+            assert!(!lower.contains("client_secret"));
+        }
+        assert!(RECORD_PLATFORM_AUDIT_EVENT_SQL.contains("to_timestamp($13)"));
+        assert!(LIST_PLATFORM_AUDIT_EVENTS_FOR_TENANT_SQL.contains("WHERE tenant_id = $1"));
     }
 
     #[test]
@@ -3707,6 +4710,56 @@ mod tests {
             assert!(!query.contains("raw_secret"));
         }
         assert!(UPSERT_SECRET_REF_SQL.contains("ON CONFLICT (secret_ref_id)"));
+    }
+
+    #[test]
+    fn external_identity_queries_are_tenant_scoped_and_token_free() {
+        for query in [
+            LIST_EXTERNAL_IDENTITIES_FOR_PRINCIPAL_SQL,
+            SELECT_EXTERNAL_IDENTITY_SQL,
+            UNLINK_EXTERNAL_IDENTITY_SQL,
+        ] {
+            assert!(query.contains("platform_external_identities"));
+            assert!(query.contains("external_identity_id"));
+            assert!(query.contains("identity_provider_id"));
+            assert!(query.contains("provider_subject"));
+            assert!(query.contains("status <> 'deleted'"));
+            assert!(!query.contains("access_token"));
+            assert!(!query.contains("refresh_token"));
+            assert!(!query.contains("id_token"));
+            assert!(!query.contains("client_secret"));
+        }
+        assert!(LIST_EXTERNAL_IDENTITIES_FOR_PRINCIPAL_SQL.contains("tenant_id = $1"));
+        assert!(LIST_EXTERNAL_IDENTITIES_FOR_PRINCIPAL_SQL.contains("principal_id = $2"));
+        assert!(UNLINK_EXTERNAL_IDENTITY_SQL.contains("status = 'deleted'"));
+        assert!(UNLINK_EXTERNAL_IDENTITY_SQL.contains("RETURNING"));
+    }
+
+    #[test]
+    fn role_binding_queries_support_dynamic_authorization_and_cascade() {
+        for query in [
+            LIST_ROLE_BINDINGS_SQL,
+            ACTIVE_ROLE_BINDINGS_FOR_PRINCIPAL_SQL,
+            SELECT_ROLE_BINDING_SQL,
+            UPSERT_ROLE_BINDING_SQL,
+            UPDATE_ROLE_BINDING_STATUS_SQL,
+        ] {
+            assert!(query.contains("platform_role_bindings"));
+            assert!(query.contains("role_binding_id"));
+            assert!(query.contains("principal_id"));
+            assert!(query.contains("role_id"));
+            assert!(query.contains("resource_version"));
+        }
+        assert!(ACTIVE_ROLE_BINDINGS_FOR_PRINCIPAL_SQL.contains("status = 'active'"));
+        assert!(SELECT_ROLE_BINDING_SQL.contains("status <> 'deleted'"));
+        assert!(UPSERT_ROLE_BINDING_SQL.contains("ON CONFLICT (role_binding_id)"));
+        assert!(UPDATE_ROLE_BINDING_STATUS_SQL.contains("resource_version = $3"));
+        assert!(
+            DELETE_ROLE_BINDINGS_FOR_ORGANIZATION_PRINCIPAL_SQL.contains("organization_id = $2")
+        );
+        assert!(DELETE_ROLE_BINDINGS_FOR_PROJECT_PRINCIPAL_SQL.contains("project_id = $2"));
+        assert!(DELETE_ROLE_BINDINGS_FOR_ORGANIZATION_PRINCIPAL_SQL.contains("status = 'deleted'"));
+        assert!(DELETE_ROLE_BINDINGS_FOR_PROJECT_PRINCIPAL_SQL.contains("status = 'deleted'"));
     }
 
     #[test]
@@ -4025,6 +5078,21 @@ mod tests {
     }
 
     #[test]
+    fn durable_validation_matches_in_memory_audit_shape() {
+        assert_eq!(
+            validate_platform_audit_event_record(&valid_audit_event()),
+            Ok(())
+        );
+        assert_eq!(
+            validate_platform_audit_event_record(&PlatformAuditEventRecord {
+                audit_event_id: "evt_invalid".to_owned(),
+                ..valid_audit_event()
+            }),
+            Err(PlatformAuditError::InvalidAuditEventId)
+        );
+    }
+
+    #[test]
     fn business_resource_tables_cover_every_safe_projection() {
         for (data, table) in [
             (
@@ -4192,6 +5260,24 @@ mod tests {
             project_display_name: "OIDC User Project".to_owned(),
             session: PlatformAuthSessionRecord::active("sess_oidc", "raw-session", actor()),
             consumed_at_unix: 1_750_000_001,
+        }
+    }
+
+    fn valid_audit_event() -> PlatformAuditEventRecord {
+        PlatformAuditEventRecord {
+            audit_event_id: "audit_test".to_owned(),
+            tenant_id: TENANT_ID.to_owned(),
+            organization_id: Some(ORGANIZATION_ID.to_owned()),
+            project_id: Some(PROJECT_ID.to_owned()),
+            actor_principal_id: USER_ID.to_owned(),
+            actor_kind: ActorKind::User,
+            action_id: "platform.user.write".to_owned(),
+            resource_kind: "User".to_owned(),
+            resource_id: "usr_target".to_owned(),
+            event_type: "platform.user.status.update".to_owned(),
+            reason: Some("Operator confirmed request.".to_owned()),
+            redaction: PLATFORM_AUDIT_REDACTION_PROFILE.to_owned(),
+            created_at_unix: 1_700_000_000,
         }
     }
 }

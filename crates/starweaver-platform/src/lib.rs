@@ -11,6 +11,9 @@ pub mod action;
 /// Platform-local authentication primitives.
 pub mod auth;
 
+/// Platform-local audit event contracts.
+pub mod audit;
+
 /// Platform startup configuration.
 pub mod config;
 
@@ -25,6 +28,9 @@ pub mod membership;
 
 /// Platform route metadata.
 pub mod route;
+
+/// Platform-local role binding contracts.
+pub mod role;
 
 /// Platform business resource records.
 pub mod resource;
@@ -43,6 +49,9 @@ pub mod service;
 
 /// Platform-local storage boundaries.
 pub mod storage;
+
+/// Platform-local user contracts.
+pub mod user;
 
 /// Returns the stable agent platform service name.
 #[must_use]

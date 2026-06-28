@@ -1,6 +1,8 @@
 //! Platform-local identity provider contracts.
 
+use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
+use std::sync::{Arc, RwLock};
 
 use jsonwebtoken::jwk::{Jwk, JwkSet, PublicKeyUse};
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
@@ -289,6 +291,234 @@ pub struct OidcVerifiedClaims {
     pub email_verified: bool,
     /// Optional display name claim.
     pub display_name: Option<String>,
+}
+
+/// Platform-local external identity lifecycle status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlatformExternalIdentityStatus {
+    /// Identity can authenticate the linked principal.
+    Active,
+    /// Identity is temporarily disabled.
+    Disabled,
+    /// Identity has been unlinked or deleted.
+    Deleted,
+}
+
+impl PlatformExternalIdentityStatus {
+    /// Returns the durable status id.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Disabled => "disabled",
+            Self::Deleted => "deleted",
+        }
+    }
+
+    /// Parses a durable status id.
+    #[must_use]
+    pub fn from_id(value: &str) -> Option<Self> {
+        match value {
+            "active" => Some(Self::Active),
+            "disabled" => Some(Self::Disabled),
+            "deleted" => Some(Self::Deleted),
+            _ => None,
+        }
+    }
+}
+
+/// Platform-local external identity record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlatformExternalIdentityRecord {
+    /// Stable external identity id.
+    pub external_identity_id: String,
+    /// Owning tenant id.
+    pub tenant_id: String,
+    /// Local principal linked to the provider subject.
+    pub principal_id: String,
+    /// Login identity provider id.
+    pub identity_provider_id: String,
+    /// Provider kind, such as `oidc` or `single_user`.
+    pub provider_kind: String,
+    /// Provider-local subject.
+    pub provider_subject: String,
+    /// Optional normalized email observed from the provider.
+    pub email: Option<String>,
+    /// Whether the provider asserted the email as verified.
+    pub email_verified: bool,
+    /// Link lifecycle status.
+    pub status: PlatformExternalIdentityStatus,
+}
+
+/// Platform external identity repository error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlatformExternalIdentityError {
+    /// External identity id is malformed.
+    InvalidExternalIdentityId,
+    /// Tenant id is malformed.
+    InvalidTenantId,
+    /// Principal id is malformed.
+    InvalidPrincipalId,
+    /// Identity provider id is malformed.
+    InvalidProviderId,
+    /// Provider kind is unsupported.
+    InvalidProviderKind,
+    /// Provider subject is empty.
+    SubjectRequired,
+    /// Email shape is invalid.
+    InvalidEmail,
+    /// Status is unsupported.
+    InvalidStatus,
+    /// Existing provider subject is linked to another principal.
+    PrincipalMismatch,
+}
+
+impl PlatformExternalIdentityError {
+    /// Returns the stable error code.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidExternalIdentityId => "external_identity_id_invalid",
+            Self::InvalidTenantId => "tenant_id_invalid",
+            Self::InvalidPrincipalId => "principal_id_invalid",
+            Self::InvalidProviderId => "identity_provider_id_invalid",
+            Self::InvalidProviderKind => "provider_kind_invalid",
+            Self::SubjectRequired => "provider_subject_required",
+            Self::InvalidEmail => "email_invalid",
+            Self::InvalidStatus => "external_identity_status_invalid",
+            Self::PrincipalMismatch => "external_identity_principal_mismatch",
+        }
+    }
+}
+
+impl Display for PlatformExternalIdentityError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl std::error::Error for PlatformExternalIdentityError {}
+
+/// In-memory external identity store.
+#[derive(Clone, Debug, Default)]
+pub struct InMemoryPlatformExternalIdentityStore {
+    external_identities: Arc<RwLock<BTreeMap<String, PlatformExternalIdentityRecord>>>,
+}
+
+impl InMemoryPlatformExternalIdentityStore {
+    /// Creates an empty external identity store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records or replaces an external identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformExternalIdentityError`] when the record shape is invalid.
+    pub fn record_external_identity(
+        &self,
+        record: PlatformExternalIdentityRecord,
+    ) -> Result<(), PlatformExternalIdentityError> {
+        validate_external_identity(&record)?;
+        write_lock(&self.external_identities).insert(record.external_identity_id.clone(), record);
+        Ok(())
+    }
+
+    /// Creates or reactivates an external identity for the same provider subject.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformExternalIdentityError::PrincipalMismatch`] if the
+    /// provider subject is already linked to a different principal.
+    pub fn upsert_external_identity(
+        &self,
+        record: PlatformExternalIdentityRecord,
+    ) -> Result<PlatformExternalIdentityRecord, PlatformExternalIdentityError> {
+        validate_external_identity(&record)?;
+        let mut records = write_lock(&self.external_identities);
+        let existing_id = records
+            .values()
+            .find(|existing| {
+                existing.tenant_id == record.tenant_id
+                    && existing.identity_provider_id == record.identity_provider_id
+                    && existing.provider_subject == record.provider_subject
+            })
+            .map(|existing| existing.external_identity_id.clone());
+
+        let upserted = if let Some(existing_id) = existing_id {
+            let existing = records
+                .get_mut(&existing_id)
+                .ok_or(PlatformExternalIdentityError::InvalidExternalIdentityId)?;
+            if existing.principal_id != record.principal_id {
+                return Err(PlatformExternalIdentityError::PrincipalMismatch);
+            }
+            existing.provider_kind = record.provider_kind;
+            existing.email = record.email;
+            existing.email_verified = record.email_verified;
+            existing.status = PlatformExternalIdentityStatus::Active;
+            existing.clone()
+        } else {
+            records.insert(record.external_identity_id.clone(), record.clone());
+            record
+        };
+        drop(records);
+        validate_external_identity(&upserted)?;
+        Ok(upserted)
+    }
+
+    /// Lists non-deleted external identities for one principal.
+    #[must_use]
+    pub fn external_identities_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_id: &str,
+    ) -> Vec<PlatformExternalIdentityRecord> {
+        let mut records = read_lock(&self.external_identities)
+            .values()
+            .filter(|record| {
+                record.tenant_id == tenant_id
+                    && record.principal_id == principal_id
+                    && record.status != PlatformExternalIdentityStatus::Deleted
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| left.external_identity_id.cmp(&right.external_identity_id));
+        records
+    }
+
+    /// Loads an external identity by id.
+    #[must_use]
+    pub fn external_identity(
+        &self,
+        external_identity_id: &str,
+    ) -> Option<PlatformExternalIdentityRecord> {
+        read_lock(&self.external_identities)
+            .get(external_identity_id)
+            .cloned()
+    }
+
+    /// Marks an external identity deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformExternalIdentityError::InvalidExternalIdentityId`] when
+    /// the identity is unknown.
+    pub fn unlink_external_identity(
+        &self,
+        external_identity_id: &str,
+    ) -> Result<PlatformExternalIdentityRecord, PlatformExternalIdentityError> {
+        let mut records = write_lock(&self.external_identities);
+        let record = records
+            .get_mut(external_identity_id)
+            .ok_or(PlatformExternalIdentityError::InvalidExternalIdentityId)?;
+        record.status = PlatformExternalIdentityStatus::Deleted;
+        let unlinked = record.clone();
+        drop(records);
+        validate_external_identity(&unlinked)?;
+        Ok(unlinked)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -745,6 +975,55 @@ pub fn hash_oidc_pkce_verifier(raw_pkce_verifier: &str) -> String {
     )
 }
 
+/// Validates platform-local external identity metadata.
+///
+/// # Errors
+///
+/// Returns [`PlatformExternalIdentityError`] when ids, provider subject, email,
+/// provider kind, or status are invalid.
+pub fn validate_external_identity(
+    record: &PlatformExternalIdentityRecord,
+) -> Result<(), PlatformExternalIdentityError> {
+    validate_prefixed(
+        &record.external_identity_id,
+        "xid_",
+        PlatformExternalIdentityError::InvalidExternalIdentityId,
+    )?;
+    validate_prefixed(
+        &record.tenant_id,
+        "ten_",
+        PlatformExternalIdentityError::InvalidTenantId,
+    )?;
+    validate_prefixed(
+        &record.principal_id,
+        "usr_",
+        PlatformExternalIdentityError::InvalidPrincipalId,
+    )?;
+    validate_prefixed(
+        &record.identity_provider_id,
+        "idp_",
+        PlatformExternalIdentityError::InvalidProviderId,
+    )?;
+    match record.provider_kind.as_str() {
+        "oidc" | "single_user" => {}
+        _ => return Err(PlatformExternalIdentityError::InvalidProviderKind),
+    }
+    if record.provider_subject.trim().is_empty() {
+        return Err(PlatformExternalIdentityError::SubjectRequired);
+    }
+    if let Some(email) = record.email.as_deref() {
+        let email = email.trim();
+        if email.is_empty()
+            || !email.contains('@')
+            || email.starts_with('@')
+            || email.ends_with('@')
+        {
+            return Err(PlatformExternalIdentityError::InvalidEmail);
+        }
+    }
+    Ok(())
+}
+
 fn validate_https_url(value: &str, error: OidcValidationError) -> Result<(), OidcValidationError> {
     let value = value.trim();
     if value.starts_with("https://") && value.len() > "https://".len() {
@@ -1003,6 +1282,28 @@ fn lower_hex(bytes: &[u8]) -> String {
     encoded
 }
 
+fn validate_prefixed(
+    value: &str,
+    prefix: &str,
+    error: PlatformExternalIdentityError,
+) -> Result<(), PlatformExternalIdentityError> {
+    if value.starts_with(prefix) && value.len() > prefix.len() {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
+fn read_lock<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    lock.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn write_lock<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    lock.write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
     use jsonwebtoken::jwk::{Jwk, JwkSet, PublicKeyUse};
@@ -1011,12 +1312,56 @@ mod tests {
 
     use super::{
         hash_oidc_login_nonce, hash_oidc_login_state, hash_oidc_pkce_verifier, oidc_discovery_url,
-        resolve_oidc_provider_metadata, validate_oidc_id_token, validate_oidc_login_attempt_record,
-        validate_oidc_login_provider, validate_oidc_verified_claims, OidcDiscoveryDocument,
-        OidcLoginAttemptRecord, OidcLoginAttemptStart, OidcLoginAttemptStatus,
-        OidcLoginProviderRecord, OidcLoginProviderStatus, OidcTokenEndpointAuthMethod,
-        OidcValidationError, OidcVerifiedClaims,
+        resolve_oidc_provider_metadata, validate_external_identity, validate_oidc_id_token,
+        validate_oidc_login_attempt_record, validate_oidc_login_provider,
+        validate_oidc_verified_claims, InMemoryPlatformExternalIdentityStore,
+        OidcDiscoveryDocument, OidcLoginAttemptRecord, OidcLoginAttemptStart,
+        OidcLoginAttemptStatus, OidcLoginProviderRecord, OidcLoginProviderStatus,
+        OidcTokenEndpointAuthMethod, OidcValidationError, OidcVerifiedClaims,
+        PlatformExternalIdentityError, PlatformExternalIdentityRecord,
+        PlatformExternalIdentityStatus,
     };
+
+    #[test]
+    fn external_identity_store_is_subject_unique_and_unlinkable() {
+        let store = InMemoryPlatformExternalIdentityStore::new();
+        let identity = valid_external_identity("xid_test", "usr_test");
+        assert_eq!(validate_external_identity(&identity), Ok(()));
+        let upserted = store
+            .upsert_external_identity(identity.clone())
+            .unwrap_or_else(|error| panic!("identity should upsert: {error:?}"));
+        assert_eq!(upserted.external_identity_id, "xid_test");
+
+        let refreshed = store
+            .upsert_external_identity(PlatformExternalIdentityRecord {
+                email: Some("new@example.com".to_owned()),
+                email_verified: true,
+                ..identity.clone()
+            })
+            .unwrap_or_else(|error| panic!("same principal should refresh identity: {error:?}"));
+        assert_eq!(refreshed.email.as_deref(), Some("new@example.com"));
+        assert!(refreshed.email_verified);
+
+        let mismatch = store.upsert_external_identity(PlatformExternalIdentityRecord {
+            external_identity_id: "xid_other".to_owned(),
+            principal_id: "usr_other".to_owned(),
+            ..identity
+        });
+        assert_eq!(
+            mismatch,
+            Err(PlatformExternalIdentityError::PrincipalMismatch)
+        );
+
+        let listed = store.external_identities_for_principal("ten_test", "usr_test");
+        assert_eq!(listed.len(), 1);
+        let unlinked = store
+            .unlink_external_identity("xid_test")
+            .unwrap_or_else(|error| panic!("identity should unlink: {error:?}"));
+        assert_eq!(unlinked.status, PlatformExternalIdentityStatus::Deleted);
+        assert!(store
+            .external_identities_for_principal("ten_test", "usr_test")
+            .is_empty());
+    }
 
     #[test]
     fn generic_oidc_provider_requires_standard_shape() {
@@ -1294,6 +1639,23 @@ mod tests {
             }),
             Err(OidcValidationError::ConsumedAtUnexpected)
         );
+    }
+
+    fn valid_external_identity(
+        external_identity_id: &str,
+        principal_id: &str,
+    ) -> PlatformExternalIdentityRecord {
+        PlatformExternalIdentityRecord {
+            external_identity_id: external_identity_id.to_owned(),
+            tenant_id: "ten_test".to_owned(),
+            principal_id: principal_id.to_owned(),
+            identity_provider_id: "idp_oidc".to_owned(),
+            provider_kind: "oidc".to_owned(),
+            provider_subject: "oidc-subject-123".to_owned(),
+            email: Some("owner@example.com".to_owned()),
+            email_verified: true,
+            status: PlatformExternalIdentityStatus::Active,
+        }
     }
 
     fn valid_provider() -> OidcLoginProviderRecord {

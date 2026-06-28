@@ -44,7 +44,7 @@ Excluded from v1:
 
 ## Implementation Progress
 
-Last updated: 2026-06-27.
+Last updated: 2026-06-28.
 
 Completed foundation slices:
 
@@ -308,7 +308,10 @@ Completed foundation slices:
   `spec/shared/02-auth-authz-layering.md`: keep gateway and platform authn/authz
   service-local for now, share only versioned contracts, and extract shared
   identity or policy crates only after both services have concrete owners and
-  contract tests.
+  contract tests. Initial cross-service contract tests now prove gateway/platform
+  action namespace separation, shared tenant/organization/project scope labels,
+  service-specific actor gates, resource-kind compatibility, and built-in role
+  namespace isolation without adding a shared runtime crate.
 - Agent platform auth/authz foundations now define platform-local
   `platform.*` actions, built-in roles, actors, resource refs, grants,
   in-memory authorization, and item filtering for conversations, sessions, runs,
@@ -350,15 +353,15 @@ Completed foundation slices:
   routes. Missing owner records and missing business records return `404` at
   the appropriate phase.
 - Human login documentation now treats generic OIDC as the standard external
-  login provider. Non-OIDC OAuth providers, including GitHub OAuth App, require
-  an OIDC broker or a separate OAuth adapter before direct login support is
-  exposed. OIDC remains separate from upstream provider OAuth credentials and
-  validates issuer, audience, nonce, PKCE, expiry, and JWKS-backed ID token
-  signatures.
+  login provider. Non-OIDC OAuth providers require an OIDC broker or a
+  separately reviewed OAuth adapter before direct login support is exposed.
+  OIDC remains separate from upstream provider OAuth credentials and validates
+  issuer, audience, nonce, PKCE, expiry, and JWKS-backed ID token signatures.
 - Gateway human-login runtime now accepts only generic OIDC identity providers.
-  The direct GitHub OAuth App adapter, callback exchange path, test mock, and
-  schema allowance were removed; deployments that want GitHub identity must
-  configure an OIDC broker or wait for a separately reviewed OAuth adapter.
+  Direct non-OIDC OAuth adapter paths, callback exchange paths, test mocks, and
+  schema allowances were removed; deployments that want non-OIDC identity
+  sources must configure an OIDC broker or wait for a separately reviewed OAuth
+  adapter.
 - Agent platform durable schema foundation now embeds the first platform
   PostgreSQL migration and migration entrypoint. The schema covers tenant,
   organization, project, principal, membership, identity provider, generic OIDC
@@ -447,6 +450,10 @@ Completed foundation slices:
   `POST /auth/v1/providers/{id}/start`, and return authorization URLs with
   PKCE S256 client state without leaking provider client secrets, secret refs,
   authorization codes, ID tokens, provider access tokens, or refresh tokens.
+- Agent platform `/auth/v1/*` route metadata now classifies public login,
+  session-bound browser, and action-authorized routes explicitly. OIDC callback
+  and single-user login use canonical `platform.auth_session.create` evidence
+  instead of reusing read/update/revoke session actions.
 - Agent platform membership admin foundations now expose organization and
   project membership list/get/status routes, canonical membership read/write
   actions, optimistic concurrency on status mutation, in-memory and PostgreSQL
@@ -477,10 +484,49 @@ Completed foundation slices:
   parent record, uses the canonical `platform.project_member.write` path,
   supports in-memory and PostgreSQL repository backends, and rejects inactive
   parents or cross-organization project assignment.
+- Agent platform external identity management now exposes user-scoped admin
+  list/get/unlink routes. Generic OIDC and single-user login paths record
+  external identity links in the in-memory and PostgreSQL repository contracts,
+  unlink marks non-single-user identities deleted, single-user identities cannot
+  be unlinked through admin API, and canonical
+  `platform.external_identity.read`/`platform.external_identity.unlink`
+  actions are covered by route metadata and tests.
+- Agent platform role binding management now exposes admin
+  list/create/get/status APIs over tenant, organization, and project scopes.
+  Dynamic role bindings are stored in in-memory and PostgreSQL repository
+  backends, feed the same canonical action-grant authorization path as static
+  grants, and require active organization or project membership before scoped
+  bindings grant access.
+- Agent platform organization member removal now has an explicit
+  `POST /admin/v1/organizations/{organization_id}/members/{member_id}/remove`
+  route. Removal uses optimistic concurrency, cascades child project
+  memberships, deletes matching organization/project role bindings, and shares
+  the same cascade behavior when the generic status route sets `removed`.
+- Agent platform tenant-scoped user administration now exposes
+  `GET /admin/v1/users`, `GET /admin/v1/users/{user_id}`, and
+  `POST /admin/v1/users/{user_id}/status`. User records are stored behind
+  in-memory and PostgreSQL repository contracts, status updates use optimistic
+  concurrency, disabled or deleted users cannot obtain new single-user or
+  generic OIDC login sessions, and disabling or deleting a user marks active
+  sessions as `principal_disabled`.
+- Agent platform admin user-session management now exposes
+  `GET /admin/v1/users/{user_id}/sessions` and
+  `POST /admin/v1/users/{user_id}/sessions/{auth_session_id}/revoke`. The
+  routes are tenant scoped, use canonical `platform.auth_session.read` and
+  `platform.auth_session.revoke` authorization, verify that sessions belong to
+  the target user, and return only redacted session projections.
+- Agent platform audit-event foundations now provide redacted in-memory and
+  PostgreSQL event envelopes for sensitive user status and user-session revoke
+  mutations. Those mutations require an explicit strong-auth confirmation field
+  before mutating state and return the written audit event id.
+- Agent platform audit-event admin listing now exposes
+  `GET /admin/v1/audit-events` over canonical `platform.audit_event.read`
+  authorization. The endpoint requires explicit strong-auth confirmation, supports
+  tenant/org/project-scoped filtering and pagination, and returns only redacted
+  audit event envelopes.
 
 Next implementation focus:
 
-- Continue Stage 9 platform external identity and role-change flows.
 - Keep shared auth/authz extraction deferred behind the two-owner contract-test
   gate now that both gateway and platform have concrete auth evidence.
 - Continue hardening any required OTLP/gRPC transport only when the metrics
@@ -909,8 +955,7 @@ Work items:
     only when configured;
   - admin identity-provider configuration supports tenant-owned generic OIDC
     config documents with secret-reference redaction; non-OIDC OAuth providers
-    such as GitHub OAuth App are deferred behind an OIDC broker or a separate
-    OAuth adapter;
+    are deferred behind an OIDC broker or a separately reviewed OAuth adapter;
   - external login start builds OAuth/OIDC authorization URLs with state, OIDC
     nonce, and PKCE S256 code challenge without returning client secrets or
     code verifiers;
@@ -925,24 +970,42 @@ Work items:
     and external identities, issue opaque sessions without granting
     organization or project access by email alone, reject reused state, validate
     OIDC issuer, audience, expiry, and nonce;
-  - admin user list, get, and status update APIs are tenant scoped, audited, and
-    revoke active sessions when a user is disabled or deleted;
-  - admin user session list and revoke APIs are tenant scoped, item-authorized,
-    redacted, audited, and require strong auth for revocation;
+  - admin user list, get, and status update API foundations are tenant scoped
+    and mark active sessions `principal_disabled` when a user is disabled or
+    deleted; status mutation requires explicit strong-auth confirmation and
+    records redacted audit evidence;
+  - admin user session list and revoke API foundations are tenant scoped,
+    item-authorized, redacted, and verify target-user ownership before mutation;
+    revoke mutation requires explicit strong-auth confirmation and records
+    redacted audit evidence;
+  - admin audit-event list API is tenant scoped, supports org/project filters,
+    requires explicit strong-auth confirmation, and uses canonical
+    `platform.audit_event.read` authorization before returning redacted event
+    envelopes;
   - admin external identity list, get, and unlink APIs are tenant scoped,
-    item-authorized, redacted, audited, and require strong auth for unlink;
+    item-authorized, redacted, require strong auth for unlink, forbid
+    single-user identity unlink, record redacted audit evidence, and share
+    in-memory/PostgreSQL repository behavior;
   - organization member suspension and removal cascade to project memberships
     inside the organization so project-scoped access cannot outlive organization
     access;
   - admin project member create/upsert API requires an active parent organization
     membership, is tenant scoped, idempotent, audited, and rejects cross-boundary
     project assignment;
+  - admin role binding list/create/get/status APIs are tenant scoped,
+    role-shape validated, idempotent by equivalent scope/principal/role, and
+    feed dynamic grants only while the bound organization or project membership
+    remains active;
+  - explicit organization member removal cascades to project memberships and
+    organization/project role bindings, so removed users cannot keep access via
+    stale bindings;
   - browser session login and read responses return session-bound CSRF metadata;
     logout, active/default context updates, and invitation accept reject missing
-    or wrong service-specific CSRF headers.
-- Finish remaining user, external-identity, role-change, and organization
-  membership removal flows.
-- Wire `/auth/v1/*` actions to the canonical authorization matrix.
+    or wrong service-specific CSRF headers;
+  - `/auth/v1/*` route metadata now wires public login, provider discovery,
+    OIDC start/callback, single-user login, invitation preview/accept, session
+    read/update, and logout routes to canonical action ids and explicit public
+    or session access classes.
 
 Acceptance evidence:
 

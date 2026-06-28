@@ -406,6 +406,31 @@ impl InMemoryPlatformAuthSessionStore {
         read_lock(&self.sessions).values().cloned().collect()
     }
 
+    /// Lists sessions for one tenant principal.
+    #[must_use]
+    pub fn auth_sessions_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_id: &str,
+    ) -> Vec<PlatformAuthSessionRecord> {
+        read_lock(&self.sessions)
+            .values()
+            .filter(|record| {
+                record.actor.tenant_id == tenant_id && record.actor.principal_id == principal_id
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Loads a session by stable session id.
+    #[must_use]
+    pub fn auth_session(&self, session_id: &str) -> Option<PlatformAuthSessionRecord> {
+        read_lock(&self.sessions)
+            .values()
+            .find(|record| record.session_id == session_id)
+            .cloned()
+    }
+
     /// Resolves a raw bearer token to an active auth session record.
     ///
     /// # Errors
@@ -454,6 +479,55 @@ impl InMemoryPlatformAuthSessionStore {
             PlatformAuthSessionStatus::Expired => Err(AuthError::SessionExpired),
             PlatformAuthSessionStatus::PrincipalDisabled => Err(AuthError::PrincipalDisabled),
         }
+    }
+
+    /// Revokes an active auth session by stable session id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError`] when the session id is missing, unknown, or no longer
+    /// active.
+    pub fn revoke_auth_session_by_id(&self, session_id: &str) -> Result<PlatformAuthSessionRecord> {
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return Err(AuthError::EmptySessionId);
+        }
+        let mut sessions = write_lock(&self.sessions);
+        let record = sessions
+            .values_mut()
+            .find(|record| record.session_id == session_id)
+            .ok_or(AuthError::SessionNotFound)?;
+        let revoked = match record.status {
+            PlatformAuthSessionStatus::Active => {
+                record.status = PlatformAuthSessionStatus::Revoked;
+                Ok(record.clone())
+            }
+            PlatformAuthSessionStatus::Revoked => Err(AuthError::SessionRevoked),
+            PlatformAuthSessionStatus::Expired => Err(AuthError::SessionExpired),
+            PlatformAuthSessionStatus::PrincipalDisabled => Err(AuthError::PrincipalDisabled),
+        }?;
+        drop(sessions);
+        Ok(revoked)
+    }
+
+    /// Marks active sessions for one tenant principal as principal-disabled.
+    #[must_use]
+    pub fn disable_auth_sessions_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_id: &str,
+    ) -> usize {
+        let mut disabled = 0;
+        for record in write_lock(&self.sessions).values_mut() {
+            if record.actor.tenant_id == tenant_id
+                && record.actor.principal_id == principal_id
+                && record.status == PlatformAuthSessionStatus::Active
+            {
+                record.status = PlatformAuthSessionStatus::PrincipalDisabled;
+                disabled += 1;
+            }
+        }
+        disabled
     }
 
     /// Updates an active session's organization and project context.

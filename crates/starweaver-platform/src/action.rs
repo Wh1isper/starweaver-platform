@@ -198,6 +198,21 @@ impl BuiltInRole {
         }
     }
 
+    /// Parses a stable built-in role id.
+    #[must_use]
+    pub fn from_id(value: &str) -> Option<Self> {
+        match value {
+            "tenant_owner" => Some(Self::TenantOwner),
+            "platform_operator" => Some(Self::PlatformOperator),
+            "organization_admin" => Some(Self::OrganizationAdmin),
+            "project_admin" => Some(Self::ProjectAdmin),
+            "project_developer" => Some(Self::ProjectDeveloper),
+            "project_viewer" => Some(Self::ProjectViewer),
+            "auditor" => Some(Self::Auditor),
+            _ => None,
+        }
+    }
+
     /// Returns the role scope kind.
     #[must_use]
     pub const fn scope_kind(self) -> RoleScopeKind {
@@ -385,6 +400,38 @@ platform_actions!(
         "IdentityProvider",
         true
     ),
+    (UserRead, "platform.user.read", "User", false),
+    (UserWrite, "platform.user.write", "User", true),
+    (
+        ExternalIdentityRead,
+        "platform.external_identity.read",
+        "ExternalIdentity",
+        false
+    ),
+    (
+        ExternalIdentityUnlink,
+        "platform.external_identity.unlink",
+        "ExternalIdentity",
+        true
+    ),
+    (
+        RoleBindingRead,
+        "platform.role_binding.read",
+        "RoleBinding",
+        false
+    ),
+    (
+        RoleBindingWrite,
+        "platform.role_binding.write",
+        "RoleBinding",
+        true
+    ),
+    (
+        AuthSessionCreate,
+        "platform.auth_session.create",
+        "AuthSession",
+        false
+    ),
     (
         AuthSessionRead,
         "platform.auth_session.read",
@@ -401,6 +448,12 @@ platform_actions!(
         AuthSessionRevoke,
         "platform.auth_session.revoke",
         "AuthSession",
+        true
+    ),
+    (
+        AuditEventRead,
+        "platform.audit_event.read",
+        "AuditEvent",
         true
     ),
     (
@@ -474,7 +527,11 @@ const PLATFORM_OPERATOR_ACTIONS: &[PlatformAction] = &[
     PlatformAction::EnvironmentAttachmentHealthRead,
     PlatformAction::EvidenceArchiveRead,
     PlatformAction::IdentityProviderRead,
+    PlatformAction::UserRead,
+    PlatformAction::ExternalIdentityRead,
+    PlatformAction::RoleBindingRead,
     PlatformAction::AuthSessionRead,
+    PlatformAction::AuditEventRead,
     PlatformAction::OrganizationMemberRead,
     PlatformAction::OrganizationInvitationRead,
     PlatformAction::ProjectMemberRead,
@@ -503,6 +560,9 @@ const ORGANIZATION_ADMIN_ACTIONS: &[PlatformAction] = &[
     PlatformAction::AuthSessionRead,
     PlatformAction::AuthSessionUpdate,
     PlatformAction::AuthSessionRevoke,
+    PlatformAction::RoleBindingRead,
+    PlatformAction::RoleBindingWrite,
+    PlatformAction::AuditEventRead,
     PlatformAction::OrganizationMemberRead,
     PlatformAction::OrganizationMemberWrite,
     PlatformAction::OrganizationInvitationRead,
@@ -511,12 +571,15 @@ const ORGANIZATION_ADMIN_ACTIONS: &[PlatformAction] = &[
     PlatformAction::OrganizationInvitationAccept,
     PlatformAction::ProjectMemberRead,
     PlatformAction::ProjectMemberWrite,
+    PlatformAction::AuditEventRead,
 ];
 
 const PROJECT_ADMIN_ACTIONS: &[PlatformAction] = &[
     PlatformAction::AuthSessionRead,
     PlatformAction::AuthSessionUpdate,
     PlatformAction::AuthSessionRevoke,
+    PlatformAction::RoleBindingRead,
+    PlatformAction::RoleBindingWrite,
     PlatformAction::ConversationCreate,
     PlatformAction::ConversationRead,
     PlatformAction::ConversationUpdate,
@@ -586,6 +649,8 @@ const AUDITOR_ACTIONS: &[PlatformAction] = &[
     PlatformAction::RunEventRead,
     PlatformAction::EvidenceArchiveRead,
     PlatformAction::EvidenceArchiveDebugRead,
+    PlatformAction::RoleBindingRead,
+    PlatformAction::AuditEventRead,
 ];
 
 /// Platform authorization grant.
