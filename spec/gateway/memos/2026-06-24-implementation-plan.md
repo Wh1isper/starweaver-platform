@@ -428,8 +428,8 @@ Completed foundation slices:
   outages, and Redis-compatible hot-state outages.
 - Gateway deployment packaging now includes a Linux `amd64` Docker image,
   local Makefile image build target, pull-request image smoke build, scheduled
-  `main` nightly GCR publication, and release-tag or GitHub-release GCR
-  publication using GitHub OIDC Workload Identity Federation. Published nightly
+  `main` nightly GHCR publication, and release-tag or GitHub-release GHCR
+  publication using the workflow-scoped `GITHUB_TOKEN`. Published nightly
   and release images now request BuildKit SBOM and provenance attestations and
   upload image metadata artifacts containing the image digest, tags, labels,
   generated OpenAPI schemas, generated migration checksums, and `SHA256SUMS`.
@@ -439,7 +439,7 @@ Completed foundation slices:
 - Agent platform deployment packaging now includes public health, readiness,
   and version probes plus a Linux `amd64` Docker image. The image workflow uses
   a service matrix so both gateway and platform images are smoke-tested on pull
-  requests and published as nightly or release images to GCR with the same
+  requests and published as nightly or release images to GHCR with the same
   artifact metadata contract.
 - Production profile gates now reject unsafe startup configuration when
   `STARWEAVER_GATEWAY_ENV` is `prod` or `production`: missing PostgreSQL URL,
@@ -489,7 +489,7 @@ Completed foundation slices:
   the generated OpenAPI schemas alongside image metadata. Repository automation
   also guards the main-branch nightly, scheduled nightly, manual nightly,
   release tag, GitHub release, and manual release image publication entry
-  points plus the GitHub OIDC access token exchange used for GCR pushes.
+  points plus the GitHub Container Registry login used for GHCR pushes.
   Nightly and release image jobs validate generated OpenAPI schemas and
   migration checksum manifests before building and publishing images, so
   artifact bundles cannot silently carry stale contracts.

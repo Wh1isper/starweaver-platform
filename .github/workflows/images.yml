@@ -35,7 +35,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write
+  packages: write
 
 concurrency:
   group: container-images-${{ github.event_name }}-${{ github.ref }}
@@ -46,8 +46,8 @@ defaults:
     shell: bash
 
 env:
-  GCR_REGISTRY: ${{ vars.GCR_REGISTRY || 'gcr.io' }}
-  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
+  IMAGE_REGISTRY: ${{ vars.IMAGE_REGISTRY || 'ghcr.io' }}
+  IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE || github.repository_owner }}
 
 jobs:
   service-smoke:
@@ -155,23 +155,15 @@ jobs:
       - name: Validate registry settings
         run: |
           set -euo pipefail
-          : "${GCR_REGISTRY:?Set GCR_REGISTRY or use the default gcr.io.}"
-          : "${GCP_PROJECT_ID:?Set GCP_PROJECT_ID as a repository variable or secret.}"
+          : "${IMAGE_REGISTRY:?Set IMAGE_REGISTRY or use the default ghcr.io.}"
+          : "${IMAGE_NAMESPACE:?Set IMAGE_NAMESPACE or use the repository owner.}"
 
-      - name: Authenticate to Google Cloud
-        id: auth
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-          token_format: access_token
-
-      - name: Log in to GCR
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.GCR_REGISTRY }}
-          username: oauth2accesstoken
-          password: ${{ steps.auth.outputs.access_token }}
+          registry: ${{ env.IMAGE_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -185,7 +177,9 @@ jobs:
           revision="$(git rev-parse HEAD)"
           short_sha="$(git rev-parse --short=12 HEAD)"
           build_date="$(date -u +%Y%m%d)"
-          image="${GCR_REGISTRY}/${GCP_PROJECT_ID}/${SERVICE_IMAGE_NAME}"
+          registry="$(printf '%s' "${IMAGE_REGISTRY}" | tr '[:upper:]' '[:lower:]')"
+          namespace="$(printf '%s' "${IMAGE_NAMESPACE}" | tr '[:upper:]' '[:lower:]')"
+          image="${registry}/${namespace}/${SERVICE_IMAGE_NAME}"
           {
             echo "image=${image}"
             echo "tags<<EOF"
@@ -313,23 +307,15 @@ jobs:
       - name: Validate registry settings
         run: |
           set -euo pipefail
-          : "${GCR_REGISTRY:?Set GCR_REGISTRY or use the default gcr.io.}"
-          : "${GCP_PROJECT_ID:?Set GCP_PROJECT_ID as a repository variable or secret.}"
+          : "${IMAGE_REGISTRY:?Set IMAGE_REGISTRY or use the default ghcr.io.}"
+          : "${IMAGE_NAMESPACE:?Set IMAGE_NAMESPACE or use the repository owner.}"
 
-      - name: Authenticate to Google Cloud
-        id: auth
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-          token_format: access_token
-
-      - name: Log in to GCR
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.GCR_REGISTRY }}
-          username: oauth2accesstoken
-          password: ${{ steps.auth.outputs.access_token }}
+          registry: ${{ env.IMAGE_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -342,7 +328,9 @@ jobs:
           set -euo pipefail
           revision="$(git rev-parse HEAD)"
           semver="${RELEASE_TAG#v}"
-          image="${GCR_REGISTRY}/${GCP_PROJECT_ID}/${SERVICE_IMAGE_NAME}"
+          registry="$(printf '%s' "${IMAGE_REGISTRY}" | tr '[:upper:]' '[:lower:]')"
+          namespace="$(printf '%s' "${IMAGE_NAMESPACE}" | tr '[:upper:]' '[:lower:]')"
+          image="${registry}/${namespace}/${SERVICE_IMAGE_NAME}"
           {
             echo "image=${image}"
             echo "tags<<EOF"

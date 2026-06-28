@@ -28,8 +28,8 @@ The tag represents a compatible set of:
 Each release should publish service images:
 
 ```text
-gcr.io/$GCP_PROJECT_ID/starweaver-gateway:v0.1.0
-gcr.io/$GCP_PROJECT_ID/starweaver-platform:v0.1.0
+ghcr.io/$IMAGE_NAMESPACE/starweaver-gateway:v0.1.0
+ghcr.io/$IMAGE_NAMESPACE/starweaver-platform:v0.1.0
 starweaver-admin-api:v0.1.0
 ```
 
@@ -96,40 +96,38 @@ Current contract gate:
 
 ## Image Publication
 
-Gateway and platform image publication uses Google Workload Identity Federation
-and pushes to GCR-compatible registries.
+Gateway and platform image publication pushes to GitHub Container Registry
+with the workflow-scoped `GITHUB_TOKEN`.
 
-Required GitHub configuration:
+Optional GitHub configuration:
 
-| Name                             | Kind               | Purpose                                      |
-| -------------------------------- | ------------------ | -------------------------------------------- |
-| `GCP_PROJECT_ID`                 | variable or secret | Google Cloud project that owns the registry  |
-| `GCP_WORKLOAD_IDENTITY_PROVIDER` | secret             | GitHub OIDC workload identity provider       |
-| `GCP_SERVICE_ACCOUNT`            | secret             | service account allowed to push GCR images   |
-| `GCR_REGISTRY`                   | variable           | optional registry host, defaults to `gcr.io` |
+| Name              | Kind     | Purpose                                                  |
+| ----------------- | -------- | -------------------------------------------------------- |
+| `IMAGE_REGISTRY`  | variable | optional registry host, defaults to `ghcr.io`            |
+| `IMAGE_NAMESPACE` | variable | optional package namespace, defaults to repository owner |
 
 Nightly builds are published from `main` by the scheduled workflow and by
 `main` branch pushes:
 
 ```text
-gcr.io/$GCP_PROJECT_ID/starweaver-gateway:nightly
-gcr.io/$GCP_PROJECT_ID/starweaver-gateway:nightly-YYYYMMDD-SHORTSHA
-gcr.io/$GCP_PROJECT_ID/starweaver-gateway:main-SHORTSHA
-gcr.io/$GCP_PROJECT_ID/starweaver-platform:nightly
-gcr.io/$GCP_PROJECT_ID/starweaver-platform:nightly-YYYYMMDD-SHORTSHA
-gcr.io/$GCP_PROJECT_ID/starweaver-platform:main-SHORTSHA
+ghcr.io/$IMAGE_NAMESPACE/starweaver-gateway:nightly
+ghcr.io/$IMAGE_NAMESPACE/starweaver-gateway:nightly-YYYYMMDD-SHORTSHA
+ghcr.io/$IMAGE_NAMESPACE/starweaver-gateway:main-SHORTSHA
+ghcr.io/$IMAGE_NAMESPACE/starweaver-platform:nightly
+ghcr.io/$IMAGE_NAMESPACE/starweaver-platform:nightly-YYYYMMDD-SHORTSHA
+ghcr.io/$IMAGE_NAMESPACE/starweaver-platform:main-SHORTSHA
 ```
 
 Release builds are published from `v*.*.*` tags or GitHub release publish
 events:
 
 ```text
-gcr.io/$GCP_PROJECT_ID/starweaver-gateway:v0.1.0
-gcr.io/$GCP_PROJECT_ID/starweaver-gateway:0.1.0
-gcr.io/$GCP_PROJECT_ID/starweaver-gateway:latest
-gcr.io/$GCP_PROJECT_ID/starweaver-platform:v0.1.0
-gcr.io/$GCP_PROJECT_ID/starweaver-platform:0.1.0
-gcr.io/$GCP_PROJECT_ID/starweaver-platform:latest
+ghcr.io/$IMAGE_NAMESPACE/starweaver-gateway:v0.1.0
+ghcr.io/$IMAGE_NAMESPACE/starweaver-gateway:0.1.0
+ghcr.io/$IMAGE_NAMESPACE/starweaver-gateway:latest
+ghcr.io/$IMAGE_NAMESPACE/starweaver-platform:v0.1.0
+ghcr.io/$IMAGE_NAMESPACE/starweaver-platform:0.1.0
+ghcr.io/$IMAGE_NAMESPACE/starweaver-platform:latest
 ```
 
 Manual dispatch supports `nightly` and `release` channels. Manual release
