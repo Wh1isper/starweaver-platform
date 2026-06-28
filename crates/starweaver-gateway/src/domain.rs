@@ -1635,6 +1635,39 @@ pub struct ExportManifestRecord {
     pub expires_at: DateTime<Utc>,
 }
 
+/// Durable planned maintenance window admin resource.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MaintenanceWindowRecord {
+    /// Stable maintenance window id.
+    pub maintenance_window_id: String,
+    /// Owning tenant.
+    pub tenant_id: TenantId,
+    /// Optional organization boundary.
+    pub organization_id: Option<OrganizationId>,
+    /// Optional project boundary.
+    pub project_id: Option<ProjectId>,
+    /// Operator-visible name.
+    pub name: String,
+    /// Safe operator reason.
+    pub reason: String,
+    /// Window start timestamp.
+    pub starts_at: DateTime<Utc>,
+    /// Window end timestamp.
+    pub ends_at: DateTime<Utc>,
+    /// Lifecycle status.
+    pub status: ResourceStatus,
+    /// Resource version for optimistic concurrency.
+    pub resource_version: i64,
+    /// Schema version that wrote this record.
+    pub schema_version: u16,
+    /// Creating actor.
+    pub created_by: PrincipalId,
+    /// Creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Update timestamp.
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Durable emergency operation evidence.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EmergencyOperationRecord {

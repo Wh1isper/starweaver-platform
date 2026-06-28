@@ -5699,6 +5699,292 @@
         "x-starweaver-protocol-family": null
       }
     },
+    "/api/admin/v1/maintenance-windows": {
+      "get": {
+        "operationId": "gateway_get_api_admin_v1_maintenance_windows_gateway_maintenance_window_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /api/admin/v1/maintenance-windows",
+        "parameters": [],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-canonical-path": "/admin/v1/maintenance-windows",
+        "x-starweaver-action-id": "gateway.maintenance_window.read",
+        "x-starweaver-resource-kind": "MaintenanceWindow",
+        "x-starweaver-scope-params": [
+          "tenant_id"
+        ],
+        "x-starweaver-allow-api-key": false,
+        "x-starweaver-strong-auth-required": true,
+        "x-starweaver-audit-event-type": "gateway.maintenance_window.read",
+        "x-starweaver-protocol-family": null
+      },
+      "post": {
+        "operationId": "gateway_post_api_admin_v1_maintenance_windows_gateway_maintenance_window_write",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "POST /api/admin/v1/maintenance-windows",
+        "parameters": [],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-canonical-path": "/admin/v1/maintenance-windows",
+        "x-starweaver-action-id": "gateway.maintenance_window.write",
+        "x-starweaver-resource-kind": "MaintenanceWindow",
+        "x-starweaver-scope-params": [
+          "tenant_id"
+        ],
+        "x-starweaver-allow-api-key": false,
+        "x-starweaver-strong-auth-required": true,
+        "x-starweaver-audit-event-type": "gateway.maintenance_window.create",
+        "x-starweaver-protocol-family": null
+      }
+    },
+    "/api/admin/v1/maintenance-windows:validate": {
+      "post": {
+        "operationId": "gateway_post_api_admin_v1_maintenance_windows_validate_gateway_maintenance_window_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "POST /api/admin/v1/maintenance-windows:validate",
+        "parameters": [],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-canonical-path": "/admin/v1/maintenance-windows:validate",
+        "x-starweaver-action-id": "gateway.maintenance_window.read",
+        "x-starweaver-resource-kind": "MaintenanceWindow",
+        "x-starweaver-scope-params": [
+          "tenant_id"
+        ],
+        "x-starweaver-allow-api-key": false,
+        "x-starweaver-strong-auth-required": true,
+        "x-starweaver-audit-event-type": "gateway.maintenance_window.validate",
+        "x-starweaver-protocol-family": null
+      }
+    },
+    "/api/admin/v1/maintenance-windows/{maintenance_window_id}": {
+      "get": {
+        "operationId": "gateway_get_api_admin_v1_maintenance_windows_maintenance_window_id_gateway_maintenance_window_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /api/admin/v1/maintenance-windows/{maintenance_window_id}",
+        "parameters": [
+          {
+            "name": "maintenance_window_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-canonical-path": "/admin/v1/maintenance-windows/{maintenance_window_id}",
+        "x-starweaver-action-id": "gateway.maintenance_window.read",
+        "x-starweaver-resource-kind": "MaintenanceWindow",
+        "x-starweaver-scope-params": [
+          "tenant_id",
+          "maintenance_window_id"
+        ],
+        "x-starweaver-allow-api-key": false,
+        "x-starweaver-strong-auth-required": true,
+        "x-starweaver-audit-event-type": "gateway.maintenance_window.read",
+        "x-starweaver-protocol-family": null
+      },
+      "patch": {
+        "operationId": "gateway_patch_api_admin_v1_maintenance_windows_maintenance_window_id_gateway_maintenance_window_write",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "PATCH /api/admin/v1/maintenance-windows/{maintenance_window_id}",
+        "parameters": [
+          {
+            "name": "maintenance_window_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-canonical-path": "/admin/v1/maintenance-windows/{maintenance_window_id}",
+        "x-starweaver-action-id": "gateway.maintenance_window.write",
+        "x-starweaver-resource-kind": "MaintenanceWindow",
+        "x-starweaver-scope-params": [
+          "tenant_id",
+          "maintenance_window_id"
+        ],
+        "x-starweaver-allow-api-key": false,
+        "x-starweaver-strong-auth-required": true,
+        "x-starweaver-audit-event-type": "gateway.maintenance_window.update",
+        "x-starweaver-protocol-family": null
+      }
+    },
     "/api/admin/v1/emergency/operations": {
       "get": {
         "operationId": "gateway_get_api_admin_v1_emergency_operations_gateway_emergency_disable",

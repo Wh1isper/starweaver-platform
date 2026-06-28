@@ -25,16 +25,16 @@ use crate::domain::{
     ConfigSnapshot, ConfigSnapshotStatus, ConfigWorkerReloadRecord, ConfigWorkerReloadStatus,
     DirectoryStatus, EmergencyOperationRecord, ExportJobRecord, ExportManifestRecord,
     ExternalIdentityRecord, InvitationStatus, LedgerBucketRecord, LoginAttemptRecord,
-    LoginProviderRecord, MembershipStatus, ModelAliasRecord, ModelTargetRecord,
-    NotificationDeliveryAttemptRecord, NotificationOutboxEventRecord, NotificationSinkRecord,
-    NotificationSubscriptionRecord, OrganizationInvitationRecord, OrganizationMembershipRecord,
-    OrganizationRecord, OtelExportConfigRecord, OtelExporterHealthRecord, OtelHeaderRef,
-    OtelResourceAttribute, PricingSkuRecord, ProjectMembershipRecord, ProjectRecord,
-    ProviderEndpointRecord, ProviderGrantRecord, QuotaPolicyRecord, ResourceStatus,
-    RoutePolicyRecord, RoutingGroupRecord, RoutingGroupTargetRecord, RuntimeBudgetLeaseRecord,
-    SecretRefRecord, SecretRefStatus, ServiceAccountRecord, TenancySeed, TenantRecord,
-    UpstreamCredentialRecord, UpstreamCredentialStatus, UsageEventRecord, UserRecord,
-    ValidationDiagnosticRecord,
+    LoginProviderRecord, MaintenanceWindowRecord, MembershipStatus, ModelAliasRecord,
+    ModelTargetRecord, NotificationDeliveryAttemptRecord, NotificationOutboxEventRecord,
+    NotificationSinkRecord, NotificationSubscriptionRecord, OrganizationInvitationRecord,
+    OrganizationMembershipRecord, OrganizationRecord, OtelExportConfigRecord,
+    OtelExporterHealthRecord, OtelHeaderRef, OtelResourceAttribute, PricingSkuRecord,
+    ProjectMembershipRecord, ProjectRecord, ProviderEndpointRecord, ProviderGrantRecord,
+    QuotaPolicyRecord, ResourceStatus, RoutePolicyRecord, RoutingGroupRecord,
+    RoutingGroupTargetRecord, RuntimeBudgetLeaseRecord, SecretRefRecord, SecretRefStatus,
+    ServiceAccountRecord, TenancySeed, TenantRecord, UpstreamCredentialRecord,
+    UpstreamCredentialStatus, UsageEventRecord, UserRecord, ValidationDiagnosticRecord,
 };
 use crate::error::{GatewayError, Result};
 use crate::hot_state::{
@@ -394,6 +394,31 @@ pub trait EmergencyOperationRepository: Send + Sync {
         operation_kind: &str,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Option<EmergencyOperationRecord>;
+}
+
+/// Maintenance window repository boundary.
+pub trait MaintenanceWindowRepository: Send + Sync {
+    /// Creates one planned maintenance window.
+    fn create_maintenance_window(
+        &self,
+        request: CreateMaintenanceWindowRequest,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<MaintenanceWindowRecord>;
+
+    /// Lists maintenance windows in one tenant.
+    fn maintenance_windows_for_tenant(&self, tenant_id: &str) -> Vec<MaintenanceWindowRecord>;
+
+    /// Loads one maintenance window.
+    fn maintenance_window(&self, maintenance_window_id: &str) -> Option<MaintenanceWindowRecord>;
+
+    /// Updates maintenance window status with optimistic concurrency.
+    fn update_maintenance_window_status(
+        &self,
+        maintenance_window_id: &str,
+        expected_resource_version: i64,
+        status: ResourceStatus,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<MaintenanceWindowRecord>;
 }
 
 /// Notification outbox repository boundary.
@@ -1517,6 +1542,27 @@ pub struct CreateEmergencyOperationRequest {
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Request to create a planned maintenance window.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateMaintenanceWindowRequest {
+    /// Tenant boundary.
+    pub tenant_id: String,
+    /// Optional organization boundary.
+    pub organization_id: Option<String>,
+    /// Optional project boundary.
+    pub project_id: Option<String>,
+    /// Operator-visible name.
+    pub name: String,
+    /// Safe operator reason.
+    pub reason: String,
+    /// Window start timestamp.
+    pub starts_at: chrono::DateTime<chrono::Utc>,
+    /// Window end timestamp.
+    pub ends_at: chrono::DateTime<chrono::Utc>,
+    /// Creating actor.
+    pub created_by: String,
+}
+
 /// Request to create an OpenTelemetry export config admin resource.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreateOtelExportConfigRequest {
@@ -1870,6 +1916,7 @@ pub struct InMemoryGatewayStore {
     export_jobs: Arc<RwLock<HashMap<String, ExportJobRecord>>>,
     export_manifests: Arc<RwLock<HashMap<String, ExportManifestRecord>>>,
     emergency_operations: Arc<RwLock<HashMap<String, EmergencyOperationRecord>>>,
+    maintenance_windows: Arc<RwLock<HashMap<String, MaintenanceWindowRecord>>>,
     login_providers: Arc<RwLock<HashMap<String, LoginProviderRecord>>>,
 }
 
@@ -3286,6 +3333,82 @@ impl EmergencyOperationRepository for InMemoryGatewayStore {
                     && operation.status == "applied"
                     && operation.expires_at > now
             })
+    }
+}
+
+impl MaintenanceWindowRepository for InMemoryGatewayStore {
+    fn create_maintenance_window(
+        &self,
+        request: CreateMaintenanceWindowRequest,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<MaintenanceWindowRecord> {
+        validate_maintenance_window_request(self, &request, now)?;
+        let record = MaintenanceWindowRecord {
+            maintenance_window_id: new_prefixed_id("mw"),
+            tenant_id: request.tenant_id,
+            organization_id: request.organization_id,
+            project_id: request.project_id,
+            name: request.name.trim().to_owned(),
+            reason: request.reason.trim().to_owned(),
+            starts_at: request.starts_at,
+            ends_at: request.ends_at,
+            status: ResourceStatus::Active,
+            resource_version: 1,
+            schema_version: 1,
+            created_by: request.created_by,
+            created_at: now,
+            updated_at: now,
+        };
+        write_lock(&self.maintenance_windows)
+            .insert(record.maintenance_window_id.clone(), record.clone());
+        Ok(record)
+    }
+
+    fn maintenance_windows_for_tenant(&self, tenant_id: &str) -> Vec<MaintenanceWindowRecord> {
+        let mut windows = read_lock(&self.maintenance_windows)
+            .values()
+            .filter(|window| window.tenant_id == tenant_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        windows.sort_by(|left, right| {
+            left.starts_at
+                .cmp(&right.starts_at)
+                .then_with(|| left.ends_at.cmp(&right.ends_at))
+                .then_with(|| left.maintenance_window_id.cmp(&right.maintenance_window_id))
+        });
+        windows
+    }
+
+    fn maintenance_window(&self, maintenance_window_id: &str) -> Option<MaintenanceWindowRecord> {
+        read_lock(&self.maintenance_windows)
+            .get(maintenance_window_id)
+            .cloned()
+    }
+
+    fn update_maintenance_window_status(
+        &self,
+        maintenance_window_id: &str,
+        expected_resource_version: i64,
+        status: ResourceStatus,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<MaintenanceWindowRecord> {
+        let mut windows = write_lock(&self.maintenance_windows);
+        let Some(window) = windows.get_mut(maintenance_window_id) else {
+            return Err(GatewayError::NotFound {
+                resource: format!("maintenance window {maintenance_window_id}"),
+            });
+        };
+        if window.resource_version != expected_resource_version {
+            return Err(GatewayError::BadRequest {
+                message: "stale_resource_version".to_owned(),
+            });
+        }
+        window.status = status;
+        window.resource_version += 1;
+        window.updated_at = now;
+        let updated = window.clone();
+        drop(windows);
+        Ok(updated)
     }
 }
 
@@ -6420,6 +6543,40 @@ fn validate_service_account_request(
         Some(organization.organization_id),
         project.map(|project| project.project_id),
     ))
+}
+
+fn validate_maintenance_window_request(
+    store: &InMemoryGatewayStore,
+    request: &CreateMaintenanceWindowRequest,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    validate_optional_project_scope(
+        store,
+        &request.tenant_id,
+        request.organization_id.as_deref(),
+        request.project_id.as_deref(),
+    )?;
+    if request.name.trim().is_empty() {
+        return Err(GatewayError::BadRequest {
+            message: "maintenance_window_name_required".to_owned(),
+        });
+    }
+    if request.reason.trim().is_empty() {
+        return Err(GatewayError::BadRequest {
+            message: "maintenance_window_reason_required".to_owned(),
+        });
+    }
+    if request.starts_at >= request.ends_at {
+        return Err(GatewayError::BadRequest {
+            message: "maintenance_window_time_range_invalid".to_owned(),
+        });
+    }
+    if request.ends_at <= now {
+        return Err(GatewayError::BadRequest {
+            message: "maintenance_window_must_end_in_future".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 const fn service_account_status_supported(status: &DirectoryStatus) -> bool {

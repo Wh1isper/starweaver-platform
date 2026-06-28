@@ -1218,6 +1218,61 @@ const FOUNDATION_ROUTES: &[RouteMetadata] = &[
     },
     RouteMetadata {
         method: Method::GET,
+        path_pattern: "/admin/v1/maintenance-windows",
+        protocol_family: None,
+        action: GatewayAction::MaintenanceWindowRead,
+        resource_kind: "MaintenanceWindow",
+        scope_params: &["tenant_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.maintenance_window.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/maintenance-windows",
+        protocol_family: None,
+        action: GatewayAction::MaintenanceWindowWrite,
+        resource_kind: "MaintenanceWindow",
+        scope_params: &["tenant_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.maintenance_window.create",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/maintenance-windows:validate",
+        protocol_family: None,
+        action: GatewayAction::MaintenanceWindowRead,
+        resource_kind: "MaintenanceWindow",
+        scope_params: &["tenant_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.maintenance_window.validate",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/maintenance-windows/", "{maintenance_window_id}"),
+        protocol_family: None,
+        action: GatewayAction::MaintenanceWindowRead,
+        resource_kind: "MaintenanceWindow",
+        scope_params: &["tenant_id", "maintenance_window_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.maintenance_window.read",
+    },
+    RouteMetadata {
+        method: Method::PATCH,
+        path_pattern: concat!("/admin/v1/maintenance-windows/", "{maintenance_window_id}"),
+        protocol_family: None,
+        action: GatewayAction::MaintenanceWindowWrite,
+        resource_kind: "MaintenanceWindow",
+        scope_params: &["tenant_id", "maintenance_window_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.maintenance_window.update",
+    },
+    RouteMetadata {
+        method: Method::GET,
         path_pattern: "/admin/v1/emergency/operations",
         protocol_family: None,
         action: GatewayAction::EmergencyDisable,
@@ -2474,6 +2529,27 @@ mod tests {
                 .iter()
                 .find(|route| route.path_pattern == path_pattern)
                 .unwrap_or_else(|| panic!("API key route metadata should exist"));
+
+            assert!(!route.allow_api_key);
+            assert!(route.strong_auth_required);
+            assert_eq!(
+                route.actor_constraint_denial(&api_key_actor()),
+                Some("api_key_not_allowed_for_route")
+            );
+        }
+    }
+
+    #[test]
+    fn maintenance_window_routes_require_strong_non_api_key_auth() {
+        for path_pattern in [
+            "/admin/v1/maintenance-windows",
+            "/admin/v1/maintenance-windows:validate",
+            concat!("/admin/v1/maintenance-windows/", "{maintenance_window_id}"),
+        ] {
+            let route = foundation_routes()
+                .iter()
+                .find(|route| route.path_pattern == path_pattern)
+                .unwrap_or_else(|| panic!("maintenance window route metadata should exist"));
 
             assert!(!route.allow_api_key);
             assert!(route.strong_auth_required);

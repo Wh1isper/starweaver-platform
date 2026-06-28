@@ -38,36 +38,38 @@ the server-owned web delivery model.
 - Create and validate OpenTelemetry exporter configuration.
 - Create notification sinks and subscriptions.
 - Inspect delivery attempts and retry state.
-- Keep maintenance windows hidden or disabled until dedicated endpoints exist.
+- Create, inspect, validate, disable, and audit scoped maintenance windows.
 - Run emergency operations such as disable credential, disable endpoint, freeze
   config, force budget block, drain routing group, and rollback snapshot.
 - Verify Docker image and static web serving posture.
 
 ## Data Dependencies
 
-| API                                                         | Use                           |
-| ----------------------------------------------------------- | ----------------------------- |
-| `/api/admin/v1/config/snapshots`                            | list snapshots                |
-| `/api/admin/v1/config/snapshots/{id}`                       | snapshot detail               |
-| `/api/admin/v1/config/snapshots:validate`                   | validation                    |
-| `/api/admin/v1/config/snapshots:publish`                    | publish                       |
-| `/api/admin/v1/config/snapshots:rollback`                   | rollback                      |
-| `/api/admin/v1/config/validation-diagnostics`               | diagnostics                   |
-| `/api/admin/v1/observability/otel-export/configs`           | OTel configs                  |
-| `/api/admin/v1/notification/sinks`                          | notification sinks            |
-| `/api/admin/v1/notification/sinks/{id}/subscriptions`       | notification subscriptions    |
-| `/api/admin/v1/notification/outbox/{id}/replay`             | strong-auth outbox replay     |
-| `/api/admin/v1/exports/jobs`                                | export jobs                   |
-| `/api/admin/v1/exports/jobs/{id}/manifest`                  | export manifests              |
-| `/api/admin/v1/emergency/operations`                        | emergency operation list      |
-| `/api/admin/v1/emergency/operations/{id}`                   | emergency operation detail    |
-| `/api/admin/v1/emergency/upstream-credentials/{id}/disable` | emergency credential disable  |
-| `/api/admin/v1/emergency/provider-endpoints/{id}/disable`   | emergency endpoint disable    |
-| `/api/admin/v1/emergency/routing-groups/{id}/drain`         | emergency routing group drain |
-| `/api/admin/v1/emergency/config/freeze`                     | emergency config freeze       |
-| `/api/admin/v1/emergency/config/snapshots/{id}/rollback`    | emergency snapshot rollback   |
-| `/api/admin/v1/emergency/budget-policies/{id}/force-block`  | emergency budget block        |
-| future maintenance endpoints                                | maintenance windows           |
+| API                                                         | Use                              |
+| ----------------------------------------------------------- | -------------------------------- |
+| `/api/admin/v1/config/snapshots`                            | list snapshots                   |
+| `/api/admin/v1/config/snapshots/{id}`                       | snapshot detail                  |
+| `/api/admin/v1/config/snapshots:validate`                   | validation                       |
+| `/api/admin/v1/config/snapshots:publish`                    | publish                          |
+| `/api/admin/v1/config/snapshots:rollback`                   | rollback                         |
+| `/api/admin/v1/config/validation-diagnostics`               | diagnostics                      |
+| `/api/admin/v1/observability/otel-export/configs`           | OTel configs                     |
+| `/api/admin/v1/notification/sinks`                          | notification sinks               |
+| `/api/admin/v1/notification/sinks/{id}/subscriptions`       | notification subscriptions       |
+| `/api/admin/v1/notification/outbox/{id}/replay`             | strong-auth outbox replay        |
+| `/api/admin/v1/exports/jobs`                                | export jobs                      |
+| `/api/admin/v1/exports/jobs/{id}/manifest`                  | export manifests                 |
+| `/api/admin/v1/emergency/operations`                        | emergency operation list         |
+| `/api/admin/v1/emergency/operations/{id}`                   | emergency operation detail       |
+| `/api/admin/v1/emergency/upstream-credentials/{id}/disable` | emergency credential disable     |
+| `/api/admin/v1/emergency/provider-endpoints/{id}/disable`   | emergency endpoint disable       |
+| `/api/admin/v1/emergency/routing-groups/{id}/drain`         | emergency routing group drain    |
+| `/api/admin/v1/emergency/config/freeze`                     | emergency config freeze          |
+| `/api/admin/v1/emergency/config/snapshots/{id}/rollback`    | emergency snapshot rollback      |
+| `/api/admin/v1/emergency/budget-policies/{id}/force-block`  | emergency budget block           |
+| `/api/admin/v1/maintenance-windows`                         | maintenance window list/create   |
+| `/api/admin/v1/maintenance-windows:validate`                | maintenance window validation    |
+| `/api/admin/v1/maintenance-windows/{id}`                    | maintenance window detail/update |
 
 ## UX Decisions
 

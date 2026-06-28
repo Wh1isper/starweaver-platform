@@ -47,8 +47,8 @@ use crate::domain::{
     CodexOAuthConnectionStatus, CodexOAuthRefreshStatusRecord, CodexOAuthSessionRecord,
     ConfigPublicationPointerRecord, ConfigSnapshot, ConfigWorkerReloadRecord, DirectoryStatus,
     EmergencyOperationRecord, ExportJobRecord, ExportManifestRecord, ExternalIdentityRecord,
-    LedgerBucketRecord, LoginAttemptRecord, LoginProviderRecord, MembershipStatus,
-    ModelAliasRecord, ModelTargetRecord, NotificationDeliveryAttemptRecord,
+    LedgerBucketRecord, LoginAttemptRecord, LoginProviderRecord, MaintenanceWindowRecord,
+    MembershipStatus, ModelAliasRecord, ModelTargetRecord, NotificationDeliveryAttemptRecord,
     NotificationOutboxEventRecord, NotificationSinkRecord, NotificationSubscriptionRecord,
     OrganizationInvitationRecord, OrganizationMembershipRecord, OrganizationRecord,
     OtelExportConfigRecord, OtelExporterHealthRecord, OtelHeaderRef, OtelResourceAttribute,
@@ -84,22 +84,22 @@ use crate::storage::{
     ConfigPublicationRepository, ConfigSnapshotRepository, ConfigSnapshotStore,
     ConsumedLoginAttempt, CreateBudgetPolicyRequest, CreateCodexOAuthConnectionRequest,
     CreateEmergencyOperationRequest, CreateExportJobRequest, CreateLoginAttemptRequest,
-    CreateLoginProviderRequest, CreateModelAliasRequest, CreateModelTargetRequest,
-    CreateNotificationDeliveryAttemptRequest, CreateNotificationOutboxEventRequest,
-    CreateNotificationSinkRequest, CreateNotificationSubscriptionRequest,
-    CreateOrganizationInvitationRequest, CreateOtelExportConfigRequest, CreatePricingSkuRequest,
-    CreateProjectMembershipRequest, CreateProviderEndpointRequest, CreateProviderGrantRequest,
-    CreateQuotaPolicyRequest, CreateRoutePolicyRequest, CreateRoutingGroupRequest,
-    CreateRoutingGroupTargetRequest, CreateSecretRefRequest, CreateServiceAccountRequest,
-    CreateUpstreamCredentialRequest, EmergencyOperationRepository, ExportRepository,
-    ExternalIdentityRepository, IdempotencyRecord, InMemoryGatewayStore,
-    NotificationOutboxRepository, NullablePatch, OrganizationInvitationRepository,
-    PostgresGatewayStore, ProviderAdminRepository, RecordOtelExporterHealthRequest,
-    RotateSecretRefRequest, RuntimePolicyRepository, SecretRefAdminRepository,
-    ServiceAccountAdminRepository, StartCodexOAuthSessionRequest, TenancyBootstrapRepository,
-    TenancyRepository, UpdateModelAliasRequest, UpdateNotificationSinkRequest,
-    UpdateOtelExportConfigRequest, UpsertExternalLoginIdentityRequest, UsageAccountingRepository,
-    ValidationDiagnosticRepository,
+    CreateLoginProviderRequest, CreateMaintenanceWindowRequest, CreateModelAliasRequest,
+    CreateModelTargetRequest, CreateNotificationDeliveryAttemptRequest,
+    CreateNotificationOutboxEventRequest, CreateNotificationSinkRequest,
+    CreateNotificationSubscriptionRequest, CreateOrganizationInvitationRequest,
+    CreateOtelExportConfigRequest, CreatePricingSkuRequest, CreateProjectMembershipRequest,
+    CreateProviderEndpointRequest, CreateProviderGrantRequest, CreateQuotaPolicyRequest,
+    CreateRoutePolicyRequest, CreateRoutingGroupRequest, CreateRoutingGroupTargetRequest,
+    CreateSecretRefRequest, CreateServiceAccountRequest, CreateUpstreamCredentialRequest,
+    EmergencyOperationRepository, ExportRepository, ExternalIdentityRepository, IdempotencyRecord,
+    InMemoryGatewayStore, MaintenanceWindowRepository, NotificationOutboxRepository, NullablePatch,
+    OrganizationInvitationRepository, PostgresGatewayStore, ProviderAdminRepository,
+    RecordOtelExporterHealthRequest, RotateSecretRefRequest, RuntimePolicyRepository,
+    SecretRefAdminRepository, ServiceAccountAdminRepository, StartCodexOAuthSessionRequest,
+    TenancyBootstrapRepository, TenancyRepository, UpdateModelAliasRequest,
+    UpdateNotificationSinkRequest, UpdateOtelExportConfigRequest,
+    UpsertExternalLoginIdentityRequest, UsageAccountingRepository, ValidationDiagnosticRepository,
 };
 use crate::{ProtocolFamily, SERVICE_NAME};
 
@@ -253,6 +253,8 @@ const ADMIN_OTEL_EXPORT_CONFIG_GET_PATH: &str = concat!(
     "/admin/v1/observability/otel-export/configs/",
     "{otel_export_config_id}"
 );
+const ADMIN_MAINTENANCE_WINDOW_GET_PATH: &str =
+    concat!("/admin/v1/maintenance-windows/", "{maintenance_window_id}");
 const ADMIN_OTEL_EXPORT_CONFIG_VALIDATE_PATH: &str = concat!(
     "/admin/v1/observability/otel-export/configs/",
     "{otel_export_config_id}",
@@ -1505,6 +1507,7 @@ fn admin_routes(state: &AppState) -> Router<AppState> {
         .merge(notification_admin_routes())
         .merge(export_admin_routes())
         .merge(emergency_admin_routes())
+        .merge(maintenance_window_admin_routes())
         .merge(login_provider_admin_routes())
         .merge(organization_invitation_admin_routes())
         .merge(route_policy_admin_routes())
@@ -1631,6 +1634,22 @@ fn emergency_admin_routes() -> Router<AppState> {
         .route(
             ADMIN_EMERGENCY_FORCE_BUDGET_BLOCK_PATH,
             post(emergency_force_budget_block),
+        )
+}
+
+fn maintenance_window_admin_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/admin/v1/maintenance-windows",
+            get(list_maintenance_windows).post(create_maintenance_window),
+        )
+        .route(
+            "/admin/v1/maintenance-windows:validate",
+            post(validate_maintenance_window),
+        )
+        .route(
+            ADMIN_MAINTENANCE_WINDOW_GET_PATH,
+            get(get_maintenance_window).patch(update_maintenance_window),
         )
 }
 
@@ -2823,6 +2842,24 @@ struct AdminEmergencyOperationListQuery {
     status: Option<String>,
     limit: Option<usize>,
     cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AdminCreateMaintenanceWindowRequest {
+    idempotency_key: String,
+    organization_id: Option<String>,
+    project_id: Option<String>,
+    name: String,
+    reason: String,
+    starts_at: chrono::DateTime<chrono::Utc>,
+    ends_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AdminUpdateMaintenanceWindowRequest {
+    expected_version: i64,
+    status: ResourceStatus,
+    reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -4891,6 +4928,224 @@ async fn emergency_force_budget_block(
         now,
     );
     Ok(Json(response))
+}
+
+async fn list_maintenance_windows(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        "/admin/v1/maintenance-windows",
+        &actor.tenant_id,
+        now,
+    )
+    .await?;
+    let route = route_metadata(&Method::GET, ADMIN_MAINTENANCE_WINDOW_GET_PATH)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
+    let authorized = authorize_item_list(
+        engine.as_ref(),
+        &actor,
+        route.action,
+        state
+            .store
+            .maintenance_windows_for_tenant(&actor.tenant_id)
+            .into_iter()
+            .map(|window| AuthorizableItem {
+                resource: route.resource(window.maintenance_window_id.clone()),
+                item: window,
+            }),
+    );
+    let resources = authorized
+        .items
+        .iter()
+        .map(maintenance_window_resource_envelope)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "schema": "gateway.admin.maintenance_window_list.v1",
+        "resources": resources,
+        "filtered_count": authorized.filtered_count,
+        "next_cursor": null
+    })))
+}
+
+async fn validate_maintenance_window(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Json(request): Json<AdminCreateMaintenanceWindowRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::POST,
+        "/admin/v1/maintenance-windows:validate",
+        &actor.tenant_id,
+        now,
+    )
+    .await?;
+    let errors = maintenance_window_validation_errors(&state, &actor, &request, now);
+    Ok(validation_response(
+        &state,
+        &actor,
+        validation_input(
+            "gateway.admin.maintenance_window_validation.v1",
+            "MaintenanceWindow",
+            "tenant",
+            actor.tenant_id.clone(),
+            errors,
+            now,
+        ),
+    ))
+}
+
+async fn create_maintenance_window(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Json(request): Json<AdminCreateMaintenanceWindowRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    validate_idempotency_key(&request.idempotency_key)?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::POST,
+        "/admin/v1/maintenance-windows",
+        &actor.tenant_id,
+        now,
+    )
+    .await?;
+    let request_hash = stable_request_hash(&request)?;
+    let scope_key = idempotency_scope_key("maintenance_windows:create", &request.idempotency_key);
+    if let Some(response) =
+        state
+            .store
+            .idempotency_response(&actor.tenant_id, &scope_key, &request_hash, now)?
+    {
+        return Ok(Json(response_with_replay_flag(response, true)));
+    }
+    reject_validation_errors(&maintenance_window_validation_errors(
+        &state, &actor, &request, now,
+    ))?;
+    let window = state.store.create_maintenance_window(
+        CreateMaintenanceWindowRequest {
+            tenant_id: actor.tenant_id.clone(),
+            organization_id: request.organization_id,
+            project_id: request.project_id,
+            name: request.name,
+            reason: request.reason,
+            starts_at: request.starts_at,
+            ends_at: request.ends_at,
+            created_by: actor_principal_or_actor_id(&actor),
+        },
+        now,
+    )?;
+    let audit_event_id = record_admin_resource_audit(
+        &state,
+        &actor,
+        AdminResourceAuditInput {
+            event_type: "gateway.maintenance_window.create",
+            scope_kind: "tenant",
+            scope_id: actor.tenant_id.clone(),
+            resource_kind: "MaintenanceWindow",
+            resource_id: window.maintenance_window_id.clone(),
+            before_version: None,
+            after_version: Some(window.resource_version),
+            redacted_diff: maintenance_window_diff(&window),
+            occurred_at: now,
+        },
+    );
+    let response = json!({
+        "schema": "gateway.admin.maintenance_window_mutation.v1",
+        "resource": maintenance_window_resource_body(&window),
+        "audit_event_id": audit_event_id,
+        "idempotency_replayed": false
+    });
+    record_idempotent_admin_response(
+        &state,
+        actor.tenant_id,
+        scope_key,
+        request_hash,
+        &response,
+        now,
+    );
+    Ok(Json(response))
+}
+
+async fn get_maintenance_window(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(maintenance_window_id): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_MAINTENANCE_WINDOW_GET_PATH,
+        &maintenance_window_id,
+        now,
+    )
+    .await?;
+    let window = maintenance_window_for_actor(&state, &actor, &maintenance_window_id)?;
+    Ok(Json(json!({
+        "schema": "gateway.admin.maintenance_window.v1",
+        "resource": maintenance_window_resource_body(&window)
+    })))
+}
+
+async fn update_maintenance_window(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(maintenance_window_id): Path<String>,
+    Json(request): Json<AdminUpdateMaintenanceWindowRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::PATCH,
+        ADMIN_MAINTENANCE_WINDOW_GET_PATH,
+        &maintenance_window_id,
+        now,
+    )
+    .await?;
+    let before = maintenance_window_for_actor(&state, &actor, &maintenance_window_id)?;
+    let updated = state.store.update_maintenance_window_status(
+        &maintenance_window_id,
+        request.expected_version,
+        request.status,
+        now,
+    )?;
+    let audit_event_id = record_admin_resource_audit(
+        &state,
+        &actor,
+        AdminResourceAuditInput {
+            event_type: "gateway.maintenance_window.update",
+            scope_kind: "tenant",
+            scope_id: actor.tenant_id.clone(),
+            resource_kind: "MaintenanceWindow",
+            resource_id: updated.maintenance_window_id.clone(),
+            before_version: Some(before.resource_version),
+            after_version: Some(updated.resource_version),
+            redacted_diff: json!({
+                "status": {
+                    "before": before.status.as_str(),
+                    "after": updated.status.as_str()
+                },
+                "reason": request.reason
+            }),
+            occurred_at: now,
+        },
+    );
+    Ok(Json(json!({
+        "schema": "gateway.admin.maintenance_window_mutation.v1",
+        "resource": maintenance_window_resource_body(&updated),
+        "audit_event_id": audit_event_id
+    })))
 }
 
 async fn validate_config_snapshot(
@@ -17938,6 +18193,20 @@ fn emergency_operation_for_actor(
         })
 }
 
+fn maintenance_window_for_actor(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    maintenance_window_id: &str,
+) -> Result<MaintenanceWindowRecord> {
+    state
+        .store
+        .maintenance_window(maintenance_window_id)
+        .filter(|window| window.tenant_id == actor.tenant_id)
+        .ok_or_else(|| GatewayError::NotFound {
+            resource: format!("maintenance window {maintenance_window_id}"),
+        })
+}
+
 fn export_manifest_for_job(
     state: &AppState,
     job: &ExportJobRecord,
@@ -18101,6 +18370,53 @@ fn routing_group_target_for_actor(
         .ok_or_else(|| GatewayError::NotFound {
             resource: format!("routing group target {routing_group_target_id}"),
         })
+}
+
+fn maintenance_window_validation_errors(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    request: &AdminCreateMaintenanceWindowRequest,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<Value> {
+    let mut errors = Vec::new();
+    if request.name.trim().is_empty() {
+        errors.push(validation_error("name", "required"));
+    }
+    if request.reason.trim().is_empty() {
+        errors.push(validation_error("reason", "required"));
+    }
+    if request.starts_at >= request.ends_at {
+        errors.push(validation_error(
+            "time_range",
+            "starts_at_must_precede_ends_at",
+        ));
+    }
+    if request.ends_at <= now {
+        errors.push(validation_error("ends_at", "must_be_future"));
+    }
+    if let Some(organization_id) = request.organization_id.as_deref() {
+        if organization_for_actor(state, actor, organization_id).is_err() {
+            errors.push(validation_error("organization_id", "unknown_organization"));
+        }
+    }
+    if let Some(project_id) = request.project_id.as_deref() {
+        match project_for_actor(state, actor, project_id) {
+            Ok(project)
+                if request
+                    .organization_id
+                    .as_ref()
+                    .is_some_and(|organization_id| organization_id != &project.organization_id) =>
+            {
+                errors.push(validation_error(
+                    "project_id",
+                    "project_organization_mismatch",
+                ));
+            }
+            Ok(_) => {}
+            Err(_) => errors.push(validation_error("project_id", "unknown_project")),
+        }
+    }
+    errors
 }
 
 fn provider_endpoint_validation_errors(
@@ -20531,6 +20847,46 @@ fn emergency_operation_resource_body(operation: &EmergencyOperationRecord) -> Va
         "created_at": operation.created_at,
         "updated_at": operation.updated_at,
         "expires_at": operation.expires_at
+    })
+}
+
+fn maintenance_window_resource_envelope(window: &MaintenanceWindowRecord) -> Value {
+    json!({
+        "schema": "gateway.admin.resource.v1",
+        "resource": maintenance_window_resource_body(window)
+    })
+}
+
+fn maintenance_window_resource_body(window: &MaintenanceWindowRecord) -> Value {
+    json!({
+        "kind": "maintenance_window",
+        "id": &window.maintenance_window_id,
+        "maintenance_window_id": &window.maintenance_window_id,
+        "tenant_id": &window.tenant_id,
+        "organization_id": &window.organization_id,
+        "project_id": &window.project_id,
+        "name": &window.name,
+        "reason": &window.reason,
+        "starts_at": window.starts_at,
+        "ends_at": window.ends_at,
+        "status": &window.status,
+        "version": window.resource_version,
+        "schema_version": window.schema_version,
+        "created_by": &window.created_by,
+        "created_at": window.created_at,
+        "updated_at": window.updated_at
+    })
+}
+
+fn maintenance_window_diff(window: &MaintenanceWindowRecord) -> Value {
+    json!({
+        "organization_id": &window.organization_id,
+        "project_id": &window.project_id,
+        "name": &window.name,
+        "reason": &window.reason,
+        "starts_at": window.starts_at,
+        "ends_at": window.ends_at,
+        "status": window.status.as_str()
     })
 }
 
@@ -28464,6 +28820,149 @@ mod tests {
             .is_some_and(|rows| rows.iter().any(|row| row["kind"] == "audit_event")));
         let audit_text = audit_body.to_string();
         assert!(!audit_text.contains("sec_openai"));
+    }
+
+    #[tokio::test]
+    async fn admin_maintenance_window_validate_and_reject_api_key_actor() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        let starts_at = chrono::Utc::now() + Duration::minutes(10);
+        let ends_at = starts_at + Duration::hours(2);
+
+        let invalid = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/maintenance-windows:validate",
+            json!({
+                "idempotency_key": "idem_maintenance_invalid",
+                "organization_id": TEST_ORGANIZATION_ID,
+                "project_id": TEST_PROJECT_ID,
+                "name": "",
+                "reason": "",
+                "starts_at": ends_at,
+                "ends_at": starts_at
+            }),
+        )
+        .await;
+        let invalid_status = invalid.status();
+        let invalid_body = response_json(invalid).await;
+        assert_eq!(invalid_status, StatusCode::OK, "{invalid_body:?}");
+        assert_eq!(invalid_body["valid"], false);
+        assert!(invalid_body["errors"].as_array().map_or(0, Vec::len) >= 3);
+
+        let denied = post_admin_json_with_bearer(
+            store.clone(),
+            &raw_key,
+            "/admin/v1/maintenance-windows",
+            json!({
+                "idempotency_key": "idem_maintenance_api_key_denied",
+                "organization_id": TEST_ORGANIZATION_ID,
+                "project_id": TEST_PROJECT_ID,
+                "name": "Provider maintenance",
+                "reason": "Scheduled provider work.",
+                "starts_at": starts_at,
+                "ends_at": ends_at
+            }),
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        assert!(store.audit_events().is_empty());
+    }
+
+    #[tokio::test]
+    async fn admin_maintenance_window_create_list_get_and_update() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let request = maintenance_window_request("idem_maintenance_create");
+        let (window_id, create_body) =
+            create_maintenance_window_over_http(store.clone(), &raw_session, request.clone()).await;
+
+        assert_eq!(create_body["resource"]["status"], "active");
+        assert_eq!(create_body["resource"]["version"], 1);
+
+        let replay = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/maintenance-windows",
+            request,
+        )
+        .await;
+        let replay_body = response_json(replay).await;
+        assert_eq!(replay_body["idempotency_replayed"], true);
+        assert_eq!(replay_body["resource"]["id"], window_id);
+
+        let list = get_admin(store.clone(), &raw_session, "/admin/v1/maintenance-windows").await;
+        let list_status = list.status();
+        let list_body = response_json(list).await;
+        assert_eq!(list_status, StatusCode::OK, "{list_body:?}");
+        assert_eq!(list_body["resources"].as_array().map_or(0, Vec::len), 1);
+        assert_eq!(list_body["resources"][0]["resource"]["id"], window_id);
+
+        let get = get_admin(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/maintenance-windows/{window_id}"),
+        )
+        .await;
+        let get_status = get.status();
+        let get_body = response_json(get).await;
+        assert_eq!(get_status, StatusCode::OK, "{get_body:?}");
+        assert_eq!(get_body["resource"]["id"], window_id);
+
+        let update = patch_admin_json(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/maintenance-windows/{window_id}"),
+            json!({
+                "expected_version": 1,
+                "status": "disabled",
+                "reason": "Maintenance canceled."
+            }),
+        )
+        .await;
+        let update_status = update.status();
+        let update_body = response_json(update).await;
+        assert_eq!(update_status, StatusCode::OK, "{update_body:?}");
+        assert_eq!(update_body["resource"]["status"], "disabled");
+        assert_eq!(update_body["resource"]["version"], 2);
+        assert_eq!(store.audit_events().len(), 2);
+        assert_eq!(
+            store.audit_events()[0].event_type,
+            "gateway.maintenance_window.create"
+        );
+        assert_eq!(
+            store.audit_events()[1].event_type,
+            "gateway.maintenance_window.update"
+        );
+    }
+
+    async fn create_maintenance_window_over_http(
+        store: InMemoryGatewayStore,
+        raw_session: &str,
+        request: Value,
+    ) -> (String, Value) {
+        let create =
+            post_admin_json(store, raw_session, "/admin/v1/maintenance-windows", request).await;
+        let create_status = create.status();
+        let create_body = response_json(create).await;
+        assert_eq!(create_status, StatusCode::OK, "{create_body:?}");
+        let window_id = create_body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("maintenance window id should be present"))
+            .to_owned();
+        (window_id, create_body)
+    }
+
+    fn maintenance_window_request(idempotency_key: &str) -> Value {
+        let starts_at = chrono::Utc::now() + Duration::minutes(10);
+        let ends_at = starts_at + Duration::hours(2);
+        json!({
+            "idempotency_key": idempotency_key,
+            "organization_id": TEST_ORGANIZATION_ID,
+            "project_id": TEST_PROJECT_ID,
+            "name": "Provider maintenance",
+            "reason": "Scheduled provider work.",
+            "starts_at": starts_at,
+            "ends_at": ends_at
+        })
     }
 
     #[tokio::test]

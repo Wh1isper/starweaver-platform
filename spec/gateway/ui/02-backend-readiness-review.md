@@ -33,7 +33,7 @@ at `/api/openapi.json`.
 | Access and identity       | Ready for the planned access flows. Backend has organizations, projects, memberships, project-member create, invitations, users, user sessions, external identities, identity providers, service accounts, API key create/list/get/rotate/disable with one-time raw key return, local single-user, generic OIDC, and CSRF-protected session mutations. |
 | Policy and cost controls  | Ready for provider grants, budgets, quotas, runtime budget/quota enforcement evidence, and conservative-mode dashboard state. Admission and redaction policy admin endpoints remain future.                                                                                                                                                            |
 | Evidence and audit        | Ready for route decision list/detail, route attempt list/detail, usage events, audit event list, export jobs, and manifests.                                                                                                                                                                                                                           |
-| Operations and delivery   | Ready for config snapshots, validation diagnostics, publish, rollback, OTel export config, notification sinks/subscriptions/outbox replay, export jobs, emergency operations, production profile gates, Docker image smoke, compose smoke, restore rehearsal, and `/api` external mount. Web asset serving remains Phase 0 work.                       |
+| Operations and delivery   | Ready for config snapshots, validation diagnostics, publish, rollback, OTel export config, notification sinks/subscriptions/outbox replay, export jobs, emergency operations, maintenance windows, production profile gates, Docker image smoke, compose smoke, restore rehearsal, and `/api` external mount. Web asset serving remains Phase 0 work.  |
 
 ## Route Prefix Readiness
 
@@ -108,7 +108,6 @@ These UI specs must remain explicitly blocked or phased:
 - catalog import endpoints
 - admission policy endpoints
 - redaction policy endpoints
-- maintenance window endpoints
 - detailed realtime sub-endpoints beyond overview
 
 ## Readiness Requirements Before UI Implementation Exits Phase 0

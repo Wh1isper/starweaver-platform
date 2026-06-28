@@ -274,8 +274,8 @@ Work items:
   publication convergence pages.
 - Implement OpenTelemetry export config, notification sinks, notification
   subscriptions, notification outbox replay, export jobs, and emergency
-  operations. Maintenance windows remain blocked until explicit endpoints
-  exist.
+  operations. Maintenance windows can use the scoped list/create/validate/get
+  and update endpoints.
 - Add incident-mode UI patterns for drain, disable, freeze config, force budget
   block, and rollback.
 - Add Playwright e2e coverage for critical workflows.
