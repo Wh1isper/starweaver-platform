@@ -277,6 +277,8 @@ Admin/config actions:
 | `gateway.route_policy.write`           | `RoutePolicy`             |
 | `gateway.provider_grant.read`          | `ProviderGrant`           |
 | `gateway.provider_grant.write`         | `ProviderGrant`           |
+| `gateway.catalog_import.create`        | `CatalogImport`           |
+| `gateway.catalog_import.read`          | `CatalogImport`           |
 | `gateway.quota_policy.read`            | `QuotaPolicy`             |
 | `gateway.quota_policy.write`           | `QuotaPolicy`             |
 | `gateway.admission_policy.read`        | `AdmissionPolicy`         |

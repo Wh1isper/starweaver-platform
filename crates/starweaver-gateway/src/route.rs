@@ -199,6 +199,50 @@ const FOUNDATION_ROUTES: &[RouteMetadata] = &[
         audit_event_type: "gateway.config.validation_diagnostic.read",
     },
     RouteMetadata {
+        method: Method::GET,
+        path_pattern: "/admin/v1/catalog-imports",
+        protocol_family: None,
+        action: GatewayAction::CatalogImportRead,
+        resource_kind: "CatalogImport",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.catalog_import.read",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/catalog-imports",
+        protocol_family: None,
+        action: GatewayAction::CatalogImportCreate,
+        resource_kind: "CatalogImport",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.catalog_import.create",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: "/admin/v1/catalog-imports:validate",
+        protocol_family: None,
+        action: GatewayAction::CatalogImportRead,
+        resource_kind: "CatalogImport",
+        scope_params: &["tenant_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.catalog_import.validate",
+    },
+    RouteMetadata {
+        method: Method::GET,
+        path_pattern: concat!("/admin/v1/catalog-imports/", "{catalog_import_id}"),
+        protocol_family: None,
+        action: GatewayAction::CatalogImportRead,
+        resource_kind: "CatalogImport",
+        scope_params: &["tenant_id", "catalog_import_id"],
+        allow_api_key: true,
+        strong_auth_required: false,
+        audit_event_type: "gateway.catalog_import.read",
+    },
+    RouteMetadata {
         method: Method::POST,
         path_pattern: "/admin/v1/route-simulations",
         protocol_family: None,
@@ -2436,6 +2480,8 @@ pub const fn foundation_routes() -> &'static [RouteMetadata] {
 mod tests {
     use std::collections::HashSet;
 
+    use axum::http::Method;
+
     use crate::action::{ActionGrant, FoundationAuthorizationEngine, GatewayAction};
     use crate::domain::{ActorKind, AuthenticatedActor, CredentialKind};
     use crate::route::{authorize_route_with_evidence, foundation_routes};
@@ -2558,6 +2604,46 @@ mod tests {
                 Some("api_key_not_allowed_for_route")
             );
         }
+    }
+
+    #[test]
+    fn catalog_import_routes_use_catalog_import_actions() {
+        for (path_pattern, action) in [
+            (
+                "/admin/v1/catalog-imports",
+                GatewayAction::CatalogImportRead,
+            ),
+            (
+                "/admin/v1/catalog-imports:validate",
+                GatewayAction::CatalogImportRead,
+            ),
+            (
+                concat!("/admin/v1/catalog-imports/", "{catalog_import_id}"),
+                GatewayAction::CatalogImportRead,
+            ),
+        ] {
+            let route = foundation_routes()
+                .iter()
+                .find(|route| route.path_pattern == path_pattern && route.method == Method::GET)
+                .or_else(|| {
+                    foundation_routes()
+                        .iter()
+                        .find(|route| route.path_pattern == path_pattern)
+                })
+                .unwrap_or_else(|| panic!("catalog import route metadata should exist"));
+
+            assert_eq!(route.action, action);
+            assert_eq!(route.resource_kind, "CatalogImport");
+            assert!(route.allow_api_key);
+            assert!(!route.strong_auth_required);
+        }
+        let create = foundation_routes()
+            .iter()
+            .find(|route| {
+                route.path_pattern == "/admin/v1/catalog-imports" && route.method == Method::POST
+            })
+            .unwrap_or_else(|| panic!("catalog import create route metadata should exist"));
+        assert_eq!(create.action, GatewayAction::CatalogImportCreate);
     }
 
     #[test]

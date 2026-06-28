@@ -253,6 +253,12 @@ Completed foundation slices:
   scopes. Validation checks scope ownership, supported grant resource kinds,
   resource existence, allow/deny closure-mode compatibility, and duplicate
   grants.
+- Catalog import admin API exposes draft-only dry-run validation, idempotent
+  create, list, and get routes. Validation checks tenant and project scope,
+  supported catalog resource kinds, resource count limits, and rejects raw
+  secret, token, password, API key, or authorization material while still
+  allowing safe `secret_ref_id` references. Create records validation
+  diagnostics and audit evidence but does not publish runtime config snapshots.
 - Pricing SKU admin API exposes dry-run validation, idempotent create, list,
   get, and status update routes. Pricing documents are created with immutable
   `pricing_version`, fixed-point `micro_usd` unit validation, ISO currency

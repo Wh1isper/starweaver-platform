@@ -40,18 +40,20 @@ pricing-version constraints clear before routing policies are published.
 
 ## Data Dependencies
 
-| API                                    | Use                         |
-| -------------------------------------- | --------------------------- |
-| `/api/admin/v1/model-aliases`          | list and create aliases     |
-| `/api/admin/v1/model-aliases:validate` | alias validation            |
-| `/api/admin/v1/model-aliases/{id}`     | alias detail and update     |
-| `/api/admin/v1/model-targets`          | list and create targets     |
-| `/api/admin/v1/model-targets:validate` | target validation           |
-| `/api/admin/v1/model-targets/{id}`     | target detail and update    |
-| `/api/admin/v1/pricing-skus`           | list and create pricing     |
-| `/api/admin/v1/pricing-skus:validate`  | pricing validation          |
-| `/api/admin/v1/pricing-skus/{id}`      | pricing detail and status   |
-| future catalog import endpoints        | draft import and validation |
+| API                                      | Use                       |
+| ---------------------------------------- | ------------------------- |
+| `/api/admin/v1/model-aliases`            | list and create aliases   |
+| `/api/admin/v1/model-aliases:validate`   | alias validation          |
+| `/api/admin/v1/model-aliases/{id}`       | alias detail and update   |
+| `/api/admin/v1/model-targets`            | list and create targets   |
+| `/api/admin/v1/model-targets:validate`   | target validation         |
+| `/api/admin/v1/model-targets/{id}`       | target detail and update  |
+| `/api/admin/v1/pricing-skus`             | list and create pricing   |
+| `/api/admin/v1/pricing-skus:validate`    | pricing validation        |
+| `/api/admin/v1/pricing-skus/{id}`        | pricing detail and status |
+| `/api/admin/v1/catalog-imports`          | list and create imports   |
+| `/api/admin/v1/catalog-imports:validate` | import validation         |
+| `/api/admin/v1/catalog-imports/{id}`     | import detail             |
 
 ## UX Decisions
 

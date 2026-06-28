@@ -27,7 +27,7 @@ at `/api/openapi.json`.
 | App shell and auth        | Ready after `/api` mount. Backend has single-user login, generic OIDC provider discovery/start/callback, session read, logout, default/active org/project updates, invitation preview/accept, and CSRF metadata.                                                                                                                                       |
 | Overview and realtime ops | Ready for overview. Backend has realtime overview plus tenant, organization, project, project member, API key, service account, model alias, model target, and provider endpoint overview/observability routes. Detailed realtime subpages still need dedicated endpoints.                                                                             |
 | Usage and observability   | Ready. Backend has usage summary, timeseries, event rows, project/member/model/provider breakdowns, durable ledger-backed dashboard measures, model dashboards, target dashboards, and provider endpoint usage observability.                                                                                                                          |
-| Model catalog             | Ready for aliases, targets, pricing SKUs. Catalog import remains future.                                                                                                                                                                                                                                                                               |
+| Model catalog             | Ready for aliases, targets, pricing SKUs, and draft catalog imports with validation diagnostics.                                                                                                                                                                                                                                                       |
 | Routing                   | Ready for routing groups, routing group targets, route policies, and route simulation.                                                                                                                                                                                                                                                                 |
 | Providers and credentials | Ready. Backend has provider endpoints, upstream credentials, secret refs, strong-auth secret locator reads, Codex OAuth connections/sessions/revoke/refresh-status, and redaction behavior.                                                                                                                                                            |
 | Access and identity       | Ready for the planned access flows. Backend has organizations, projects, memberships, project-member create, invitations, users, user sessions, external identities, identity providers, service accounts, API key create/list/get/rotate/disable with one-time raw key return, local single-user, generic OIDC, and CSRF-protected session mutations. |
@@ -105,7 +105,6 @@ These UI specs must remain explicitly blocked or phased:
 
 - server-owned web static asset serving and SPA fallback
 - web build, lint, test, and Docker asset packaging gates
-- catalog import endpoints
 - admission policy endpoints
 - redaction policy endpoints
 - detailed realtime sub-endpoints beyond overview

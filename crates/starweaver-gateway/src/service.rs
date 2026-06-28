@@ -43,20 +43,21 @@ use crate::config::{
 };
 use crate::domain::{
     new_prefixed_id, ActorKind, ActorScope, ApiKeyRecord, ApiKeyStatus, AuditEventRecord,
-    AuthSessionRecord, AuthenticatedActor, BudgetPolicyRecord, CodexOAuthConnectionRecord,
-    CodexOAuthConnectionStatus, CodexOAuthRefreshStatusRecord, CodexOAuthSessionRecord,
-    ConfigPublicationPointerRecord, ConfigSnapshot, ConfigWorkerReloadRecord, DirectoryStatus,
-    EmergencyOperationRecord, ExportJobRecord, ExportManifestRecord, ExternalIdentityRecord,
-    LedgerBucketRecord, LoginAttemptRecord, LoginProviderRecord, MaintenanceWindowRecord,
-    MembershipStatus, ModelAliasRecord, ModelTargetRecord, NotificationDeliveryAttemptRecord,
-    NotificationOutboxEventRecord, NotificationSinkRecord, NotificationSubscriptionRecord,
-    OrganizationInvitationRecord, OrganizationMembershipRecord, OrganizationRecord,
-    OtelExportConfigRecord, OtelExporterHealthRecord, OtelHeaderRef, OtelResourceAttribute,
-    PricingSkuRecord, ProjectMembershipRecord, ProjectRecord, ProviderEndpoint,
-    ProviderEndpointRecord, ProviderGrantRecord, QuotaPolicyRecord, ResourceStatus,
-    RoutePolicyRecord, RoutingGroupRecord, RoutingGroupTargetRecord, RuntimeBudgetLeaseRecord,
-    SecretRefRecord, SecretRefStatus, ServiceAccountRecord, UpstreamCredentialRecord,
-    UpstreamCredentialStatus, UsageEventRecord, ValidationDiagnosticRecord,
+    AuthSessionRecord, AuthenticatedActor, BudgetPolicyRecord, CatalogImportRecord,
+    CodexOAuthConnectionRecord, CodexOAuthConnectionStatus, CodexOAuthRefreshStatusRecord,
+    CodexOAuthSessionRecord, ConfigPublicationPointerRecord, ConfigSnapshot,
+    ConfigWorkerReloadRecord, DirectoryStatus, EmergencyOperationRecord, ExportJobRecord,
+    ExportManifestRecord, ExternalIdentityRecord, LedgerBucketRecord, LoginAttemptRecord,
+    LoginProviderRecord, MaintenanceWindowRecord, MembershipStatus, ModelAliasRecord,
+    ModelTargetRecord, NotificationDeliveryAttemptRecord, NotificationOutboxEventRecord,
+    NotificationSinkRecord, NotificationSubscriptionRecord, OrganizationInvitationRecord,
+    OrganizationMembershipRecord, OrganizationRecord, OtelExportConfigRecord,
+    OtelExporterHealthRecord, OtelHeaderRef, OtelResourceAttribute, PricingSkuRecord,
+    ProjectMembershipRecord, ProjectRecord, ProviderEndpoint, ProviderEndpointRecord,
+    ProviderGrantRecord, QuotaPolicyRecord, ResourceStatus, RoutePolicyRecord, RoutingGroupRecord,
+    RoutingGroupTargetRecord, RuntimeBudgetLeaseRecord, SecretRefRecord, SecretRefStatus,
+    ServiceAccountRecord, UpstreamCredentialRecord, UpstreamCredentialStatus, UsageEventRecord,
+    ValidationDiagnosticRecord,
 };
 use crate::error::{GatewayError, Result};
 use crate::hot_state::{
@@ -82,10 +83,10 @@ use crate::storage::{
     ApiKeyRepository, AuthSessionRepository, BootstrapDefaultProjectRequest,
     CatalogAdminRepository, CodexOAuthRepository, CompleteExportJobRequest,
     ConfigPublicationRepository, ConfigSnapshotRepository, ConfigSnapshotStore,
-    ConsumedLoginAttempt, CreateBudgetPolicyRequest, CreateCodexOAuthConnectionRequest,
-    CreateEmergencyOperationRequest, CreateExportJobRequest, CreateLoginAttemptRequest,
-    CreateLoginProviderRequest, CreateMaintenanceWindowRequest, CreateModelAliasRequest,
-    CreateModelTargetRequest, CreateNotificationDeliveryAttemptRequest,
+    ConsumedLoginAttempt, CreateBudgetPolicyRequest, CreateCatalogImportRequest,
+    CreateCodexOAuthConnectionRequest, CreateEmergencyOperationRequest, CreateExportJobRequest,
+    CreateLoginAttemptRequest, CreateLoginProviderRequest, CreateMaintenanceWindowRequest,
+    CreateModelAliasRequest, CreateModelTargetRequest, CreateNotificationDeliveryAttemptRequest,
     CreateNotificationOutboxEventRequest, CreateNotificationSinkRequest,
     CreateNotificationSubscriptionRequest, CreateOrganizationInvitationRequest,
     CreateOtelExportConfigRequest, CreatePricingSkuRequest, CreateProjectMembershipRequest,
@@ -114,6 +115,8 @@ const PERCENT_HEX: &[u8; 16] = b"0123456789ABCDEF";
 const ADMIN_CONFIG_SNAPSHOT_GET_PATH: &str =
     concat!("/admin/v1/config/snapshots/", "{snapshot_id}");
 const ADMIN_CONFIG_VALIDATION_DIAGNOSTICS_PATH: &str = "/admin/v1/config/validation-diagnostics";
+const ADMIN_CATALOG_IMPORT_GET_PATH: &str =
+    concat!("/admin/v1/catalog-imports/", "{catalog_import_id}");
 const ADMIN_ROUTE_SIMULATION_LIST_PATH: &str = "/admin/v1/route-simulations";
 const ADMIN_ROUTE_DECISION_LIST_PATH: &str = "/admin/v1/route-decisions";
 const ADMIN_ROUTE_DECISION_GET_PATH: &str =
@@ -1450,6 +1453,7 @@ fn admin_routes(state: &AppState) -> Router<AppState> {
             ADMIN_CONFIG_VALIDATION_DIAGNOSTICS_PATH,
             get(list_validation_diagnostics),
         )
+        .merge(catalog_import_admin_routes())
         .route(ADMIN_ROUTE_SIMULATION_LIST_PATH, post(run_route_simulation))
         .route(ADMIN_ROUTE_DECISION_LIST_PATH, get(list_route_decisions))
         .route(ADMIN_ROUTE_DECISION_GET_PATH, get(get_route_decision))
@@ -1517,6 +1521,19 @@ fn admin_routes(state: &AppState) -> Router<AppState> {
             state.clone(),
             auth_context_middleware,
         ))
+}
+
+fn catalog_import_admin_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/admin/v1/catalog-imports",
+            get(list_catalog_imports).post(create_catalog_import),
+        )
+        .route(
+            "/admin/v1/catalog-imports:validate",
+            post(validate_catalog_import),
+        )
+        .route(ADMIN_CATALOG_IMPORT_GET_PATH, get(get_catalog_import))
 }
 
 fn tenancy_admin_routes() -> Router<AppState> {
@@ -2724,6 +2741,16 @@ struct AdminCreateModelAliasRequest {
     route_policy_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AdminCreateCatalogImportRequest {
+    idempotency_key: String,
+    organization_id: Option<String>,
+    project_id: Option<String>,
+    #[serde(default = "default_catalog_import_mode")]
+    import_mode: String,
+    import_document: Value,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct AdminUpdateModelAliasRequest {
     expected_version: i64,
@@ -3731,6 +3758,175 @@ async fn list_validation_diagnostics(
         "schema": "gateway.admin.config_validation_diagnostic_list.v1",
         "diagnostics": diagnostics,
         "next_cursor": null
+    })))
+}
+
+async fn list_catalog_imports(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        "/admin/v1/catalog-imports",
+        &actor.tenant_id,
+        now,
+    )
+    .await?;
+    let route = route_metadata(&Method::GET, ADMIN_CATALOG_IMPORT_GET_PATH)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
+    let authorized = authorize_item_list(
+        engine.as_ref(),
+        &actor,
+        route.action,
+        state
+            .store
+            .catalog_imports_for_tenant(&actor.tenant_id)
+            .into_iter()
+            .map(|import| AuthorizableItem {
+                resource: route.resource(import.catalog_import_id.clone()),
+                item: import,
+            }),
+    );
+    let resources = authorized
+        .items
+        .iter()
+        .map(catalog_import_resource_envelope)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "schema": "gateway.admin.catalog_import_list.v1",
+        "resources": resources,
+        "filtered_count": authorized.filtered_count,
+        "next_cursor": null
+    })))
+}
+
+async fn validate_catalog_import(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Json(request): Json<AdminCreateCatalogImportRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::POST,
+        "/admin/v1/catalog-imports:validate",
+        &actor.tenant_id,
+        now,
+    )
+    .await?;
+    Ok(catalog_import_validation_response(
+        &state, &actor, &request, now,
+    ))
+}
+
+async fn create_catalog_import(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Json(request): Json<AdminCreateCatalogImportRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    validate_idempotency_key(&request.idempotency_key)?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::POST,
+        "/admin/v1/catalog-imports",
+        &actor.tenant_id,
+        now,
+    )
+    .await?;
+    let request_hash = stable_request_hash(&request)?;
+    let scope_key = idempotency_scope_key("catalog_imports:create", &request.idempotency_key);
+    if let Some(response) =
+        state
+            .store
+            .idempotency_response(&actor.tenant_id, &scope_key, &request_hash, now)?
+    {
+        return Ok(Json(response_with_replay_flag(response, true)));
+    }
+
+    let Json(validation_body) = catalog_import_validation_response(&state, &actor, &request, now);
+    let validation_id = validation_body["validation_id"]
+        .as_str()
+        .unwrap_or("vdiag_missing")
+        .to_owned();
+    reject_validation_errors(
+        validation_body["errors"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .as_slice(),
+    )?;
+
+    let import = state.store.create_catalog_import(
+        CreateCatalogImportRequest {
+            tenant_id: actor.tenant_id.clone(),
+            organization_id: request.organization_id,
+            project_id: request.project_id,
+            import_mode: request.import_mode,
+            document_checksum: catalog_import_document_checksum(&request.import_document)?,
+            resource_count: catalog_import_resource_count(&request.import_document),
+            import_document: request.import_document,
+            validation_id,
+            created_by: actor_principal_or_actor_id(&actor),
+        },
+        now,
+    )?;
+    let audit_event_id = record_admin_resource_audit(
+        &state,
+        &actor,
+        AdminResourceAuditInput {
+            event_type: "gateway.catalog_import.create",
+            scope_kind: "tenant",
+            scope_id: actor.tenant_id.clone(),
+            resource_kind: "CatalogImport",
+            resource_id: import.catalog_import_id.clone(),
+            before_version: None,
+            after_version: Some(import.resource_version),
+            redacted_diff: catalog_import_diff(&import),
+            occurred_at: now,
+        },
+    );
+    let response = json!({
+        "schema": "gateway.admin.catalog_import_mutation.v1",
+        "resource": catalog_import_resource_body(&import),
+        "audit_event_id": audit_event_id,
+        "idempotency_replayed": false
+    });
+    state.store.record_idempotency_response(IdempotencyRecord {
+        tenant_id: actor.tenant_id,
+        scope_key,
+        request_hash,
+        response_record: response.clone(),
+        expires_at: now + chrono::Duration::hours(IDEMPOTENCY_TTL_HOURS),
+        created_at: now,
+    });
+    Ok(Json(response))
+}
+
+async fn get_catalog_import(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(catalog_import_id): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_CATALOG_IMPORT_GET_PATH,
+        &catalog_import_id,
+        now,
+    )
+    .await?;
+    let import = catalog_import_for_actor(&state, &actor, &catalog_import_id)?;
+    Ok(Json(json!({
+        "schema": "gateway.admin.catalog_import.v1",
+        "resource": catalog_import_resource_body(&import)
     })))
 }
 
@@ -18207,6 +18403,20 @@ fn maintenance_window_for_actor(
         })
 }
 
+fn catalog_import_for_actor(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    catalog_import_id: &str,
+) -> Result<CatalogImportRecord> {
+    state
+        .store
+        .catalog_import(catalog_import_id)
+        .filter(|import| import.tenant_id == actor.tenant_id)
+        .ok_or_else(|| GatewayError::NotFound {
+            resource: format!("catalog import {catalog_import_id}"),
+        })
+}
+
 fn export_manifest_for_job(
     state: &AppState,
     job: &ExportJobRecord,
@@ -18456,6 +18666,194 @@ fn provider_endpoint_validation_errors(
         }
     }
     errors
+}
+
+fn catalog_import_validation_response(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    request: &AdminCreateCatalogImportRequest,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Json<Value> {
+    let mut input = validation_input(
+        "gateway.admin.catalog_import_validation.v1",
+        "CatalogImport",
+        "tenant",
+        actor.tenant_id.clone(),
+        catalog_import_validation_errors(state, actor, request),
+        now,
+    );
+    input.affected_resources = catalog_import_affected_resources(&request.import_document);
+    input.warnings = catalog_import_validation_warnings(&request.import_document);
+    validation_response(state, actor, input)
+}
+
+fn catalog_import_validation_errors(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    request: &AdminCreateCatalogImportRequest,
+) -> Vec<Value> {
+    let mut errors = Vec::new();
+    if request.import_mode != "draft" {
+        errors.push(validation_error("import_mode", "unsupported_mode"));
+    }
+    if let Some(organization_id) = request.organization_id.as_deref() {
+        if organization_for_actor(state, actor, organization_id).is_err() {
+            errors.push(validation_error("organization_id", "unknown_organization"));
+        }
+    }
+    if let Some(project_id) = request.project_id.as_deref() {
+        match project_for_actor(state, actor, project_id) {
+            Ok(project)
+                if request
+                    .organization_id
+                    .as_ref()
+                    .is_some_and(|organization_id| organization_id != &project.organization_id) =>
+            {
+                errors.push(validation_error(
+                    "project_id",
+                    "project_organization_mismatch",
+                ));
+            }
+            Ok(_) => {}
+            Err(_) => errors.push(validation_error("project_id", "unknown_project")),
+        }
+    }
+    let Some(document) = request.import_document.as_object() else {
+        errors.push(validation_error("import_document", "object_required"));
+        return errors;
+    };
+    if let Some(tenant_id) = document.get("tenant_id") {
+        match tenant_id.as_str() {
+            Some(tenant_id) if tenant_id == actor.tenant_id => {}
+            Some(_) => errors.push(validation_error(
+                "import_document.tenant_id",
+                "tenant_mismatch",
+            )),
+            None => errors.push(validation_error(
+                "import_document.tenant_id",
+                "string_required",
+            )),
+        }
+    }
+    let Some(resources) = document.get("resources").and_then(Value::as_array) else {
+        errors.push(validation_error(
+            "import_document.resources",
+            "array_required",
+        ));
+        return errors;
+    };
+    if resources.is_empty() {
+        errors.push(validation_error("import_document.resources", "required"));
+    }
+    if resources.len() > 100 {
+        errors.push(validation_error(
+            "import_document.resources",
+            "too_many_resources",
+        ));
+    }
+    for (index, resource) in resources.iter().enumerate() {
+        let field = format!("import_document.resources[{index}]");
+        let Some(resource_object) = resource.as_object() else {
+            errors.push(validation_error(&field, "object_required"));
+            continue;
+        };
+        match resource_object.get("kind").and_then(Value::as_str) {
+            Some(kind) if catalog_import_resource_kind_supported(kind) => {}
+            Some(_) => errors.push(validation_error(
+                &format!("{field}.kind"),
+                "unsupported_kind",
+            )),
+            None => errors.push(validation_error(&format!("{field}.kind"), "required")),
+        }
+        if catalog_import_contains_raw_secret(resource) {
+            errors.push(validation_error(&field, "raw_secret_material_forbidden"));
+        }
+    }
+    errors
+}
+
+fn catalog_import_validation_warnings(document: &Value) -> Vec<Value> {
+    if catalog_import_resource_count(document) == 0 {
+        Vec::new()
+    } else {
+        vec![json!({
+            "field": "import_document",
+            "reason": "draft_only_not_published"
+        })]
+    }
+}
+
+fn catalog_import_affected_resources(document: &Value) -> Vec<Value> {
+    document
+        .get("resources")
+        .and_then(Value::as_array)
+        .map(|resources| {
+            resources
+                .iter()
+                .enumerate()
+                .filter_map(|(index, resource)| {
+                    let kind = resource.get("kind")?.as_str()?;
+                    Some(json!({
+                        "kind": kind,
+                        "index": index,
+                        "id": resource.get("id").and_then(Value::as_str),
+                        "name": resource.get("name").or_else(|| resource.get("alias_name")).and_then(Value::as_str)
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn catalog_import_resource_count(document: &Value) -> usize {
+    document
+        .get("resources")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len)
+}
+
+fn catalog_import_document_checksum(document: &Value) -> Result<String> {
+    stable_request_hash(document)
+}
+
+fn catalog_import_resource_kind_supported(kind: &str) -> bool {
+    matches!(
+        kind,
+        "model_target"
+            | "model_alias"
+            | "routing_group"
+            | "routing_group_target"
+            | "route_policy"
+            | "provider_grant"
+            | "pricing_sku"
+    )
+}
+
+fn catalog_import_contains_raw_secret(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            catalog_import_forbidden_secret_key(key) || catalog_import_contains_raw_secret(value)
+        }),
+        Value::Array(values) => values.iter().any(catalog_import_contains_raw_secret),
+        _ => false,
+    }
+}
+
+fn catalog_import_forbidden_secret_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "secret"
+            | "raw_secret"
+            | "secret_value"
+            | "raw_value"
+            | "api_key"
+            | "access_token"
+            | "refresh_token"
+            | "id_token"
+            | "client_secret"
+            | "authorization"
+            | "password"
+    )
 }
 
 fn upstream_credential_validation_errors(
@@ -21507,6 +21905,47 @@ fn model_alias_resource_body(alias: &ModelAliasRecord) -> Value {
         "created_by": &alias.created_by,
         "created_at": alias.created_at,
         "updated_at": alias.updated_at
+    })
+}
+
+fn catalog_import_resource_envelope(import: &CatalogImportRecord) -> Value {
+    json!({
+        "schema": "gateway.admin.resource.v1",
+        "resource": catalog_import_resource_body(import)
+    })
+}
+
+fn catalog_import_resource_body(import: &CatalogImportRecord) -> Value {
+    json!({
+        "kind": "catalog_import",
+        "id": &import.catalog_import_id,
+        "catalog_import_id": &import.catalog_import_id,
+        "tenant_id": &import.tenant_id,
+        "organization_id": &import.organization_id,
+        "project_id": &import.project_id,
+        "import_mode": &import.import_mode,
+        "document_checksum": &import.document_checksum,
+        "resource_count": import.resource_count,
+        "validation_id": &import.validation_id,
+        "import_document": &import.import_document,
+        "version": import.resource_version,
+        "schema_version": import.schema_version,
+        "status": &import.status,
+        "created_by": &import.created_by,
+        "created_at": import.created_at,
+        "updated_at": import.updated_at
+    })
+}
+
+fn catalog_import_diff(import: &CatalogImportRecord) -> Value {
+    json!({
+        "organization_id": &import.organization_id,
+        "project_id": &import.project_id,
+        "import_mode": &import.import_mode,
+        "document_checksum": &import.document_checksum,
+        "resource_count": import.resource_count,
+        "validation_id": &import.validation_id,
+        "status": import.status.as_str()
     })
 }
 
@@ -25101,6 +25540,10 @@ const fn default_true() -> bool {
     true
 }
 
+fn default_catalog_import_mode() -> String {
+    "draft".to_owned()
+}
+
 fn default_secret_ref_backend_kind() -> String {
     "memory".to_owned()
 }
@@ -27794,6 +28237,142 @@ mod tests {
         assert!(store.route_decisions().is_empty());
         assert!(store.route_attempts().is_empty());
         assert!(store.usage_events_for_tenant(TEST_TENANT_ID).is_empty());
+    }
+
+    #[tokio::test]
+    async fn admin_catalog_import_validate_rejects_raw_secret_material() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let response = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/catalog-imports:validate",
+            json!({
+                "idempotency_key": "idem_catalog_import_invalid",
+                "organization_id": TEST_ORGANIZATION_ID,
+                "project_id": TEST_PROJECT_ID,
+                "import_document": {
+                    "schema": "gateway.catalog_import.v1",
+                    "tenant_id": TEST_TENANT_ID,
+                    "resources": [{
+                        "kind": "model_target",
+                        "upstream_model_id": "gpt-4.1-mini",
+                        "api_key": "sk-raw-value"
+                    }]
+                }
+            }),
+        )
+        .await;
+
+        let status = response.status();
+        let body = response_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        assert_eq!(body["valid"], false);
+        assert_eq!(body["schema"], "gateway.admin.catalog_import_validation.v1");
+        assert!(body["errors"].as_array().is_some_and(|errors| errors
+            .iter()
+            .any(|error| error["reason"] == "raw_secret_material_forbidden")));
+        let diagnostics = store.validation_diagnostics_for_tenant(TEST_TENANT_ID);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].resource_kind, "CatalogImport");
+        assert!(!diagnostics[0].valid);
+        assert!(store.catalog_imports_for_tenant(TEST_TENANT_ID).is_empty());
+        assert!(store.audit_events().is_empty());
+    }
+
+    #[tokio::test]
+    async fn admin_catalog_import_create_list_get_and_replay() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let request = catalog_import_request("idem_catalog_import_create");
+        let create = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/catalog-imports",
+            request.clone(),
+        )
+        .await;
+        let create_status = create.status();
+        let create_body = response_json(create).await;
+        assert_eq!(create_status, StatusCode::OK, "{create_body:?}");
+        assert_eq!(create_body["resource"]["status"], "active");
+        assert_eq!(create_body["resource"]["resource_count"], 2);
+        assert!(create_body["resource"]["document_checksum"]
+            .as_str()
+            .is_some_and(|checksum| checksum.starts_with("sha256:")));
+        assert!(create_body["resource"]["validation_id"]
+            .as_str()
+            .is_some_and(|validation_id| validation_id.starts_with("vdiag_")));
+        let import_id = create_body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("catalog import id should be present"))
+            .to_owned();
+
+        let replay = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/catalog-imports",
+            request,
+        )
+        .await;
+        let replay_body = response_json(replay).await;
+        assert_eq!(replay_body["idempotency_replayed"], true);
+        assert_eq!(replay_body["resource"]["id"], import_id);
+
+        let list = get_admin(store.clone(), &raw_session, "/admin/v1/catalog-imports").await;
+        let list_status = list.status();
+        let list_body = response_json(list).await;
+        assert_eq!(list_status, StatusCode::OK, "{list_body:?}");
+        assert_eq!(list_body["resources"].as_array().map_or(0, Vec::len), 1);
+        assert_eq!(list_body["resources"][0]["resource"]["id"], import_id);
+
+        let get = get_admin(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/catalog-imports/{import_id}"),
+        )
+        .await;
+        let get_status = get.status();
+        let get_body = response_json(get).await;
+        assert_eq!(get_status, StatusCode::OK, "{get_body:?}");
+        assert_eq!(get_body["resource"]["id"], import_id);
+        assert_eq!(
+            get_body["resource"]["import_document"]["resources"][0]["kind"],
+            "model_alias"
+        );
+
+        let diagnostics = store.validation_diagnostics_for_tenant(TEST_TENANT_ID);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].valid);
+        assert_eq!(store.catalog_imports_for_tenant(TEST_TENANT_ID).len(), 1);
+        assert_eq!(store.audit_events().len(), 1);
+        assert_eq!(
+            store.audit_events()[0].event_type,
+            "gateway.catalog_import.create"
+        );
+        assert!(store.config_snapshots().is_empty());
+    }
+
+    fn catalog_import_request(idempotency_key: &str) -> Value {
+        json!({
+            "idempotency_key": idempotency_key,
+            "organization_id": TEST_ORGANIZATION_ID,
+            "project_id": TEST_PROJECT_ID,
+            "import_document": {
+                "schema": "gateway.catalog_import.v1",
+                "tenant_id": TEST_TENANT_ID,
+                "resources": [
+                    {
+                        "kind": "model_alias",
+                        "alias_name": "gpt-imported",
+                        "protocol_family": "openai_responses"
+                    },
+                    {
+                        "kind": "pricing_sku",
+                        "name": "gpt-imported-standard",
+                        "currency": "USD"
+                    }
+                ]
+            }
+        })
     }
 
     #[tokio::test]

@@ -602,6 +602,226 @@
         "x-starweaver-protocol-family": null
       }
     },
+    "/api/admin/v1/catalog-imports": {
+      "get": {
+        "operationId": "gateway_get_api_admin_v1_catalog_imports_gateway_catalog_import_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /api/admin/v1/catalog-imports",
+        "parameters": [],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-canonical-path": "/admin/v1/catalog-imports",
+        "x-starweaver-action-id": "gateway.catalog_import.read",
+        "x-starweaver-resource-kind": "CatalogImport",
+        "x-starweaver-scope-params": [
+          "tenant_id"
+        ],
+        "x-starweaver-allow-api-key": true,
+        "x-starweaver-strong-auth-required": false,
+        "x-starweaver-audit-event-type": "gateway.catalog_import.read",
+        "x-starweaver-protocol-family": null
+      },
+      "post": {
+        "operationId": "gateway_post_api_admin_v1_catalog_imports_gateway_catalog_import_create",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "POST /api/admin/v1/catalog-imports",
+        "parameters": [],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-canonical-path": "/admin/v1/catalog-imports",
+        "x-starweaver-action-id": "gateway.catalog_import.create",
+        "x-starweaver-resource-kind": "CatalogImport",
+        "x-starweaver-scope-params": [
+          "tenant_id"
+        ],
+        "x-starweaver-allow-api-key": true,
+        "x-starweaver-strong-auth-required": false,
+        "x-starweaver-audit-event-type": "gateway.catalog_import.create",
+        "x-starweaver-protocol-family": null
+      }
+    },
+    "/api/admin/v1/catalog-imports:validate": {
+      "post": {
+        "operationId": "gateway_post_api_admin_v1_catalog_imports_validate_gateway_catalog_import_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "POST /api/admin/v1/catalog-imports:validate",
+        "parameters": [],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-canonical-path": "/admin/v1/catalog-imports:validate",
+        "x-starweaver-action-id": "gateway.catalog_import.read",
+        "x-starweaver-resource-kind": "CatalogImport",
+        "x-starweaver-scope-params": [
+          "tenant_id"
+        ],
+        "x-starweaver-allow-api-key": true,
+        "x-starweaver-strong-auth-required": false,
+        "x-starweaver-audit-event-type": "gateway.catalog_import.validate",
+        "x-starweaver-protocol-family": null
+      }
+    },
+    "/api/admin/v1/catalog-imports/{catalog_import_id}": {
+      "get": {
+        "operationId": "gateway_get_api_admin_v1_catalog_imports_catalog_import_id_gateway_catalog_import_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /api/admin/v1/catalog-imports/{catalog_import_id}",
+        "parameters": [
+          {
+            "name": "catalog_import_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-canonical-path": "/admin/v1/catalog-imports/{catalog_import_id}",
+        "x-starweaver-action-id": "gateway.catalog_import.read",
+        "x-starweaver-resource-kind": "CatalogImport",
+        "x-starweaver-scope-params": [
+          "tenant_id",
+          "catalog_import_id"
+        ],
+        "x-starweaver-allow-api-key": true,
+        "x-starweaver-strong-auth-required": false,
+        "x-starweaver-audit-event-type": "gateway.catalog_import.read",
+        "x-starweaver-protocol-family": null
+      }
+    },
     "/api/admin/v1/route-simulations": {
       "post": {
         "operationId": "gateway_post_api_admin_v1_route_simulations_gateway_route_simulation_run",

@@ -4,6 +4,7 @@ use std::fmt;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::ProtocolFamily;
@@ -1373,6 +1374,41 @@ pub struct RoutePolicyRecord {
     /// Primary routing group.
     pub routing_group_id: String,
     /// Policy lifecycle status.
+    pub status: ResourceStatus,
+    /// Resource version for optimistic concurrency.
+    pub resource_version: i64,
+    /// Schema version that wrote this record.
+    pub schema_version: u16,
+    /// Creating actor.
+    pub created_by: PrincipalId,
+    /// Creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Update timestamp.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Durable catalog import draft admin resource.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CatalogImportRecord {
+    /// Stable catalog import id.
+    pub catalog_import_id: String,
+    /// Owning tenant.
+    pub tenant_id: TenantId,
+    /// Optional organization boundary.
+    pub organization_id: Option<OrganizationId>,
+    /// Optional project boundary.
+    pub project_id: Option<ProjectId>,
+    /// Import mode. The v1 admin surface accepts only `draft`.
+    pub import_mode: String,
+    /// Imported draft bundle document.
+    pub import_document: Value,
+    /// Stable checksum of the canonical import document.
+    pub document_checksum: String,
+    /// Number of resource entries in the import document.
+    pub resource_count: usize,
+    /// Validation diagnostic written before persistence.
+    pub validation_id: String,
+    /// Lifecycle status.
     pub status: ResourceStatus,
     /// Resource version for optimistic concurrency.
     pub resource_version: i64,

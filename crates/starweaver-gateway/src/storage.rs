@@ -19,19 +19,19 @@ use crate::action::{
 use crate::config::{ConfigSnapshotDocument, PublishedConfigSnapshot};
 use crate::domain::{
     new_prefixed_id, ApiKeyRecord, ApiKeyStatus, AuditEventRecord, AuthSessionRecord,
-    AuthSessionStatus, BudgetPolicyRecord, CodexOAuthConnectionRecord, CodexOAuthConnectionStatus,
-    CodexOAuthRefreshStatusRecord, CodexOAuthSessionRecord, CodexOAuthSessionStatus,
-    ConfigInvalidationEventRecord, ConfigPublicationPointerRecord, ConfigReloadSource,
-    ConfigSnapshot, ConfigSnapshotStatus, ConfigWorkerReloadRecord, ConfigWorkerReloadStatus,
-    DirectoryStatus, EmergencyOperationRecord, ExportJobRecord, ExportManifestRecord,
-    ExternalIdentityRecord, InvitationStatus, LedgerBucketRecord, LoginAttemptRecord,
-    LoginProviderRecord, MaintenanceWindowRecord, MembershipStatus, ModelAliasRecord,
-    ModelTargetRecord, NotificationDeliveryAttemptRecord, NotificationOutboxEventRecord,
-    NotificationSinkRecord, NotificationSubscriptionRecord, OrganizationInvitationRecord,
-    OrganizationMembershipRecord, OrganizationRecord, OtelExportConfigRecord,
-    OtelExporterHealthRecord, OtelHeaderRef, OtelResourceAttribute, PricingSkuRecord,
-    ProjectMembershipRecord, ProjectRecord, ProviderEndpointRecord, ProviderGrantRecord,
-    QuotaPolicyRecord, ResourceStatus, RoutePolicyRecord, RoutingGroupRecord,
+    AuthSessionStatus, BudgetPolicyRecord, CatalogImportRecord, CodexOAuthConnectionRecord,
+    CodexOAuthConnectionStatus, CodexOAuthRefreshStatusRecord, CodexOAuthSessionRecord,
+    CodexOAuthSessionStatus, ConfigInvalidationEventRecord, ConfigPublicationPointerRecord,
+    ConfigReloadSource, ConfigSnapshot, ConfigSnapshotStatus, ConfigWorkerReloadRecord,
+    ConfigWorkerReloadStatus, DirectoryStatus, EmergencyOperationRecord, ExportJobRecord,
+    ExportManifestRecord, ExternalIdentityRecord, InvitationStatus, LedgerBucketRecord,
+    LoginAttemptRecord, LoginProviderRecord, MaintenanceWindowRecord, MembershipStatus,
+    ModelAliasRecord, ModelTargetRecord, NotificationDeliveryAttemptRecord,
+    NotificationOutboxEventRecord, NotificationSinkRecord, NotificationSubscriptionRecord,
+    OrganizationInvitationRecord, OrganizationMembershipRecord, OrganizationRecord,
+    OtelExportConfigRecord, OtelExporterHealthRecord, OtelHeaderRef, OtelResourceAttribute,
+    PricingSkuRecord, ProjectMembershipRecord, ProjectRecord, ProviderEndpointRecord,
+    ProviderGrantRecord, QuotaPolicyRecord, ResourceStatus, RoutePolicyRecord, RoutingGroupRecord,
     RoutingGroupTargetRecord, RuntimeBudgetLeaseRecord, SecretRefRecord, SecretRefStatus,
     ServiceAccountRecord, TenancySeed, TenantRecord, UpstreamCredentialRecord,
     UpstreamCredentialStatus, UsageEventRecord, UserRecord, ValidationDiagnosticRecord,
@@ -751,6 +751,19 @@ pub trait ProviderAdminRepository: Send + Sync {
 
 /// Model catalog admin repository boundary.
 pub trait CatalogAdminRepository: Send + Sync {
+    /// Creates one catalog import draft.
+    fn create_catalog_import(
+        &self,
+        request: CreateCatalogImportRequest,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<CatalogImportRecord>;
+
+    /// Lists catalog imports in a tenant.
+    fn catalog_imports_for_tenant(&self, tenant_id: &str) -> Vec<CatalogImportRecord>;
+
+    /// Loads one catalog import draft.
+    fn catalog_import(&self, catalog_import_id: &str) -> Option<CatalogImportRecord>;
+
     /// Creates a model target.
     fn create_model_target(
         &self,
@@ -1330,6 +1343,29 @@ pub struct CreateRoutingGroupTargetRequest {
     pub created_by: String,
 }
 
+/// Request to create a catalog import draft admin resource.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateCatalogImportRequest {
+    /// Tenant boundary.
+    pub tenant_id: String,
+    /// Optional organization boundary.
+    pub organization_id: Option<String>,
+    /// Optional project boundary.
+    pub project_id: Option<String>,
+    /// Import mode. V1 accepts only `draft`.
+    pub import_mode: String,
+    /// Draft import document.
+    pub import_document: Value,
+    /// Stable checksum of the canonical import document.
+    pub document_checksum: String,
+    /// Number of resource entries in the import document.
+    pub resource_count: usize,
+    /// Validation diagnostic id recorded before persistence.
+    pub validation_id: String,
+    /// Creating actor.
+    pub created_by: String,
+}
+
 /// Request to create a model alias admin resource.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreateModelAliasRequest {
@@ -1901,6 +1937,7 @@ pub struct InMemoryGatewayStore {
     model_targets: Arc<RwLock<HashMap<String, ModelTargetRecord>>>,
     routing_groups: Arc<RwLock<HashMap<String, RoutingGroupRecord>>>,
     routing_group_targets: Arc<RwLock<HashMap<String, RoutingGroupTargetRecord>>>,
+    catalog_imports: Arc<RwLock<HashMap<String, CatalogImportRecord>>>,
     model_aliases: Arc<RwLock<HashMap<String, ModelAliasRecord>>>,
     route_policies: Arc<RwLock<HashMap<String, RoutePolicyRecord>>>,
     provider_grants: Arc<RwLock<HashMap<String, ProviderGrantRecord>>>,
@@ -4943,6 +4980,54 @@ impl CodexOAuthRepository for InMemoryGatewayStore {
 }
 
 impl CatalogAdminRepository for InMemoryGatewayStore {
+    fn create_catalog_import(
+        &self,
+        request: CreateCatalogImportRequest,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<CatalogImportRecord> {
+        validate_catalog_import_request(self, &request)?;
+        let record = CatalogImportRecord {
+            catalog_import_id: crate::domain::new_prefixed_id("cimp"),
+            tenant_id: request.tenant_id,
+            organization_id: request.organization_id,
+            project_id: request.project_id,
+            import_mode: request.import_mode,
+            import_document: request.import_document,
+            document_checksum: request.document_checksum,
+            resource_count: request.resource_count,
+            validation_id: request.validation_id,
+            status: ResourceStatus::Active,
+            resource_version: 1,
+            schema_version: 1,
+            created_by: request.created_by,
+            created_at: now,
+            updated_at: now,
+        };
+        write_lock(&self.catalog_imports).insert(record.catalog_import_id.clone(), record.clone());
+        Ok(record)
+    }
+
+    fn catalog_imports_for_tenant(&self, tenant_id: &str) -> Vec<CatalogImportRecord> {
+        let mut imports = read_lock(&self.catalog_imports)
+            .values()
+            .filter(|import| import.tenant_id == tenant_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        imports.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| left.catalog_import_id.cmp(&right.catalog_import_id))
+        });
+        imports
+    }
+
+    fn catalog_import(&self, catalog_import_id: &str) -> Option<CatalogImportRecord> {
+        read_lock(&self.catalog_imports)
+            .get(catalog_import_id)
+            .cloned()
+    }
+
     fn create_model_target(
         &self,
         request: CreateModelTargetRequest,
@@ -6850,6 +6935,34 @@ fn validate_model_alias_request(
     if duplicate {
         return Err(GatewayError::BadRequest {
             message: "model_alias_name_conflict".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_catalog_import_request(
+    store: &InMemoryGatewayStore,
+    request: &CreateCatalogImportRequest,
+) -> Result<()> {
+    validate_optional_project_scope(
+        store,
+        &request.tenant_id,
+        request.organization_id.as_deref(),
+        request.project_id.as_deref(),
+    )?;
+    if request.import_mode != "draft" {
+        return Err(GatewayError::BadRequest {
+            message: "catalog_import_mode_unsupported".to_owned(),
+        });
+    }
+    if request.resource_count == 0 {
+        return Err(GatewayError::BadRequest {
+            message: "catalog_import_resources_required".to_owned(),
+        });
+    }
+    if !request.document_checksum.starts_with("sha256:") {
+        return Err(GatewayError::BadRequest {
+            message: "catalog_import_checksum_invalid".to_owned(),
         });
     }
     Ok(())
