@@ -416,6 +416,7 @@ also have pre-auth state, nonce, issuer, and code-verifier checks.
 | Endpoint Family                                 | Required Checks                                                        |
 | ----------------------------------------------- | ---------------------------------------------------------------------- |
 | `GET /auth/v1/providers`                        | pre-auth safe provider metadata, rate-limited                          |
+| `POST /auth/v1/single-user/login`               | disabled unless env credentials exist, constant-time password check    |
 | `GET /auth/v1/providers/{provider_id}/login`    | pre-auth login state creation, provider enabled                        |
 | `GET /auth/v1/providers/{provider_id}/callback` | pre-auth state, nonce, code, issuer, audience, and JWKS validation     |
 | `POST /auth/v1/logout`                          | `gateway.session.revoke` for the current session                       |

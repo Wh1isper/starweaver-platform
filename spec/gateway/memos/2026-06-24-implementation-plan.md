@@ -651,16 +651,27 @@ Work items:
     generic OIDC config documents with secret-reference redaction;
   - external login start builds OAuth/OIDC authorization URLs with state, OIDC
     nonce, and PKCE S256 code challenge without returning client secrets or
-    code verifiers.
+    code verifiers;
+  - admin user list, get, and status update APIs are tenant scoped, audited, and
+    revoke active sessions when a user is disabled or deleted;
+  - admin user session list and revoke APIs are tenant scoped, item-authorized,
+    redacted, audited, and require strong auth for revocation;
+  - admin external identity list, get, and unlink APIs are tenant scoped,
+    item-authorized, redacted, audited, and require strong auth for unlink;
+  - organization member suspension and removal cascade to project memberships
+    inside the organization so project-scoped access cannot outlive organization
+    access;
+  - admin project member create/upsert API requires an active parent organization
+    membership, is tenant scoped, idempotent, audited, and rejects cross-boundary
+    project assignment.
 - Implement identity provider configuration for GitHub OAuth App and generic
   OIDC.
 - Implement login start, callback, state, nonce, PKCE, issuer, audience, JWKS,
   and verified-email handling.
 - Implement first bootstrap login that creates tenant owner, default
   organization, and default project when policy allows.
-- Implement users, external identities, disabled users, sessions, logout,
-  session revocation, CSRF protection, default organization, active
-  organization, and active project.
+- Finish OAuth/OIDC callback-backed user provisioning, CSRF protection, and
+  remaining membership mutation flows.
 - Implement organization invitations, invitation preview, invitation accept,
   organization membership, project membership, role changes, suspension, and
   removal.

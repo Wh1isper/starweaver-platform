@@ -4,8 +4,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use chrono::Datelike;
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use sqlx::Row;
 
@@ -16,16 +18,16 @@ use crate::domain::{
     AuthSessionStatus, BudgetPolicyRecord, ConfigInvalidationEventRecord,
     ConfigPublicationPointerRecord, ConfigReloadSource, ConfigSnapshot, ConfigSnapshotStatus,
     ConfigWorkerReloadRecord, ConfigWorkerReloadStatus, DirectoryStatus, EmergencyOperationRecord,
-    ExportJobRecord, ExportManifestRecord, LedgerBucketRecord, LoginProviderRecord,
-    MembershipStatus, ModelAliasRecord, ModelTargetRecord, NotificationDeliveryAttemptRecord,
-    NotificationOutboxEventRecord, NotificationSinkRecord, NotificationSubscriptionRecord,
-    OrganizationMembershipRecord, OrganizationRecord, OtelExportConfigRecord,
-    OtelExporterHealthRecord, OtelHeaderRef, OtelResourceAttribute, PricingSkuRecord,
-    ProjectMembershipRecord, ProjectRecord, ProviderEndpointRecord, ProviderGrantRecord,
-    QuotaPolicyRecord, ResourceStatus, RoutePolicyRecord, RoutingGroupRecord,
-    RoutingGroupTargetRecord, ServiceAccountRecord, TenancySeed, TenantRecord,
-    UpstreamCredentialRecord, UpstreamCredentialStatus, UsageEventRecord, UserRecord,
-    ValidationDiagnosticRecord,
+    ExportJobRecord, ExportManifestRecord, ExternalIdentityRecord, InvitationStatus,
+    LedgerBucketRecord, LoginProviderRecord, MembershipStatus, ModelAliasRecord, ModelTargetRecord,
+    NotificationDeliveryAttemptRecord, NotificationOutboxEventRecord, NotificationSinkRecord,
+    NotificationSubscriptionRecord, OrganizationInvitationRecord, OrganizationMembershipRecord,
+    OrganizationRecord, OtelExportConfigRecord, OtelExporterHealthRecord, OtelHeaderRef,
+    OtelResourceAttribute, PricingSkuRecord, ProjectMembershipRecord, ProjectRecord,
+    ProviderEndpointRecord, ProviderGrantRecord, QuotaPolicyRecord, ResourceStatus,
+    RoutePolicyRecord, RoutingGroupRecord, RoutingGroupTargetRecord, SecretRefRecord,
+    SecretRefStatus, ServiceAccountRecord, TenancySeed, TenantRecord, UpstreamCredentialRecord,
+    UpstreamCredentialStatus, UsageEventRecord, UserRecord, ValidationDiagnosticRecord,
 };
 use crate::error::{GatewayError, Result};
 use crate::hot_state::{
@@ -116,6 +118,78 @@ pub trait ServiceAccountAdminRepository: Send + Sync {
 pub trait AuthSessionRepository: Send + Sync {
     /// Loads a session by opaque token hash.
     fn session_by_hash(&self, session_hash: &str) -> Option<AuthSessionRecord>;
+
+    /// Lists sessions for one principal inside one tenant.
+    fn sessions_for_principal(&self, tenant_id: &str, principal_id: &str)
+        -> Vec<AuthSessionRecord>;
+
+    /// Loads a session by id for one principal inside one tenant.
+    fn session_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_id: &str,
+        auth_session_id: &str,
+    ) -> Option<AuthSessionRecord>;
+
+    /// Revokes a session by opaque token hash.
+    fn revoke_session_by_hash(
+        &self,
+        session_hash: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<AuthSessionRecord>;
+
+    /// Updates active organization and project context for an existing session.
+    fn update_session_active_context_by_hash(
+        &self,
+        session_hash: &str,
+        active_organization_id: Option<String>,
+        active_project_id: Option<String>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<AuthSessionRecord>;
+
+    /// Revokes active sessions for one principal.
+    fn revoke_sessions_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> usize;
+
+    /// Revokes one session by id for one principal inside one tenant.
+    fn revoke_session_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_id: &str,
+        auth_session_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<AuthSessionRecord>;
+}
+
+/// External identity repository boundary.
+pub trait ExternalIdentityRepository: Send + Sync {
+    /// Lists external identities for one principal inside one tenant.
+    fn external_identities_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_id: &str,
+    ) -> Vec<ExternalIdentityRecord>;
+
+    /// Loads an external identity by id for one principal inside one tenant.
+    fn external_identity_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_id: &str,
+        external_identity_id: &str,
+    ) -> Option<ExternalIdentityRecord>;
+
+    /// Marks an external identity as unlinked.
+    fn unlink_external_identity(
+        &self,
+        tenant_id: &str,
+        principal_id: &str,
+        external_identity_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ExternalIdentityRecord>;
 }
 
 /// Config snapshot repository boundary.
@@ -360,11 +434,38 @@ pub trait TenancyBootstrapRepository: Send + Sync {
     /// Lists project memberships in a project.
     fn project_members_for_project(&self, project_id: &str) -> Vec<ProjectMembershipRecord>;
 
+    /// Creates or reactivates a project membership.
+    fn create_project_membership(
+        &self,
+        request: CreateProjectMembershipRequest,
+    ) -> Result<ProjectMembershipRecord>;
+
     /// Loads project membership by stable id.
     fn project_member(&self, project_member_id: &str) -> Option<ProjectMembershipRecord>;
 
     /// Loads user metadata.
     fn user(&self, user_id: &str) -> Option<UserRecord>;
+
+    /// Lists users in a tenant.
+    fn users_for_tenant(&self, tenant_id: &str) -> Vec<UserRecord>;
+
+    /// Updates the user's default organization and project context.
+    fn update_user_default_context(
+        &self,
+        user_id: &str,
+        organization_id: Option<String>,
+        project_id: Option<String>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<UserRecord>;
+
+    /// Updates user status with optimistic concurrency.
+    fn update_user_status(
+        &self,
+        user_id: &str,
+        expected_resource_version: i64,
+        status: DirectoryStatus,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<UserRecord>;
 
     /// Updates organization status with optimistic concurrency.
     fn update_organization_status(
@@ -392,6 +493,13 @@ pub trait TenancyBootstrapRepository: Send + Sync {
         status: MembershipStatus,
     ) -> Result<OrganizationMembershipRecord>;
 
+    /// Cascades inactive organization membership status to project memberships.
+    fn cascade_project_memberships_for_organization_member(
+        &self,
+        organization_member: &OrganizationMembershipRecord,
+        status: MembershipStatus,
+    ) -> usize;
+
     /// Updates project membership status with optimistic concurrency.
     fn update_project_member_status(
         &self,
@@ -399,6 +507,90 @@ pub trait TenancyBootstrapRepository: Send + Sync {
         expected_resource_version: i64,
         status: MembershipStatus,
     ) -> Result<ProjectMembershipRecord>;
+}
+
+/// Organization invitation repository boundary.
+pub trait OrganizationInvitationRepository: Send + Sync {
+    /// Creates an organization invitation.
+    fn create_organization_invitation(
+        &self,
+        request: CreateOrganizationInvitationRequest,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<OrganizationInvitationRecord>;
+
+    /// Lists invitations for one organization.
+    fn organization_invitations(
+        &self,
+        tenant_id: &str,
+        organization_id: &str,
+    ) -> Vec<OrganizationInvitationRecord>;
+
+    /// Loads an invitation by id.
+    fn organization_invitation(&self, invitation_id: &str) -> Option<OrganizationInvitationRecord>;
+
+    /// Loads an invitation by token hash.
+    fn organization_invitation_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Option<OrganizationInvitationRecord>;
+
+    /// Revokes an invitation with optimistic concurrency.
+    fn revoke_organization_invitation(
+        &self,
+        invitation_id: &str,
+        expected_resource_version: i64,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<OrganizationInvitationRecord>;
+
+    /// Accepts an invitation, activates memberships, and updates defaults when needed.
+    fn accept_organization_invitation(
+        &self,
+        invitation_id: &str,
+        principal_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<OrganizationInvitationRecord>;
+}
+
+/// Request to create an organization invitation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateOrganizationInvitationRequest {
+    /// Owning tenant.
+    pub tenant_id: String,
+    /// Target organization.
+    pub organization_id: String,
+    /// Optional project assignment.
+    pub project_id: Option<String>,
+    /// Optional invited email target.
+    pub invited_email: Option<String>,
+    /// Optional invited principal target.
+    pub invited_principal_id: Option<String>,
+    /// Hash of the raw invitation token.
+    pub invitation_token_hash: String,
+    /// Requested role id.
+    pub role_id: String,
+    /// Expiry timestamp.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    /// Creating actor.
+    pub created_by: String,
+}
+
+/// Secret reference admin repository boundary.
+pub trait SecretRefAdminRepository: Send + Sync {
+    /// Creates a secret reference and stores the secret material in the configured backend.
+    fn create_secret_ref(
+        &self,
+        request: CreateSecretRefRequest,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<SecretRefRecord>;
+
+    /// Lists secret references in a tenant.
+    fn secret_refs_for_tenant(&self, tenant_id: &str) -> Vec<SecretRefRecord>;
+
+    /// Loads secret reference metadata.
+    fn secret_ref(&self, secret_ref_id: &str) -> Option<SecretRefRecord>;
+
+    /// Resolves secret material for runtime use.
+    fn secret_value(&self, secret_ref_id: &str) -> Option<SecretString>;
 }
 
 /// Provider and upstream credential admin repository boundary.
@@ -800,6 +992,21 @@ pub struct BootstrapDefaultProjectRequest {
     pub created_by: String,
 }
 
+/// Request to create or reactivate a project membership.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateProjectMembershipRequest {
+    /// Tenant boundary.
+    pub tenant_id: String,
+    /// Organization boundary.
+    pub organization_id: String,
+    /// Project boundary.
+    pub project_id: String,
+    /// Principal receiving project membership.
+    pub principal_id: String,
+    /// Parent active organization membership id.
+    pub organization_member_id: String,
+}
+
 /// Request to create a provider endpoint admin resource.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreateProviderEndpointRequest {
@@ -815,6 +1022,25 @@ pub struct CreateProviderEndpointRequest {
     pub protocol_families: Vec<crate::ProtocolFamily>,
     /// Provider-facing base URL.
     pub upstream_base_url: String,
+    /// Creating actor.
+    pub created_by: String,
+}
+
+/// Request to create a secret reference admin resource.
+#[derive(Clone, Debug)]
+pub struct CreateSecretRefRequest {
+    /// Tenant boundary.
+    pub tenant_id: String,
+    /// Optional organization boundary.
+    pub organization_id: Option<String>,
+    /// Optional project boundary.
+    pub project_id: Option<String>,
+    /// Operator-visible purpose for the secret.
+    pub purpose: String,
+    /// Secret backend kind.
+    pub backend_kind: String,
+    /// Raw secret value to store in the backend.
+    pub secret_value: SecretString,
     /// Creating actor.
     pub created_by: String,
 }
@@ -1344,8 +1570,10 @@ pub struct InMemoryGatewayStore {
     organizations: Arc<RwLock<HashMap<String, OrganizationRecord>>>,
     projects: Arc<RwLock<HashMap<String, ProjectRecord>>>,
     users: Arc<RwLock<HashMap<String, UserRecord>>>,
+    external_identities: Arc<RwLock<HashMap<String, ExternalIdentityRecord>>>,
     service_accounts: Arc<RwLock<HashMap<String, ServiceAccountRecord>>>,
     organization_memberships: Arc<RwLock<HashMap<(String, String), OrganizationMembershipRecord>>>,
+    organization_invitations: Arc<RwLock<HashMap<String, OrganizationInvitationRecord>>>,
     api_keys: Arc<RwLock<HashMap<String, Vec<ApiKeyRecord>>>>,
     api_key_failed_auth: Arc<RwLock<HashMap<String, Vec<chrono::DateTime<chrono::Utc>>>>>,
     api_key_last_used_updates: Arc<RwLock<Vec<ApiKeyLastUsedUpdate>>>,
@@ -1369,6 +1597,8 @@ pub struct InMemoryGatewayStore {
     audit_events: Arc<RwLock<Vec<AuditEventRecord>>>,
     idempotency_records: Arc<RwLock<HashMap<(String, String), IdempotencyRecord>>>,
     provider_endpoints: Arc<RwLock<HashMap<String, ProviderEndpointRecord>>>,
+    secret_refs: Arc<RwLock<HashMap<String, SecretRefRecord>>>,
+    secret_values: Arc<RwLock<HashMap<String, SecretString>>>,
     upstream_credentials: Arc<RwLock<HashMap<String, UpstreamCredentialRecord>>>,
     model_targets: Arc<RwLock<HashMap<String, ModelTargetRecord>>>,
     routing_groups: Arc<RwLock<HashMap<String, RoutingGroupRecord>>>,
@@ -1450,6 +1680,53 @@ impl InMemoryGatewayStore {
             Err(poisoned) => poisoned.into_inner(),
         };
         auth_sessions.insert(record.session_hash.clone(), record);
+    }
+
+    /// Inserts or replaces an external identity by id.
+    pub fn insert_external_identity(&self, record: ExternalIdentityRecord) {
+        write_lock(&self.external_identities).insert(record.external_identity_id.clone(), record);
+    }
+
+    /// Lists organization memberships for one principal.
+    #[must_use]
+    pub fn organization_memberships_for_principal(
+        &self,
+        principal_id: &str,
+    ) -> Vec<OrganizationMembershipRecord> {
+        let mut memberships = read_lock(&self.organization_memberships)
+            .values()
+            .filter(|membership| membership.principal_id == principal_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        memberships.sort_by(|left, right| {
+            left.organization_id
+                .cmp(&right.organization_id)
+                .then_with(|| {
+                    left.organization_member_id
+                        .cmp(&right.organization_member_id)
+                })
+        });
+        memberships
+    }
+
+    /// Lists project memberships for one principal.
+    #[must_use]
+    pub fn project_memberships_for_principal(
+        &self,
+        principal_id: &str,
+    ) -> Vec<ProjectMembershipRecord> {
+        let mut memberships = read_lock(&self.project_memberships)
+            .values()
+            .filter(|membership| membership.principal_id == principal_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        memberships.sort_by(|left, right| {
+            left.organization_id
+                .cmp(&right.organization_id)
+                .then_with(|| left.project_id.cmp(&right.project_id))
+                .then_with(|| left.project_member_id.cmp(&right.project_member_id))
+        });
+        memberships
     }
 
     /// Stores the latest published snapshot.
@@ -1797,6 +2074,181 @@ impl AuthSessionRepository for InMemoryGatewayStore {
             Err(poisoned) => poisoned.into_inner(),
         };
         auth_sessions.get(session_hash).cloned()
+    }
+
+    fn sessions_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_id: &str,
+    ) -> Vec<AuthSessionRecord> {
+        let mut sessions = read_lock(&self.auth_sessions)
+            .values()
+            .filter(|session| {
+                session.tenant_id == tenant_id && session.principal_id == principal_id
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        sessions.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| left.auth_session_id.cmp(&right.auth_session_id))
+        });
+        sessions
+    }
+
+    fn session_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_id: &str,
+        auth_session_id: &str,
+    ) -> Option<AuthSessionRecord> {
+        read_lock(&self.auth_sessions)
+            .values()
+            .find(|session| {
+                session.tenant_id == tenant_id
+                    && session.principal_id == principal_id
+                    && session.auth_session_id == auth_session_id
+            })
+            .cloned()
+    }
+
+    fn revoke_session_by_hash(
+        &self,
+        session_hash: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<AuthSessionRecord> {
+        let mut auth_sessions = write_lock(&self.auth_sessions);
+        let Some(session) = auth_sessions.get_mut(session_hash) else {
+            return Err(GatewayError::Authentication);
+        };
+        session.status = AuthSessionStatus::Revoked;
+        session.updated_at = now;
+        let revoked = session.clone();
+        drop(auth_sessions);
+        Ok(revoked)
+    }
+
+    fn update_session_active_context_by_hash(
+        &self,
+        session_hash: &str,
+        active_organization_id: Option<String>,
+        active_project_id: Option<String>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<AuthSessionRecord> {
+        let mut auth_sessions = write_lock(&self.auth_sessions);
+        let Some(session) = auth_sessions.get_mut(session_hash) else {
+            return Err(GatewayError::Authentication);
+        };
+        if !session.can_authenticate_at(now) {
+            return Err(GatewayError::Authentication);
+        }
+        session.active_organization_id = active_organization_id;
+        session.active_project_id = active_project_id;
+        session.updated_at = now;
+        let updated = session.clone();
+        drop(auth_sessions);
+        Ok(updated)
+    }
+
+    fn revoke_sessions_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> usize {
+        let mut auth_sessions = write_lock(&self.auth_sessions);
+        let mut revoked_count = 0_usize;
+        for session in auth_sessions.values_mut().filter(|session| {
+            session.tenant_id == tenant_id
+                && session.principal_id == principal_id
+                && session.status == AuthSessionStatus::Active
+        }) {
+            session.status = AuthSessionStatus::Revoked;
+            session.updated_at = now;
+            revoked_count += 1;
+        }
+        drop(auth_sessions);
+        revoked_count
+    }
+
+    fn revoke_session_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_id: &str,
+        auth_session_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<AuthSessionRecord> {
+        let mut auth_sessions = write_lock(&self.auth_sessions);
+        let Some(session) = auth_sessions.values_mut().find(|session| {
+            session.tenant_id == tenant_id
+                && session.principal_id == principal_id
+                && session.auth_session_id == auth_session_id
+        }) else {
+            return Err(GatewayError::NotFound {
+                resource: format!("auth session {auth_session_id}"),
+            });
+        };
+        session.status = AuthSessionStatus::Revoked;
+        session.updated_at = now;
+        let revoked = session.clone();
+        drop(auth_sessions);
+        Ok(revoked)
+    }
+}
+
+impl ExternalIdentityRepository for InMemoryGatewayStore {
+    fn external_identities_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_id: &str,
+    ) -> Vec<ExternalIdentityRecord> {
+        let mut identities = read_lock(&self.external_identities)
+            .values()
+            .filter(|identity| {
+                identity.tenant_id == tenant_id && identity.principal_id == principal_id
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        identities
+            .sort_by(|left, right| left.external_identity_id.cmp(&right.external_identity_id));
+        identities
+    }
+
+    fn external_identity_for_principal(
+        &self,
+        tenant_id: &str,
+        principal_id: &str,
+        external_identity_id: &str,
+    ) -> Option<ExternalIdentityRecord> {
+        read_lock(&self.external_identities)
+            .get(external_identity_id)
+            .filter(|identity| {
+                identity.tenant_id == tenant_id && identity.principal_id == principal_id
+            })
+            .cloned()
+    }
+
+    fn unlink_external_identity(
+        &self,
+        tenant_id: &str,
+        principal_id: &str,
+        external_identity_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ExternalIdentityRecord> {
+        let mut identities = write_lock(&self.external_identities);
+        let Some(identity) = identities.get_mut(external_identity_id).filter(|identity| {
+            identity.tenant_id == tenant_id && identity.principal_id == principal_id
+        }) else {
+            return Err(GatewayError::NotFound {
+                resource: format!("external identity {external_identity_id}"),
+            });
+        };
+        identity.status = ResourceStatus::Deleted;
+        identity.updated_at = now;
+        let unlinked = identity.clone();
+        drop(identities);
+        Ok(unlinked)
     }
 }
 
@@ -2731,6 +3183,46 @@ impl TenancyBootstrapRepository for InMemoryGatewayStore {
         members
     }
 
+    fn create_project_membership(
+        &self,
+        request: CreateProjectMembershipRequest,
+    ) -> Result<ProjectMembershipRecord> {
+        let key = (request.principal_id.clone(), request.project_id.clone());
+        let mut memberships = write_lock(&self.project_memberships);
+        let member = memberships
+            .entry(key)
+            .or_insert_with(|| ProjectMembershipRecord {
+                project_member_id: new_prefixed_id("pm"),
+                tenant_id: request.tenant_id.clone(),
+                organization_id: request.organization_id.clone(),
+                project_id: request.project_id.clone(),
+                principal_id: request.principal_id.clone(),
+                organization_member_id: Some(request.organization_member_id.clone()),
+                status: MembershipStatus::Active,
+                resource_version: 1,
+            });
+        if member.tenant_id != request.tenant_id
+            || member.organization_id != request.organization_id
+            || member.project_id != request.project_id
+            || member.principal_id != request.principal_id
+        {
+            return Err(GatewayError::BadRequest {
+                message: "project_membership_scope_conflict".to_owned(),
+            });
+        }
+        let organization_member_changed = member.organization_member_id.as_deref()
+            != Some(request.organization_member_id.as_str());
+        let status_changed = member.status != MembershipStatus::Active;
+        if organization_member_changed || status_changed {
+            member.organization_member_id = Some(request.organization_member_id);
+            member.status = MembershipStatus::Active;
+            member.resource_version += 1;
+        }
+        let created = member.clone();
+        drop(memberships);
+        Ok(created)
+    }
+
     fn project_member(&self, project_member_id: &str) -> Option<ProjectMembershipRecord> {
         read_lock(&self.project_memberships)
             .values()
@@ -2740,6 +3232,64 @@ impl TenancyBootstrapRepository for InMemoryGatewayStore {
 
     fn user(&self, user_id: &str) -> Option<UserRecord> {
         read_lock(&self.users).get(user_id).cloned()
+    }
+
+    fn users_for_tenant(&self, tenant_id: &str) -> Vec<UserRecord> {
+        let mut users = read_lock(&self.users)
+            .values()
+            .filter(|user| user.tenant_id == tenant_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        users.sort_by(|left, right| left.user_id.cmp(&right.user_id));
+        users
+    }
+
+    fn update_user_default_context(
+        &self,
+        user_id: &str,
+        organization_id: Option<String>,
+        project_id: Option<String>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<UserRecord> {
+        let mut users = write_lock(&self.users);
+        let Some(user) = users.get_mut(user_id) else {
+            return Err(GatewayError::NotFound {
+                resource: format!("user {user_id}"),
+            });
+        };
+        user.default_organization_id = organization_id;
+        user.default_project_id = project_id;
+        user.resource_version += 1;
+        user.updated_at = now;
+        let updated = user.clone();
+        drop(users);
+        Ok(updated)
+    }
+
+    fn update_user_status(
+        &self,
+        user_id: &str,
+        expected_resource_version: i64,
+        status: DirectoryStatus,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<UserRecord> {
+        let mut users = write_lock(&self.users);
+        let Some(user) = users.get_mut(user_id) else {
+            return Err(GatewayError::NotFound {
+                resource: format!("user {user_id}"),
+            });
+        };
+        if user.resource_version != expected_resource_version {
+            return Err(GatewayError::BadRequest {
+                message: "stale_resource_version".to_owned(),
+            });
+        }
+        user.status = status;
+        user.resource_version += 1;
+        user.updated_at = now;
+        let updated = user.clone();
+        drop(users);
+        Ok(updated)
     }
 
     fn update_organization_status(
@@ -2846,6 +3396,326 @@ impl TenancyBootstrapRepository for InMemoryGatewayStore {
         let updated = member.clone();
         drop(memberships);
         Ok(updated)
+    }
+
+    fn cascade_project_memberships_for_organization_member(
+        &self,
+        organization_member: &OrganizationMembershipRecord,
+        status: MembershipStatus,
+    ) -> usize {
+        let mut memberships = write_lock(&self.project_memberships);
+        let mut updated_count = 0_usize;
+        for member in memberships.values_mut().filter(|member| {
+            member.tenant_id == organization_member.tenant_id
+                && member.organization_id == organization_member.organization_id
+                && member.principal_id == organization_member.principal_id
+        }) {
+            let should_update = match &status {
+                MembershipStatus::Active => false,
+                MembershipStatus::Suspended => member.status == MembershipStatus::Active,
+                MembershipStatus::Removed => member.status != MembershipStatus::Removed,
+            };
+            if should_update {
+                member.status = status.clone();
+                member.resource_version += 1;
+                updated_count += 1;
+            }
+        }
+        drop(memberships);
+        updated_count
+    }
+}
+
+impl OrganizationInvitationRepository for InMemoryGatewayStore {
+    fn create_organization_invitation(
+        &self,
+        request: CreateOrganizationInvitationRequest,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<OrganizationInvitationRecord> {
+        let invitation = OrganizationInvitationRecord {
+            invitation_id: new_prefixed_id("inv"),
+            tenant_id: request.tenant_id,
+            organization_id: request.organization_id,
+            project_id: request.project_id,
+            invited_email: request.invited_email,
+            invited_principal_id: request.invited_principal_id,
+            invitation_token_hash: request.invitation_token_hash,
+            role_id: request.role_id,
+            status: InvitationStatus::Pending,
+            expires_at: request.expires_at,
+            accepted_at: None,
+            created_by: request.created_by,
+            resource_version: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        let mut invitations = write_lock(&self.organization_invitations);
+        invitations.insert(invitation.invitation_id.clone(), invitation.clone());
+        drop(invitations);
+        Ok(invitation)
+    }
+
+    fn organization_invitations(
+        &self,
+        tenant_id: &str,
+        organization_id: &str,
+    ) -> Vec<OrganizationInvitationRecord> {
+        let mut invitations = read_lock(&self.organization_invitations)
+            .values()
+            .filter(|invitation| {
+                invitation.tenant_id == tenant_id && invitation.organization_id == organization_id
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        invitations.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| left.invitation_id.cmp(&right.invitation_id))
+        });
+        invitations
+    }
+
+    fn organization_invitation(&self, invitation_id: &str) -> Option<OrganizationInvitationRecord> {
+        read_lock(&self.organization_invitations)
+            .get(invitation_id)
+            .cloned()
+    }
+
+    fn organization_invitation_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Option<OrganizationInvitationRecord> {
+        read_lock(&self.organization_invitations)
+            .values()
+            .find(|invitation| invitation.invitation_token_hash == token_hash)
+            .cloned()
+    }
+
+    fn revoke_organization_invitation(
+        &self,
+        invitation_id: &str,
+        expected_resource_version: i64,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<OrganizationInvitationRecord> {
+        let mut invitations = write_lock(&self.organization_invitations);
+        let Some(invitation) = invitations.get_mut(invitation_id) else {
+            return Err(GatewayError::NotFound {
+                resource: format!("organization invitation {invitation_id}"),
+            });
+        };
+        if invitation.resource_version != expected_resource_version {
+            return Err(GatewayError::BadRequest {
+                message: "stale_resource_version".to_owned(),
+            });
+        }
+        if invitation.status != InvitationStatus::Pending {
+            return Err(GatewayError::BadRequest {
+                message: "invitation_not_pending".to_owned(),
+            });
+        }
+        invitation.status = InvitationStatus::Revoked;
+        invitation.resource_version += 1;
+        invitation.updated_at = now;
+        let revoked = invitation.clone();
+        drop(invitations);
+        Ok(revoked)
+    }
+
+    fn accept_organization_invitation(
+        &self,
+        invitation_id: &str,
+        principal_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<OrganizationInvitationRecord> {
+        let mut invitations = write_lock(&self.organization_invitations);
+        let Some(invitation) = invitations.get_mut(invitation_id) else {
+            return Err(GatewayError::NotFound {
+                resource: format!("organization invitation {invitation_id}"),
+            });
+        };
+        if !invitation.status.accepts_at(invitation.expires_at, now) {
+            return Err(GatewayError::BadRequest {
+                message: "invitation_not_accepting".to_owned(),
+            });
+        }
+        invitation.status = InvitationStatus::Accepted;
+        invitation.accepted_at = Some(now);
+        invitation.resource_version += 1;
+        invitation.updated_at = now;
+        let accepted = invitation.clone();
+        drop(invitations);
+
+        let organization_membership =
+            upsert_invited_organization_membership(self, &accepted, principal_id);
+        if let Some(project_id) = accepted.project_id.as_deref() {
+            upsert_invited_project_membership(
+                self,
+                &accepted,
+                principal_id,
+                project_id,
+                &organization_membership.organization_member_id,
+            );
+        }
+        repair_user_defaults_after_invite_accept(self, &accepted, principal_id, now);
+        Ok(accepted)
+    }
+}
+
+fn upsert_invited_organization_membership(
+    store: &InMemoryGatewayStore,
+    invitation: &OrganizationInvitationRecord,
+    principal_id: &str,
+) -> OrganizationMembershipRecord {
+    let key = (principal_id.to_owned(), invitation.organization_id.clone());
+    let mut memberships = write_lock(&store.organization_memberships);
+    let membership = memberships
+        .entry(key)
+        .or_insert_with(|| OrganizationMembershipRecord {
+            organization_member_id: new_prefixed_id("om"),
+            tenant_id: invitation.tenant_id.clone(),
+            organization_id: invitation.organization_id.clone(),
+            principal_id: principal_id.to_owned(),
+            status: MembershipStatus::Active,
+            resource_version: 1,
+        });
+    if membership.status != MembershipStatus::Active {
+        membership.status = MembershipStatus::Active;
+        membership.resource_version += 1;
+    }
+    let updated = membership.clone();
+    drop(memberships);
+    updated
+}
+
+fn upsert_invited_project_membership(
+    store: &InMemoryGatewayStore,
+    invitation: &OrganizationInvitationRecord,
+    principal_id: &str,
+    project_id: &str,
+    organization_member_id: &str,
+) -> ProjectMembershipRecord {
+    let key = (principal_id.to_owned(), project_id.to_owned());
+    let mut memberships = write_lock(&store.project_memberships);
+    let membership = memberships
+        .entry(key)
+        .or_insert_with(|| ProjectMembershipRecord {
+            project_member_id: new_prefixed_id("pm"),
+            tenant_id: invitation.tenant_id.clone(),
+            organization_id: invitation.organization_id.clone(),
+            project_id: project_id.to_owned(),
+            principal_id: principal_id.to_owned(),
+            organization_member_id: Some(organization_member_id.to_owned()),
+            status: MembershipStatus::Active,
+            resource_version: 1,
+        });
+    if membership.status != MembershipStatus::Active {
+        membership.status = MembershipStatus::Active;
+        membership.resource_version += 1;
+    }
+    if membership.organization_member_id.is_none() {
+        membership.organization_member_id = Some(organization_member_id.to_owned());
+        membership.resource_version += 1;
+    }
+    let updated = membership.clone();
+    drop(memberships);
+    updated
+}
+
+fn repair_user_defaults_after_invite_accept(
+    store: &InMemoryGatewayStore,
+    invitation: &OrganizationInvitationRecord,
+    principal_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    let mut users = write_lock(&store.users);
+    let Some(user) = users.get_mut(principal_id) else {
+        return;
+    };
+    let organization_updated = user.default_organization_id.is_none();
+    if organization_updated {
+        user.default_organization_id = Some(invitation.organization_id.clone());
+    }
+    let project_updated = user.default_project_id.is_none() && invitation.project_id.is_some();
+    if project_updated {
+        if let Some(project_id) = invitation.project_id.as_ref() {
+            user.default_project_id = Some(project_id.clone());
+        }
+    }
+    if organization_updated || project_updated {
+        user.resource_version += 1;
+        user.updated_at = now;
+    }
+    drop(users);
+}
+
+impl SecretRefAdminRepository for InMemoryGatewayStore {
+    fn create_secret_ref(
+        &self,
+        request: CreateSecretRefRequest,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<SecretRefRecord> {
+        let (organization_id, project_id) = validate_secret_ref_request(self, &request)?;
+        let secret_ref_id = crate::domain::new_prefixed_id("sec");
+        let display_mask = secret_display_mask(request.secret_value.expose_secret());
+        let fingerprint = secret_fingerprint(request.secret_value.expose_secret());
+        let record = SecretRefRecord {
+            backend_locator: format!("memory://gateway-secrets/{secret_ref_id}"),
+            secret_ref_id: secret_ref_id.clone(),
+            tenant_id: request.tenant_id,
+            organization_id,
+            project_id,
+            purpose: request.purpose.trim().to_owned(),
+            backend_kind: request.backend_kind,
+            display_mask,
+            fingerprint,
+            status: SecretRefStatus::Active,
+            resource_version: 1,
+            schema_version: 1,
+            created_by: request.created_by,
+            created_at: now,
+            updated_at: now,
+        };
+        write_lock(&self.secret_refs).insert(secret_ref_id.clone(), record.clone());
+        write_lock(&self.secret_values).insert(secret_ref_id, request.secret_value);
+        Ok(record)
+    }
+
+    fn secret_refs_for_tenant(&self, tenant_id: &str) -> Vec<SecretRefRecord> {
+        let mut refs = read_lock(&self.secret_refs)
+            .values()
+            .filter(|secret_ref| secret_ref.tenant_id == tenant_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        refs.sort_by(|left, right| {
+            left.organization_id
+                .cmp(&right.organization_id)
+                .then_with(|| left.project_id.cmp(&right.project_id))
+                .then_with(|| left.purpose.cmp(&right.purpose))
+                .then_with(|| left.secret_ref_id.cmp(&right.secret_ref_id))
+        });
+        refs
+    }
+
+    fn secret_ref(&self, secret_ref_id: &str) -> Option<SecretRefRecord> {
+        read_lock(&self.secret_refs).get(secret_ref_id).cloned()
+    }
+
+    fn secret_value(&self, secret_ref_id: &str) -> Option<SecretString> {
+        let active = read_lock(&self.secret_refs)
+            .get(secret_ref_id)
+            .is_some_and(|record| {
+                matches!(
+                    record.status,
+                    SecretRefStatus::Active | SecretRefStatus::Rotating
+                )
+            });
+        if !active {
+            return None;
+        }
+        read_lock(&self.secret_values)
+            .get(secret_ref_id)
+            .map(|value| SecretString::from(value.expose_secret().to_owned()))
     }
 }
 
@@ -4278,6 +5148,14 @@ fn validate_upstream_credential_endpoint(
             reason: "provider_endpoint_organization_mismatch",
         });
     }
+    ensure_secret_ref_usable(
+        store,
+        &request.tenant_id,
+        request.organization_id.as_deref(),
+        None,
+        &request.secret_ref_id,
+        "upstream_credential_secret_ref",
+    )?;
     Ok(())
 }
 
@@ -5445,7 +6323,12 @@ fn validate_otel_export_config_request_with_excluded_id(
     excluded_config_id: Option<&str>,
 ) -> Result<(Option<String>, Option<String>)> {
     let (organization_id, project_id) = validate_otel_export_scope(store, request)?;
-    validate_otel_export_shape(request)?;
+    validate_otel_export_shape(
+        store,
+        request,
+        organization_id.as_deref(),
+        project_id.as_deref(),
+    )?;
     let duplicate = read_lock(&store.otel_export_configs)
         .values()
         .any(|config| {
@@ -5533,7 +6416,12 @@ fn ensure_otel_scope_tenant(resource_tenant_id: &str, tenant_id: &str) -> Result
     }
 }
 
-fn validate_otel_export_shape(request: &CreateOtelExportConfigRequest) -> Result<()> {
+fn validate_otel_export_shape(
+    store: &InMemoryGatewayStore,
+    request: &CreateOtelExportConfigRequest,
+    organization_id: Option<&str>,
+    project_id: Option<&str>,
+) -> Result<()> {
     if otel_endpoint_host(&request.endpoint_url).is_none() {
         return Err(GatewayError::BadRequest {
             message: "otel_export_endpoint_url_invalid".to_owned(),
@@ -5544,7 +6432,7 @@ fn validate_otel_export_shape(request: &CreateOtelExportConfigRequest) -> Result
             message: "otel_export_protocol_invalid".to_owned(),
         });
     }
-    validate_otel_header_refs(&request.header_refs)?;
+    validate_otel_header_refs(store, request, organization_id, project_id)?;
     validate_otel_signals(&request.enabled_signals)?;
     validate_otel_resource_attributes(&request.resource_attributes)?;
     if !(5..=3600).contains(&request.export_interval_seconds) {
@@ -5562,14 +6450,119 @@ fn validate_otel_export_shape(request: &CreateOtelExportConfigRequest) -> Result
     Ok(())
 }
 
-fn validate_otel_header_refs(header_refs: &[OtelHeaderRef]) -> Result<()> {
-    if header_refs.len() > 8 {
+fn validate_secret_ref_request(
+    store: &InMemoryGatewayStore,
+    request: &CreateSecretRefRequest,
+) -> Result<(Option<String>, Option<String>)> {
+    if request.purpose.trim().is_empty() || request.purpose.len() > 120 {
+        return Err(GatewayError::BadRequest {
+            message: "secret_ref_purpose_invalid".to_owned(),
+        });
+    }
+    if request.backend_kind != "memory" {
+        return Err(GatewayError::BadRequest {
+            message: "secret_ref_backend_kind_unsupported".to_owned(),
+        });
+    }
+    if request.secret_value.expose_secret().is_empty() {
+        return Err(GatewayError::BadRequest {
+            message: "secret_ref_value_required".to_owned(),
+        });
+    }
+    validate_notification_scope(
+        store,
+        &request.tenant_id,
+        request.organization_id.as_deref(),
+        request.project_id.as_deref(),
+    )
+}
+
+fn ensure_secret_ref_usable(
+    store: &InMemoryGatewayStore,
+    tenant_id: &str,
+    organization_id: Option<&str>,
+    project_id: Option<&str>,
+    secret_ref_id: &str,
+    error_prefix: &str,
+) -> Result<()> {
+    if !valid_secret_ref_id(secret_ref_id) {
+        return Err(GatewayError::BadRequest {
+            message: format!("{error_prefix}_invalid"),
+        });
+    }
+    let Some(secret_ref) = read_lock(&store.secret_refs).get(secret_ref_id).cloned() else {
+        return Err(GatewayError::NotFound {
+            resource: format!("secret ref {secret_ref_id}"),
+        });
+    };
+    if secret_ref.tenant_id != tenant_id {
+        return Err(GatewayError::Authorization {
+            reason: "secret_ref_tenant_mismatch",
+        });
+    }
+    if !matches!(
+        secret_ref.status,
+        SecretRefStatus::Active | SecretRefStatus::Rotating
+    ) {
+        return Err(GatewayError::BadRequest {
+            message: format!("{error_prefix}_not_active"),
+        });
+    }
+    if secret_ref
+        .organization_id
+        .as_deref()
+        .is_some_and(|secret_org| organization_id != Some(secret_org))
+    {
+        return Err(GatewayError::BadRequest {
+            message: format!("{error_prefix}_scope_mismatch"),
+        });
+    }
+    if secret_ref
+        .project_id
+        .as_deref()
+        .is_some_and(|secret_project| project_id != Some(secret_project))
+    {
+        return Err(GatewayError::BadRequest {
+            message: format!("{error_prefix}_scope_mismatch"),
+        });
+    }
+    Ok(())
+}
+
+fn secret_display_mask(secret_value: &str) -> String {
+    let suffix = secret_value
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    if suffix.is_empty() {
+        "****".to_owned()
+    } else {
+        format!("****{suffix}")
+    }
+}
+
+fn secret_fingerprint(secret_value: &str) -> String {
+    let digest = Sha256::digest(secret_value.as_bytes());
+    format!("sha256:{digest:x}")
+}
+
+fn validate_otel_header_refs(
+    store: &InMemoryGatewayStore,
+    request: &CreateOtelExportConfigRequest,
+    organization_id: Option<&str>,
+    project_id: Option<&str>,
+) -> Result<()> {
+    if request.header_refs.len() > 8 {
         return Err(GatewayError::BadRequest {
             message: "otel_export_header_ref_limit_exceeded".to_owned(),
         });
     }
     let mut names = HashSet::new();
-    for header in header_refs {
+    for header in &request.header_refs {
         let normalized_name = header.name.to_ascii_lowercase();
         if !valid_otel_header_name(&normalized_name) {
             return Err(GatewayError::BadRequest {
@@ -5586,6 +6579,14 @@ fn validate_otel_header_refs(header_refs: &[OtelHeaderRef]) -> Result<()> {
                 message: "otel_export_header_secret_ref_invalid".to_owned(),
             });
         }
+        ensure_secret_ref_usable(
+            store,
+            &request.tenant_id,
+            organization_id,
+            project_id,
+            &header.secret_ref_id,
+            "otel_export_header_secret_ref",
+        )?;
     }
     Ok(())
 }
@@ -5741,6 +6742,16 @@ fn validate_notification_sink_request_with_excluded_id(
         request.project_id.as_deref(),
     )?;
     validate_notification_sink_shape(request)?;
+    if let Some(signing_secret_ref_id) = request.signing_secret_ref_id.as_deref() {
+        ensure_secret_ref_usable(
+            store,
+            &request.tenant_id,
+            organization_id.as_deref(),
+            project_id.as_deref(),
+            signing_secret_ref_id,
+            "notification_sink_signing_secret_ref",
+        )?;
+    }
     let duplicate = read_lock(&store.notification_sinks).values().any(|sink| {
         sink.tenant_id == request.tenant_id
             && sink.organization_id == organization_id
@@ -6430,6 +7441,8 @@ impl PostgresGatewayStore {
                 auth_session_id,
                 tenant_id,
                 principal_id,
+                active_organization_id,
+                active_project_id,
                 session_hash,
                 status,
                 expires_at,
@@ -6964,6 +7977,8 @@ fn auth_session_record_from_row(row: &sqlx::postgres::PgRow) -> Result<AuthSessi
         auth_session_id: row.get("auth_session_id"),
         tenant_id: row.get("tenant_id"),
         principal_id: row.get("principal_id"),
+        active_organization_id: row.get("active_organization_id"),
+        active_project_id: row.get("active_project_id"),
         session_hash: row.get("session_hash"),
         status: parse_auth_session_status(row.get("status"))?,
         expires_at: row.get("expires_at"),

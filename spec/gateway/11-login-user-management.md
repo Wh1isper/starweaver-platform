@@ -289,22 +289,22 @@ backend yet.
 
 Fields:
 
-| Field                     | Meaning                                               |
-| ------------------------- | ----------------------------------------------------- |
-| `external_identity_id`    | stable id                                             |
-| `tenant_id`               | tenant                                                |
-| `identity_provider_id`    | login provider                                        |
-| `provider_key`            | normalized issuer or provider namespace               |
-| `provider_subject`        | stable subject from provider                          |
-| `provider_login_snapshot` | GitHub login or OIDC preferred username at last login |
-| `principal_id`            | linked gateway principal                              |
-| `email_hash`              | normalized email hash when available                  |
-| `email_verified`          | provider asserted email verification                  |
-| `display_name_snapshot`   | display name at last login                            |
-| `last_login_at`           | last successful login                                 |
-| `status`                  | `active`, `disabled`, `unlinked`                      |
-| `created_at`              | creation timestamp                                    |
-| `updated_at`              | last metadata update                                  |
+| Field                     | Meaning                                                |
+| ------------------------- | ------------------------------------------------------ |
+| `external_identity_id`    | stable id                                              |
+| `tenant_id`               | tenant                                                 |
+| `identity_provider_id`    | login provider                                         |
+| `provider_key`            | normalized issuer or provider namespace                |
+| `provider_subject`        | stable subject from provider                           |
+| `provider_login_snapshot` | GitHub login or OIDC preferred username at last login  |
+| `principal_id`            | linked gateway principal                               |
+| `email_hash`              | normalized email hash when available                   |
+| `email_verified`          | provider asserted email verification                   |
+| `display_name_snapshot`   | display name at last login                             |
+| `last_login_at`           | last successful login                                  |
+| `status`                  | `active`, `disabled`, `deleted`; unlink sets `deleted` |
+| `created_at`              | creation timestamp                                     |
+| `updated_at`              | last metadata update                                   |
 
 Uniqueness:
 
@@ -450,6 +450,7 @@ Auth endpoints are versioned separately from model ingress.
 | Endpoint                                        | Purpose                                      |
 | ----------------------------------------------- | -------------------------------------------- |
 | `GET /auth/v1/providers`                        | list enabled login providers                 |
+| `POST /auth/v1/single-user/login`               | log in with configured local credentials     |
 | `GET /auth/v1/providers/{provider_id}/login`    | start provider-specific login                |
 | `GET /auth/v1/providers/{provider_id}/callback` | complete provider-specific login             |
 | `POST /auth/v1/logout`                          | revoke current session                       |

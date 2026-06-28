@@ -71,6 +71,10 @@ pub struct CreateAuthSessionRequest {
     pub tenant_id: String,
     /// Authenticated principal.
     pub principal_id: String,
+    /// Active organization context for browser session requests.
+    pub active_organization_id: Option<String>,
+    /// Active project context for browser session requests.
+    pub active_project_id: Option<String>,
     /// Session expiry.
     pub expires_at: DateTime<Utc>,
 }
@@ -150,6 +154,8 @@ pub fn create_auth_session(
             auth_session_id: new_prefixed_id("sess"),
             tenant_id: request.tenant_id,
             principal_id: request.principal_id,
+            active_organization_id: request.active_organization_id,
+            active_project_id: request.active_project_id,
             session_hash: session_token_hash(raw_token.expose_secret()),
             status: AuthSessionStatus::Active,
             expires_at: request.expires_at,
@@ -401,6 +407,8 @@ mod tests {
             CreateAuthSessionRequest {
                 tenant_id: "ten_test".to_owned(),
                 principal_id: "usr_test".to_owned(),
+                active_organization_id: Some("org_test".to_owned()),
+                active_project_id: Some("prj_test".to_owned()),
                 expires_at: now + Duration::hours(1),
             },
             now,
@@ -422,6 +430,8 @@ mod tests {
             CreateAuthSessionRequest {
                 tenant_id: "ten_test".to_owned(),
                 principal_id: "usr_test".to_owned(),
+                active_organization_id: Some("org_test".to_owned()),
+                active_project_id: Some("prj_test".to_owned()),
                 expires_at: now + Duration::hours(1),
             },
             now,
@@ -446,6 +456,8 @@ mod tests {
             CreateAuthSessionRequest {
                 tenant_id: "ten_test".to_owned(),
                 principal_id: "usr_test".to_owned(),
+                active_organization_id: Some("org_test".to_owned()),
+                active_project_id: Some("prj_test".to_owned()),
                 expires_at: now + Duration::hours(1),
             },
             now,
@@ -458,6 +470,8 @@ mod tests {
             CreateAuthSessionRequest {
                 tenant_id: "ten_test".to_owned(),
                 principal_id: "usr_test".to_owned(),
+                active_organization_id: Some("org_test".to_owned()),
+                active_project_id: Some("prj_test".to_owned()),
                 expires_at: now - Duration::seconds(1),
             },
             now,

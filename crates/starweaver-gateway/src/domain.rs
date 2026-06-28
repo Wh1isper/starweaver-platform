@@ -178,6 +178,39 @@ pub enum MembershipStatus {
     Removed,
 }
 
+/// Organization invitation lifecycle status.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvitationStatus {
+    /// Invitation can be accepted before expiry.
+    Pending,
+    /// Invitation was accepted and cannot be reused.
+    Accepted,
+    /// Invitation was revoked before acceptance.
+    Revoked,
+    /// Invitation is past its expiry.
+    Expired,
+}
+
+impl InvitationStatus {
+    /// Returns the stable status label.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Accepted => "accepted",
+            Self::Revoked => "revoked",
+            Self::Expired => "expired",
+        }
+    }
+
+    /// Returns whether the invitation can still be accepted at `now`.
+    #[must_use]
+    pub fn accepts_at(&self, expires_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+        matches!(self, Self::Pending) && expires_at > now
+    }
+}
+
 impl MembershipStatus {
     /// Returns the stable status label.
     #[must_use]
@@ -469,6 +502,10 @@ pub struct AuthSessionRecord {
     pub tenant_id: TenantId,
     /// Authenticated principal.
     pub principal_id: PrincipalId,
+    /// Active organization context for browser session requests.
+    pub active_organization_id: Option<OrganizationId>,
+    /// Active project context for browser session requests.
+    pub active_project_id: Option<ProjectId>,
     /// Hash of the raw opaque session token.
     pub session_hash: String,
     /// Session lifecycle status.
@@ -488,6 +525,8 @@ impl fmt::Debug for AuthSessionRecord {
             .field("auth_session_id", &self.auth_session_id)
             .field("tenant_id", &self.tenant_id)
             .field("principal_id", &self.principal_id)
+            .field("active_organization_id", &self.active_organization_id)
+            .field("active_project_id", &self.active_project_id)
             .field("session_hash", &"<redacted>")
             .field("status", &self.status)
             .field("expires_at", &self.expires_at)
@@ -668,6 +707,91 @@ pub struct UserRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Durable external login identity linked to a gateway-local principal.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ExternalIdentityRecord {
+    /// Stable external identity id.
+    pub external_identity_id: String,
+    /// Owning tenant.
+    pub tenant_id: TenantId,
+    /// Linked gateway-local principal.
+    pub principal_id: PrincipalId,
+    /// Login provider that issued the identity when known.
+    pub login_provider_id: Option<String>,
+    /// Login provider kind.
+    pub provider_kind: String,
+    /// Stable provider subject.
+    pub provider_subject: String,
+    /// Last observed email address. Responses expose only a hash.
+    pub email: Option<String>,
+    /// Whether the provider asserted email verification.
+    pub email_verified: bool,
+    /// External identity lifecycle status.
+    pub status: ResourceStatus,
+    /// Creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Update timestamp.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Durable organization invitation metadata. Raw invitation tokens are never stored here.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OrganizationInvitationRecord {
+    /// Stable invitation id.
+    pub invitation_id: String,
+    /// Owning tenant.
+    pub tenant_id: TenantId,
+    /// Target organization.
+    pub organization_id: OrganizationId,
+    /// Optional project assignment inside the organization.
+    pub project_id: Option<ProjectId>,
+    /// Email target when the invitation is email-scoped.
+    pub invited_email: Option<String>,
+    /// Principal target when the invitation is principal-scoped.
+    pub invited_principal_id: Option<PrincipalId>,
+    /// Hash of the raw invitation token.
+    pub invitation_token_hash: String,
+    /// Requested role id.
+    pub role_id: String,
+    /// Invitation lifecycle status.
+    pub status: InvitationStatus,
+    /// Expiry timestamp.
+    pub expires_at: DateTime<Utc>,
+    /// Acceptance timestamp when accepted.
+    pub accepted_at: Option<DateTime<Utc>>,
+    /// Actor that created the invitation.
+    pub created_by: PrincipalId,
+    /// Resource version for optimistic concurrency.
+    pub resource_version: i64,
+    /// Creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Update timestamp.
+    pub updated_at: DateTime<Utc>,
+}
+
+impl fmt::Debug for OrganizationInvitationRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OrganizationInvitationRecord")
+            .field("invitation_id", &self.invitation_id)
+            .field("tenant_id", &self.tenant_id)
+            .field("organization_id", &self.organization_id)
+            .field("project_id", &self.project_id)
+            .field("invited_email", &self.invited_email)
+            .field("invited_principal_id", &self.invited_principal_id)
+            .field("invitation_token_hash", &"<redacted>")
+            .field("role_id", &self.role_id)
+            .field("status", &self.status)
+            .field("expires_at", &self.expires_at)
+            .field("accepted_at", &self.accepted_at)
+            .field("created_by", &self.created_by)
+            .field("resource_version", &self.resource_version)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
+}
+
 /// Durable service account metadata.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ServiceAccountRecord {
@@ -788,6 +912,33 @@ impl UpstreamCredentialStatus {
     }
 }
 
+/// Secret reference lifecycle status.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretRefStatus {
+    /// Secret reference can be resolved.
+    Active,
+    /// Secret reference is in a rotation window.
+    Rotating,
+    /// Secret reference is administratively disabled.
+    Disabled,
+    /// Secret reference was soft-deleted.
+    Deleted,
+}
+
+impl SecretRefStatus {
+    /// Returns the stable status label.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Rotating => "rotating",
+            Self::Disabled => "disabled",
+            Self::Deleted => "deleted",
+        }
+    }
+}
+
 /// Durable provider endpoint admin resource.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProviderEndpointRecord {
@@ -807,6 +958,41 @@ pub struct ProviderEndpointRecord {
     pub upstream_base_url: String,
     /// Lifecycle status.
     pub status: ResourceStatus,
+    /// Resource version for optimistic concurrency.
+    pub resource_version: i64,
+    /// Schema version that wrote this record.
+    pub schema_version: u16,
+    /// Creating actor.
+    pub created_by: PrincipalId,
+    /// Creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Update timestamp.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Durable secret reference admin resource.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SecretRefRecord {
+    /// Stable secret reference id.
+    pub secret_ref_id: String,
+    /// Owning tenant.
+    pub tenant_id: TenantId,
+    /// Optional organization boundary.
+    pub organization_id: Option<OrganizationId>,
+    /// Optional project boundary.
+    pub project_id: Option<ProjectId>,
+    /// Operator-visible purpose for the secret.
+    pub purpose: String,
+    /// Secret backend kind.
+    pub backend_kind: String,
+    /// Backend locator. This is returned only through strong-auth locator reads.
+    pub backend_locator: String,
+    /// Safe display mask derived from the secret value.
+    pub display_mask: String,
+    /// Stable non-secret fingerprint of the secret value.
+    pub fingerprint: String,
+    /// Lifecycle status.
+    pub status: SecretRefStatus,
     /// Resource version for optimistic concurrency.
     pub resource_version: i64,
     /// Schema version that wrote this record.
@@ -1924,6 +2110,8 @@ mod tests {
             auth_session_id: "sess_test".to_owned(),
             tenant_id: "ten_test".to_owned(),
             principal_id: "usr_test".to_owned(),
+            active_organization_id: Some("org_test".to_owned()),
+            active_project_id: Some("prj_test".to_owned()),
             session_hash: "session_hash_material".to_owned(),
             status: AuthSessionStatus::Active,
             expires_at: now,

@@ -817,6 +817,8 @@ CREATE TABLE IF NOT EXISTS gateway_auth_sessions (
     auth_session_id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES gateway_tenants (tenant_id),
     principal_id TEXT NOT NULL REFERENCES gateway_principals (principal_id),
+    active_organization_id TEXT REFERENCES gateway_organizations (organization_id),
+    active_project_id TEXT REFERENCES gateway_projects (project_id),
     session_hash TEXT NOT NULL,
     status TEXT NOT NULL,
     resource_version BIGINT NOT NULL DEFAULT 1,

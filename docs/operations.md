@@ -29,10 +29,14 @@ checks the migration history, probes `/readyz`, and tears the stack down. The
 compose gateway uses live readiness probes for PostgreSQL migration status and
 Redis-compatible hot-state connectivity.
 
-The compose gateway does not enable login by default. Set
+The compose gateway does not enable login by default and does not auto-create
+GitHub OAuth App or OIDC login providers. Set
 `STARWEAVER_GATEWAY_SINGLE_USER_USERNAME` and
 `STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD` before `make compose-up` when a local
-password login is needed.
+password bootstrap login is needed. Compose also passes through
+`STARWEAVER_GATEWAY_SINGLE_USER_EMAIL`,
+`STARWEAVER_GATEWAY_SINGLE_USER_DISPLAY_NAME`, and
+`STARWEAVER_GATEWAY_SINGLE_USER_SESSION_TTL_SECONDS` when they are set.
 
 Readiness behavior is controlled by:
 

@@ -70,7 +70,8 @@ Install local pre-commit hooks with:
 make install
 ```
 
-The gateway does not enable human login by default. For local or simple
+The gateway does not enable human login by default, and it does not create a
+GitHub OAuth App or OIDC provider automatically. For local or simple
 self-hosted bootstrap, enable the local single-user provider with:
 
 ```bash
@@ -80,7 +81,8 @@ export STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD='change-me'
 
 When both values are configured, `/auth/v1/single-user/login` creates an opaque
 session and bootstraps the default tenant, organization, project, and owner
-grants.
+grants. GitHub OAuth App or OIDC login can be configured later through the
+admin identity-provider APIs.
 
 For a local gateway stack with PostgreSQL, Redis, migration, and `/readyz`
 smoke:

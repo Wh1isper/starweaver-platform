@@ -13,7 +13,7 @@ use axum::{Extension, Json, Router};
 use chrono::Datelike;
 use hmac::{Hmac, Mac};
 use rand_core::{OsRng, RngCore};
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -36,17 +36,19 @@ use crate::config::{
     validate_config_snapshot_payload, PublishConfigSnapshotRequest, ResourceVersion,
 };
 use crate::domain::{
-    new_prefixed_id, ActorKind, ApiKeyRecord, AuditEventRecord, AuthenticatedActor,
-    BudgetPolicyRecord, ConfigPublicationPointerRecord, ConfigWorkerReloadRecord, DirectoryStatus,
-    EmergencyOperationRecord, ExportJobRecord, ExportManifestRecord, LedgerBucketRecord,
-    LoginProviderRecord, MembershipStatus, ModelAliasRecord, ModelTargetRecord,
-    NotificationDeliveryAttemptRecord, NotificationSinkRecord, NotificationSubscriptionRecord,
+    new_prefixed_id, ActorKind, ActorScope, ApiKeyRecord, AuditEventRecord, AuthSessionRecord,
+    AuthenticatedActor, BudgetPolicyRecord, ConfigPublicationPointerRecord,
+    ConfigWorkerReloadRecord, DirectoryStatus, EmergencyOperationRecord, ExportJobRecord,
+    ExportManifestRecord, ExternalIdentityRecord, LedgerBucketRecord, LoginProviderRecord,
+    MembershipStatus, ModelAliasRecord, ModelTargetRecord, NotificationDeliveryAttemptRecord,
+    NotificationSinkRecord, NotificationSubscriptionRecord, OrganizationInvitationRecord,
     OrganizationMembershipRecord, OrganizationRecord, OtelExportConfigRecord,
     OtelExporterHealthRecord, OtelHeaderRef, OtelResourceAttribute, PricingSkuRecord,
     ProjectMembershipRecord, ProjectRecord, ProviderEndpointRecord, ProviderGrantRecord,
     QuotaPolicyRecord, ResourceStatus, RoutePolicyRecord, RoutingGroupRecord,
-    RoutingGroupTargetRecord, ServiceAccountRecord, UpstreamCredentialRecord,
-    UpstreamCredentialStatus, UsageEventRecord, ValidationDiagnosticRecord,
+    RoutingGroupTargetRecord, SecretRefRecord, SecretRefStatus, ServiceAccountRecord,
+    UpstreamCredentialRecord, UpstreamCredentialStatus, UsageEventRecord,
+    ValidationDiagnosticRecord,
 };
 use crate::error::{GatewayError, Result};
 use crate::hot_state::{EndpointDrainRecord, EndpointHealthState, RouteHotState};
@@ -63,21 +65,24 @@ use crate::runtime::{
     FakeProviderReplayEvidence, FakeProviderReplayTarget, RuntimeIngressResponse,
 };
 use crate::storage::{
-    BootstrapDefaultProjectRequest, CatalogAdminRepository, CompleteExportJobRequest,
-    ConfigPublicationRepository, ConfigSnapshotRepository, ConfigSnapshotStore,
-    CreateBudgetPolicyRequest, CreateEmergencyOperationRequest, CreateExportJobRequest,
-    CreateLoginProviderRequest, CreateModelAliasRequest, CreateModelTargetRequest,
-    CreateNotificationDeliveryAttemptRequest, CreateNotificationOutboxEventRequest,
-    CreateNotificationSinkRequest, CreateNotificationSubscriptionRequest,
-    CreateOtelExportConfigRequest, CreatePricingSkuRequest, CreateProviderEndpointRequest,
-    CreateProviderGrantRequest, CreateQuotaPolicyRequest, CreateRoutePolicyRequest,
-    CreateRoutingGroupRequest, CreateRoutingGroupTargetRequest, CreateServiceAccountRequest,
-    CreateUpstreamCredentialRequest, EmergencyOperationRepository, ExportRepository,
-    IdempotencyRecord, InMemoryGatewayStore, NotificationOutboxRepository, NullablePatch,
-    ProviderAdminRepository, RecordOtelExporterHealthRequest, RuntimePolicyRepository,
-    ServiceAccountAdminRepository, TenancyBootstrapRepository, TenancyRepository,
-    UpdateModelAliasRequest, UpdateNotificationSinkRequest, UpdateOtelExportConfigRequest,
-    UsageAccountingRepository, ValidationDiagnosticRepository,
+    AuthSessionRepository, BootstrapDefaultProjectRequest, CatalogAdminRepository,
+    CompleteExportJobRequest, ConfigPublicationRepository, ConfigSnapshotRepository,
+    ConfigSnapshotStore, CreateBudgetPolicyRequest, CreateEmergencyOperationRequest,
+    CreateExportJobRequest, CreateLoginProviderRequest, CreateModelAliasRequest,
+    CreateModelTargetRequest, CreateNotificationDeliveryAttemptRequest,
+    CreateNotificationOutboxEventRequest, CreateNotificationSinkRequest,
+    CreateNotificationSubscriptionRequest, CreateOrganizationInvitationRequest,
+    CreateOtelExportConfigRequest, CreatePricingSkuRequest, CreateProjectMembershipRequest,
+    CreateProviderEndpointRequest, CreateProviderGrantRequest, CreateQuotaPolicyRequest,
+    CreateRoutePolicyRequest, CreateRoutingGroupRequest, CreateRoutingGroupTargetRequest,
+    CreateSecretRefRequest, CreateServiceAccountRequest, CreateUpstreamCredentialRequest,
+    EmergencyOperationRepository, ExportRepository, ExternalIdentityRepository, IdempotencyRecord,
+    InMemoryGatewayStore, NotificationOutboxRepository, NullablePatch,
+    OrganizationInvitationRepository, ProviderAdminRepository, RecordOtelExporterHealthRequest,
+    RuntimePolicyRepository, SecretRefAdminRepository, ServiceAccountAdminRepository,
+    TenancyBootstrapRepository, TenancyRepository, UpdateModelAliasRequest,
+    UpdateNotificationSinkRequest, UpdateOtelExportConfigRequest, UsageAccountingRepository,
+    ValidationDiagnosticRepository,
 };
 use crate::{ProtocolFamily, SERVICE_NAME};
 
@@ -115,6 +120,30 @@ const ADMIN_EMERGENCY_DRAIN_ROUTING_GROUP_PATH: &str = concat!(
 const ADMIN_EMERGENCY_FREEZE_CONFIG_PATH: &str = "/admin/v1/emergency/config/freeze";
 const ADMIN_PROJECT_GET_PATH: &str = concat!("/admin/v1/projects/", "{project_id}");
 const ADMIN_ORGANIZATION_GET_PATH: &str = concat!("/admin/v1/organizations/", "{organization_id}");
+const ADMIN_USER_GET_PATH: &str = concat!("/admin/v1/users/", "{user_id}");
+const ADMIN_USER_SESSION_LIST_PATH: &str = concat!("/admin/v1/users/", "{user_id}", "/sessions");
+const ADMIN_USER_SESSION_REVOKE_PATH: &str = concat!(
+    "/admin/v1/users/",
+    "{user_id}",
+    "/sessions/",
+    "{auth_session_id}",
+    "/revoke"
+);
+const ADMIN_USER_EXTERNAL_IDENTITY_LIST_PATH: &str =
+    concat!("/admin/v1/users/", "{user_id}", "/external-identities");
+const ADMIN_USER_EXTERNAL_IDENTITY_GET_PATH: &str = concat!(
+    "/admin/v1/users/",
+    "{user_id}",
+    "/external-identities/",
+    "{external_identity_id}"
+);
+const ADMIN_USER_EXTERNAL_IDENTITY_UNLINK_PATH: &str = concat!(
+    "/admin/v1/users/",
+    "{user_id}",
+    "/external-identities/",
+    "{external_identity_id}",
+    "/unlink"
+);
 const ADMIN_ORGANIZATION_MEMBER_LIST_PATH: &str =
     concat!("/admin/v1/organizations/", "{organization_id}", "/members");
 const ADMIN_ORGANIZATION_MEMBER_GET_PATH: &str = concat!(
@@ -137,6 +166,9 @@ const ADMIN_UPSTREAM_CREDENTIAL_GET_PATH: &str = concat!(
     "/admin/v1/upstream-credentials/",
     "{upstream_credential_id}"
 );
+const ADMIN_SECRET_REF_GET_PATH: &str = concat!("/admin/v1/secret-refs/", "{secret_ref_id}");
+const ADMIN_SECRET_REF_LOCATOR_PATH: &str =
+    concat!("/admin/v1/secret-refs/", "{secret_ref_id}", "/locator");
 const ADMIN_MODEL_TARGET_GET_PATH: &str = concat!("/admin/v1/model-targets/", "{model_target_id}");
 const ADMIN_MODEL_ALIAS_GET_PATH: &str = concat!("/admin/v1/model-aliases/", "{model_alias_id}");
 const ADMIN_SERVICE_ACCOUNT_GET_PATH: &str =
@@ -179,6 +211,26 @@ const ADMIN_NOTIFICATION_SUBSCRIPTION_GET_PATH: &str = concat!(
 );
 const ADMIN_LOGIN_PROVIDER_GET_PATH: &str =
     concat!("/admin/v1/identity-providers/", "{login_provider_id}");
+const ADMIN_ORGANIZATION_INVITATION_LIST_PATH: &str = concat!(
+    "/admin/v1/organizations/",
+    "{organization_id}",
+    "/invitations"
+);
+const ADMIN_ORGANIZATION_INVITATION_GET_PATH: &str = concat!(
+    "/admin/v1/organizations/",
+    "{organization_id}",
+    "/invitations/",
+    "{invitation_id}"
+);
+const ADMIN_ORGANIZATION_INVITATION_REVOKE_PATH: &str = concat!(
+    "/admin/v1/organizations/",
+    "{organization_id}",
+    "/invitations/",
+    "{invitation_id}",
+    "/revoke"
+);
+const AUTH_INVITATION_PREVIEW_PATH: &str = concat!("/auth/v1/invitations/", "{token}", "/preview");
+const AUTH_INVITATION_ACCEPT_PATH: &str = concat!("/auth/v1/invitations/", "{token}", "/accept");
 const AUTH_LOGIN_PROVIDER_GET_PATH: &str = concat!("/auth/v1/providers/", "{login_provider_id}");
 const AUTH_LOGIN_PROVIDER_START_PATH: &str =
     concat!("/auth/v1/providers/", "{login_provider_id}", "/login");
@@ -667,29 +719,8 @@ fn admin_routes(state: &AppState) -> Router<AppState> {
         )
         .route(ADMIN_AUDIT_EVENT_LIST_PATH, get(list_audit_events))
         .merge(dashboard_admin_routes())
-        .route("/admin/v1/projects", get(list_projects))
-        .route(
-            ADMIN_PROJECT_GET_PATH,
-            get(get_project).patch(update_project),
-        )
-        .route("/admin/v1/organizations", get(list_organizations))
-        .route(
-            ADMIN_ORGANIZATION_GET_PATH,
-            get(get_organization).patch(update_organization),
-        )
-        .route(
-            ADMIN_ORGANIZATION_MEMBER_LIST_PATH,
-            get(list_organization_members),
-        )
-        .route(
-            ADMIN_ORGANIZATION_MEMBER_GET_PATH,
-            get(get_organization_member).patch(update_organization_member),
-        )
-        .route(ADMIN_PROJECT_MEMBER_LIST_PATH, get(list_project_members))
-        .route(
-            ADMIN_PROJECT_MEMBER_GET_PATH,
-            get(get_project_member).patch(update_project_member),
-        )
+        .merge(user_admin_routes())
+        .merge(tenancy_admin_routes())
         .route(
             "/admin/v1/provider-endpoints",
             get(list_provider_endpoints).post(create_provider_endpoint),
@@ -727,6 +758,7 @@ fn admin_routes(state: &AppState) -> Router<AppState> {
             get(get_model_target).patch(update_model_target),
         )
         .merge(model_alias_admin_routes())
+        .merge(secret_ref_admin_routes())
         .merge(service_account_admin_routes())
         .merge(pricing_sku_admin_routes())
         .merge(budget_policy_admin_routes())
@@ -736,6 +768,7 @@ fn admin_routes(state: &AppState) -> Router<AppState> {
         .merge(export_admin_routes())
         .merge(emergency_admin_routes())
         .merge(login_provider_admin_routes())
+        .merge(organization_invitation_admin_routes())
         .merge(route_policy_admin_routes())
         .merge(provider_grant_admin_routes())
         .merge(routing_group_admin_routes())
@@ -743,6 +776,46 @@ fn admin_routes(state: &AppState) -> Router<AppState> {
             state.clone(),
             auth_context_middleware,
         ))
+}
+
+fn tenancy_admin_routes() -> Router<AppState> {
+    Router::new()
+        .route("/admin/v1/projects", get(list_projects))
+        .route(
+            ADMIN_PROJECT_GET_PATH,
+            get(get_project).patch(update_project),
+        )
+        .route("/admin/v1/organizations", get(list_organizations))
+        .route(
+            ADMIN_ORGANIZATION_GET_PATH,
+            get(get_organization).patch(update_organization),
+        )
+        .route(
+            ADMIN_ORGANIZATION_MEMBER_LIST_PATH,
+            get(list_organization_members),
+        )
+        .route(
+            ADMIN_ORGANIZATION_MEMBER_GET_PATH,
+            get(get_organization_member).patch(update_organization_member),
+        )
+        .route(
+            ADMIN_PROJECT_MEMBER_LIST_PATH,
+            get(list_project_members).post(create_project_member),
+        )
+        .route(
+            ADMIN_PROJECT_MEMBER_GET_PATH,
+            get(get_project_member).patch(update_project_member),
+        )
+}
+
+fn secret_ref_admin_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/admin/v1/secret-refs",
+            get(list_secret_refs).post(create_secret_ref),
+        )
+        .route(ADMIN_SECRET_REF_GET_PATH, get(get_secret_ref))
+        .route(ADMIN_SECRET_REF_LOCATOR_PATH, get(get_secret_ref_locator))
 }
 
 fn export_admin_routes() -> Router<AppState> {
@@ -787,6 +860,22 @@ fn auth_routes() -> Router<AppState> {
     Router::new()
         .route("/auth/v1/providers", get(list_auth_login_providers))
         .route("/auth/v1/single-user/login", post(single_user_login))
+        .route("/auth/v1/session", get(get_current_auth_session))
+        .route(
+            "/auth/v1/session/default-organization",
+            post(update_session_default_organization),
+        )
+        .route(
+            "/auth/v1/session/active-organization",
+            post(update_session_active_organization),
+        )
+        .route(
+            "/auth/v1/session/active-project",
+            post(update_session_active_project),
+        )
+        .route("/auth/v1/logout", post(logout_current_auth_session))
+        .route(AUTH_INVITATION_PREVIEW_PATH, get(preview_auth_invitation))
+        .route(AUTH_INVITATION_ACCEPT_PATH, post(accept_auth_invitation))
         .route(AUTH_LOGIN_PROVIDER_GET_PATH, get(get_auth_login_provider))
         .route(
             AUTH_LOGIN_PROVIDER_START_PATH,
@@ -983,6 +1072,26 @@ fn notification_admin_routes() -> Router<AppState> {
         )
 }
 
+fn user_admin_routes() -> Router<AppState> {
+    Router::new()
+        .route("/admin/v1/users", get(list_users))
+        .route(ADMIN_USER_GET_PATH, get(get_user).patch(update_user))
+        .route(ADMIN_USER_SESSION_LIST_PATH, get(list_user_sessions))
+        .route(ADMIN_USER_SESSION_REVOKE_PATH, post(revoke_user_session))
+        .route(
+            ADMIN_USER_EXTERNAL_IDENTITY_LIST_PATH,
+            get(list_user_external_identities),
+        )
+        .route(
+            ADMIN_USER_EXTERNAL_IDENTITY_GET_PATH,
+            get(get_user_external_identity),
+        )
+        .route(
+            ADMIN_USER_EXTERNAL_IDENTITY_UNLINK_PATH,
+            post(unlink_user_external_identity),
+        )
+}
+
 fn login_provider_admin_routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -996,6 +1105,22 @@ fn login_provider_admin_routes() -> Router<AppState> {
         .route(
             ADMIN_LOGIN_PROVIDER_GET_PATH,
             get(get_login_provider).patch(update_login_provider),
+        )
+}
+
+fn organization_invitation_admin_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            ADMIN_ORGANIZATION_INVITATION_LIST_PATH,
+            get(list_organization_invitations).post(create_organization_invitation),
+        )
+        .route(
+            ADMIN_ORGANIZATION_INVITATION_GET_PATH,
+            get(get_organization_invitation),
+        )
+        .route(
+            ADMIN_ORGANIZATION_INVITATION_REVOKE_PATH,
+            post(revoke_organization_invitation),
         )
 }
 
@@ -1302,6 +1427,17 @@ struct AdminCreateUpstreamCredentialRequest {
     secret_ref_id: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AdminCreateSecretRefRequest {
+    idempotency_key: String,
+    organization_id: Option<String>,
+    project_id: Option<String>,
+    purpose: String,
+    #[serde(default = "default_secret_ref_backend_kind")]
+    backend_kind: String,
+    secret_value: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct AdminUpdateUpstreamCredentialRequest {
     expected_version: i64,
@@ -1572,6 +1708,46 @@ struct AdminUpdateLoginProviderRequest {
     reason: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AdminCreateOrganizationInvitationRequest {
+    idempotency_key: String,
+    invited_email: Option<String>,
+    invited_principal_id: Option<String>,
+    project_id: Option<String>,
+    role_id: Option<String>,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AdminRevokeOrganizationInvitationRequest {
+    expected_version: i64,
+    reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AdminUpdateUserRequest {
+    expected_version: i64,
+    status: DirectoryStatus,
+    reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AdminRevokeUserSessionRequest {
+    reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AdminUnlinkExternalIdentityRequest {
+    reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AdminCreateProjectMemberRequest {
+    idempotency_key: String,
+    principal_id: String,
+    organization_member_id: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct AuthProviderListQuery {
     tenant_id: Option<String>,
@@ -1581,6 +1757,23 @@ struct AuthProviderListQuery {
 struct SingleUserLoginRequest {
     username: String,
     password: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct SessionDefaultOrganizationRequest {
+    organization_id: String,
+    project_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct SessionActiveOrganizationRequest {
+    organization_id: String,
+    project_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct SessionActiveProjectRequest {
+    project_id: String,
 }
 
 impl std::fmt::Debug for SingleUserLoginRequest {
@@ -3645,6 +3838,333 @@ async fn update_organization(
     })))
 }
 
+async fn list_users(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(&state, &actor, &Method::GET, "/admin/v1/users", "*", now)?;
+    let route = route_metadata(&Method::GET, ADMIN_USER_GET_PATH)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let authorized = authorize_item_list(
+        engine.as_ref(),
+        &actor,
+        route.action,
+        state
+            .store
+            .users_for_tenant(&actor.tenant_id)
+            .into_iter()
+            .map(|user| AuthorizableItem {
+                resource: route.resource(user.user_id.clone()),
+                item: user,
+            }),
+    );
+    let resources = authorized
+        .items
+        .iter()
+        .map(user_resource_envelope)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "schema": "gateway.admin.user_list.v1",
+        "resources": resources,
+        "filtered_count": authorized.filtered_count,
+        "next_cursor": null
+    })))
+}
+
+async fn get_user(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(user_id): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_USER_GET_PATH,
+        &user_id,
+        now,
+    )?;
+    let user = user_for_actor(&state, &actor, &user_id)?;
+    Ok(Json(json!({
+        "schema": "gateway.admin.user.v1",
+        "resource": user_resource_body(&user)
+    })))
+}
+
+async fn update_user(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(user_id): Path<String>,
+    Json(request): Json<AdminUpdateUserRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    validate_user_status(&request.status)?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::PATCH,
+        ADMIN_USER_GET_PATH,
+        &user_id,
+        now,
+    )?;
+    let before = user_for_actor(&state, &actor, &user_id)?;
+    let updated =
+        state
+            .store
+            .update_user_status(&user_id, request.expected_version, request.status, now)?;
+    let revoked_session_count = if updated.status.accepts_access() {
+        0
+    } else {
+        state
+            .store
+            .revoke_sessions_for_principal(&actor.tenant_id, &updated.user_id, now)
+    };
+    let audit_event_id = record_admin_resource_audit(
+        &state,
+        &actor,
+        AdminResourceAuditInput {
+            event_type: "gateway.user.disable",
+            scope_kind: "tenant",
+            scope_id: actor.tenant_id.clone(),
+            resource_kind: "UserPrincipal",
+            resource_id: updated.user_id.clone(),
+            before_version: Some(before.resource_version),
+            after_version: Some(updated.resource_version),
+            redacted_diff: json!({
+                "status": {
+                    "before": before.status.as_str(),
+                    "after": updated.status.as_str()
+                },
+                "revoked_session_count": revoked_session_count,
+                "reason": request.reason
+            }),
+            occurred_at: now,
+        },
+    );
+    Ok(Json(json!({
+        "schema": "gateway.admin.user_mutation.v1",
+        "resource": user_resource_body(&updated),
+        "revoked_session_count": revoked_session_count,
+        "audit_event_id": audit_event_id
+    })))
+}
+
+async fn list_user_sessions(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(user_id): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    let user = user_for_actor(&state, &actor, &user_id)?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_USER_SESSION_LIST_PATH,
+        "*",
+        now,
+    )?;
+    let route = route_metadata(&Method::GET, ADMIN_USER_SESSION_LIST_PATH)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let authorized = authorize_item_list(
+        engine.as_ref(),
+        &actor,
+        route.action,
+        state
+            .store
+            .sessions_for_principal(&actor.tenant_id, &user.user_id)
+            .into_iter()
+            .map(|session| AuthorizableItem {
+                resource: route.resource(session.auth_session_id.clone()),
+                item: session,
+            }),
+    );
+    let resources = authorized
+        .items
+        .iter()
+        .map(auth_session_resource_envelope)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "schema": "gateway.admin.auth_session_list.v1",
+        "resources": resources,
+        "filtered_count": authorized.filtered_count,
+        "next_cursor": null
+    })))
+}
+
+async fn revoke_user_session(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path((user_id, auth_session_id)): Path<(String, String)>,
+    Json(request): Json<AdminRevokeUserSessionRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    let user = user_for_actor(&state, &actor, &user_id)?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::POST,
+        ADMIN_USER_SESSION_REVOKE_PATH,
+        &auth_session_id,
+        now,
+    )?;
+    let before = auth_session_for_actor(&state, &actor, &user.user_id, &auth_session_id)?;
+    let revoked = state.store.revoke_session_for_principal(
+        &actor.tenant_id,
+        &user.user_id,
+        &auth_session_id,
+        now,
+    )?;
+    let audit_event_id = record_admin_resource_audit(
+        &state,
+        &actor,
+        AdminResourceAuditInput {
+            event_type: "gateway.session.revoke",
+            scope_kind: "tenant",
+            scope_id: actor.tenant_id.clone(),
+            resource_kind: "AuthSession",
+            resource_id: revoked.auth_session_id.clone(),
+            before_version: None,
+            after_version: None,
+            redacted_diff: json!({
+                "principal_id": &revoked.principal_id,
+                "status": {
+                    "before": &before.status,
+                    "after": &revoked.status
+                },
+                "reason": request.reason
+            }),
+            occurred_at: now,
+        },
+    );
+    Ok(Json(json!({
+        "schema": "gateway.admin.auth_session_mutation.v1",
+        "resource": safe_auth_session_body(&revoked),
+        "audit_event_id": audit_event_id
+    })))
+}
+
+async fn list_user_external_identities(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(user_id): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    let user = user_for_actor(&state, &actor, &user_id)?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_USER_EXTERNAL_IDENTITY_LIST_PATH,
+        "*",
+        now,
+    )?;
+    let route = route_metadata(&Method::GET, ADMIN_USER_EXTERNAL_IDENTITY_LIST_PATH)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let authorized = authorize_item_list(
+        engine.as_ref(),
+        &actor,
+        route.action,
+        state
+            .store
+            .external_identities_for_principal(&actor.tenant_id, &user.user_id)
+            .into_iter()
+            .map(|identity| AuthorizableItem {
+                resource: route.resource(identity.external_identity_id.clone()),
+                item: identity,
+            }),
+    );
+    let resources = authorized
+        .items
+        .iter()
+        .map(external_identity_resource_envelope)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "schema": "gateway.admin.external_identity_list.v1",
+        "resources": resources,
+        "filtered_count": authorized.filtered_count,
+        "next_cursor": null
+    })))
+}
+
+async fn get_user_external_identity(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path((user_id, external_identity_id)): Path<(String, String)>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    let user = user_for_actor(&state, &actor, &user_id)?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_USER_EXTERNAL_IDENTITY_GET_PATH,
+        &external_identity_id,
+        now,
+    )?;
+    let identity =
+        external_identity_for_actor(&state, &actor, &user.user_id, &external_identity_id)?;
+    Ok(Json(json!({
+        "schema": "gateway.admin.external_identity.v1",
+        "resource": external_identity_resource_body(&identity)
+    })))
+}
+
+async fn unlink_user_external_identity(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path((user_id, external_identity_id)): Path<(String, String)>,
+    Json(request): Json<AdminUnlinkExternalIdentityRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    let user = user_for_actor(&state, &actor, &user_id)?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::POST,
+        ADMIN_USER_EXTERNAL_IDENTITY_UNLINK_PATH,
+        &external_identity_id,
+        now,
+    )?;
+    let before = external_identity_for_actor(&state, &actor, &user.user_id, &external_identity_id)?;
+    let unlinked = state.store.unlink_external_identity(
+        &actor.tenant_id,
+        &user.user_id,
+        &external_identity_id,
+        now,
+    )?;
+    let audit_event_id = record_admin_resource_audit(
+        &state,
+        &actor,
+        AdminResourceAuditInput {
+            event_type: "gateway.external_identity.unlink",
+            scope_kind: "tenant",
+            scope_id: actor.tenant_id.clone(),
+            resource_kind: "ExternalIdentity",
+            resource_id: unlinked.external_identity_id.clone(),
+            before_version: None,
+            after_version: None,
+            redacted_diff: json!({
+                "principal_id": &unlinked.principal_id,
+                "provider_kind": &unlinked.provider_kind,
+                "status": {
+                    "before": before.status.as_str(),
+                    "after": unlinked.status.as_str()
+                },
+                "reason": request.reason
+            }),
+            occurred_at: now,
+        },
+    );
+    Ok(Json(json!({
+        "schema": "gateway.admin.external_identity_mutation.v1",
+        "resource": external_identity_resource_body(&unlinked),
+        "audit_event_id": audit_event_id
+    })))
+}
+
 async fn list_organization_members(
     State(state): State<AppState>,
     Extension(actor): Extension<AuthenticatedActor>,
@@ -3732,6 +4252,9 @@ async fn update_organization_member(
         request.expected_version,
         request.status,
     )?;
+    let cascaded_project_member_count = state
+        .store
+        .cascade_project_memberships_for_organization_member(&updated, updated.status.clone());
     let audit_event_id = record_admin_resource_audit(
         &state,
         &actor,
@@ -3748,6 +4271,7 @@ async fn update_organization_member(
                     "before": before.status.as_str(),
                     "after": updated.status.as_str()
                 },
+                "cascaded_project_member_count": cascaded_project_member_count,
                 "reason": request.reason
             }),
             occurred_at: now,
@@ -3756,6 +4280,7 @@ async fn update_organization_member(
     Ok(Json(json!({
         "schema": "gateway.admin.organization_member_mutation.v1",
         "resource": organization_member_resource_body(&updated),
+        "cascaded_project_member_count": cascaded_project_member_count,
         "audit_event_id": audit_event_id
     })))
 }
@@ -3801,6 +4326,98 @@ async fn list_project_members(
         "filtered_count": authorized.filtered_count,
         "next_cursor": null
     })))
+}
+
+async fn create_project_member(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(project_id): Path<String>,
+    Json(request): Json<AdminCreateProjectMemberRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    let project = project_for_actor(&state, &actor, &project_id)?;
+    if !project.status.accepts_access() {
+        return Err(GatewayError::BadRequest {
+            message: "project_not_active".to_owned(),
+        });
+    }
+    let user = user_for_actor(&state, &actor, &request.principal_id)?;
+    if !user.status.accepts_access() {
+        return Err(GatewayError::BadRequest {
+            message: "project_member_principal_inactive".to_owned(),
+        });
+    }
+    let organization_member = active_organization_member_for_project_assignment(
+        &state,
+        &actor,
+        &project.organization_id,
+        &user.user_id,
+        request.organization_member_id.as_deref(),
+    )?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::POST,
+        ADMIN_PROJECT_MEMBER_LIST_PATH,
+        "*",
+        now,
+    )?;
+    let scope_key = idempotency_scope_key(
+        "project_members:create",
+        &format!("{}:{}", project.project_id, request.idempotency_key),
+    );
+    let request_hash = stable_request_hash(&request)?;
+    if let Some(response) =
+        state
+            .store
+            .idempotency_response(&actor.tenant_id, &scope_key, &request_hash, now)?
+    {
+        return Ok(Json(response_with_replay_flag(response, true)));
+    }
+    let member = state
+        .store
+        .create_project_membership(CreateProjectMembershipRequest {
+            tenant_id: actor.tenant_id.clone(),
+            organization_id: project.organization_id,
+            project_id: project.project_id,
+            principal_id: user.user_id,
+            organization_member_id: organization_member.organization_member_id,
+        })?;
+    let audit_event_id = record_admin_resource_audit(
+        &state,
+        &actor,
+        AdminResourceAuditInput {
+            event_type: "gateway.project_member.create",
+            scope_kind: "project",
+            scope_id: member.project_id.clone(),
+            resource_kind: "ProjectMember",
+            resource_id: member.project_member_id.clone(),
+            before_version: None,
+            after_version: Some(member.resource_version),
+            redacted_diff: json!({
+                "principal_id": &member.principal_id,
+                "organization_id": &member.organization_id,
+                "organization_member_id": &member.organization_member_id,
+                "status": member.status.as_str()
+            }),
+            occurred_at: now,
+        },
+    );
+    let response = json!({
+        "schema": "gateway.admin.project_member_mutation.v1",
+        "resource": project_member_resource_body(&member),
+        "audit_event_id": audit_event_id,
+        "idempotency_replayed": false
+    });
+    state.store.record_idempotency_response(IdempotencyRecord {
+        tenant_id: actor.tenant_id,
+        scope_key,
+        request_hash,
+        response_record: response.clone(),
+        expires_at: now + chrono::Duration::hours(IDEMPOTENCY_TTL_HOURS),
+        created_at: now,
+    });
+    Ok(Json(response))
 }
 
 async fn get_project_member(
@@ -4483,6 +5100,164 @@ async fn update_upstream_credential(
         "schema": "gateway.admin.upstream_credential_mutation.v1",
         "resource": upstream_credential_resource_body(&updated),
         "audit_event_id": audit_event_id
+    })))
+}
+
+async fn list_secret_refs(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        "/admin/v1/secret-refs",
+        "*",
+        now,
+    )?;
+    let route = route_metadata(&Method::GET, ADMIN_SECRET_REF_GET_PATH)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let authorized = authorize_item_list(
+        engine.as_ref(),
+        &actor,
+        route.action,
+        state
+            .store
+            .secret_refs_for_tenant(&actor.tenant_id)
+            .into_iter()
+            .map(|secret_ref| AuthorizableItem {
+                resource: route.resource(secret_ref.secret_ref_id.clone()),
+                item: secret_ref,
+            }),
+    );
+    let resources = authorized
+        .items
+        .iter()
+        .map(secret_ref_resource_envelope)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "schema": "gateway.admin.secret_ref_list.v1",
+        "resources": resources,
+        "filtered_count": authorized.filtered_count,
+        "next_cursor": null
+    })))
+}
+
+async fn create_secret_ref(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Json(request): Json<AdminCreateSecretRefRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    validate_idempotency_key(&request.idempotency_key)?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::POST,
+        "/admin/v1/secret-refs",
+        "*",
+        now,
+    )?;
+    let request_hash = stable_request_hash(&request)?;
+    let scope_key = idempotency_scope_key("secret_refs:create", &request.idempotency_key);
+    if let Some(response) =
+        state
+            .store
+            .idempotency_response(&actor.tenant_id, &scope_key, &request_hash, now)?
+    {
+        return Ok(Json(response_with_replay_flag(response, true)));
+    }
+    let secret_ref = state.store.create_secret_ref(
+        CreateSecretRefRequest {
+            tenant_id: actor.tenant_id.clone(),
+            organization_id: request.organization_id,
+            project_id: request.project_id,
+            purpose: request.purpose,
+            backend_kind: request.backend_kind,
+            secret_value: SecretString::from(request.secret_value),
+            created_by: actor_principal_or_actor_id(&actor),
+        },
+        now,
+    )?;
+    let audit_event_id = record_admin_resource_audit(
+        &state,
+        &actor,
+        AdminResourceAuditInput {
+            event_type: "gateway.secret_ref.create",
+            scope_kind: "tenant",
+            scope_id: actor.tenant_id.clone(),
+            resource_kind: "SecretRef",
+            resource_id: secret_ref.secret_ref_id.clone(),
+            before_version: None,
+            after_version: Some(secret_ref.resource_version),
+            redacted_diff: json!({
+                "organization_id": &secret_ref.organization_id,
+                "project_id": &secret_ref.project_id,
+                "purpose": &secret_ref.purpose,
+                "backend_kind": &secret_ref.backend_kind,
+                "display_mask": &secret_ref.display_mask,
+                "fingerprint": &secret_ref.fingerprint
+            }),
+            occurred_at: now,
+        },
+    );
+    let response = json!({
+        "schema": "gateway.admin.secret_ref_mutation.v1",
+        "resource": secret_ref_resource_body(&secret_ref),
+        "audit_event_id": audit_event_id,
+        "idempotency_replayed": false
+    });
+    state.store.record_idempotency_response(IdempotencyRecord {
+        tenant_id: actor.tenant_id,
+        scope_key,
+        request_hash,
+        response_record: response.clone(),
+        expires_at: now + chrono::Duration::hours(IDEMPOTENCY_TTL_HOURS),
+        created_at: now,
+    });
+    Ok(Json(response))
+}
+
+async fn get_secret_ref(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(secret_ref_id): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_SECRET_REF_GET_PATH,
+        &secret_ref_id,
+        now,
+    )?;
+    let secret_ref = secret_ref_for_actor(&state, &actor, &secret_ref_id)?;
+    Ok(Json(json!({
+        "schema": "gateway.admin.secret_ref.v1",
+        "resource": secret_ref_resource_body(&secret_ref)
+    })))
+}
+
+async fn get_secret_ref_locator(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(secret_ref_id): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_SECRET_REF_LOCATOR_PATH,
+        &secret_ref_id,
+        now,
+    )?;
+    let secret_ref = secret_ref_for_actor(&state, &actor, &secret_ref_id)?;
+    Ok(Json(json!({
+        "schema": "gateway.admin.secret_ref_locator.v1",
+        "resource": secret_ref_locator_resource_body(&secret_ref)
     })))
 }
 
@@ -6679,6 +7454,203 @@ async fn update_login_provider(
     })))
 }
 
+async fn list_organization_invitations(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(organization_id): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_ORGANIZATION_INVITATION_LIST_PATH,
+        &organization_id,
+        now,
+    )?;
+    let organization = organization_for_actor(&state, &actor, &organization_id)?;
+    let resources = state
+        .store
+        .organization_invitations(&actor.tenant_id, &organization.organization_id)
+        .iter()
+        .map(organization_invitation_resource_envelope)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "schema": "gateway.admin.organization_invitation_list.v1",
+        "resources": resources,
+        "next_cursor": null
+    })))
+}
+
+async fn create_organization_invitation(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(organization_id): Path<String>,
+    Json(request): Json<AdminCreateOrganizationInvitationRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    validate_idempotency_key(&request.idempotency_key)?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::POST,
+        ADMIN_ORGANIZATION_INVITATION_LIST_PATH,
+        &organization_id,
+        now,
+    )?;
+    let organization = active_organization_for_actor(&state, &actor, &organization_id)?;
+    let request_hash = stable_request_hash(&request)?;
+    let scope_key = idempotency_scope_key(
+        &format!("organization_invitations:create:{organization_id}"),
+        &request.idempotency_key,
+    );
+    if let Some(response) =
+        state
+            .store
+            .idempotency_response(&actor.tenant_id, &scope_key, &request_hash, now)?
+    {
+        return Ok(Json(response_with_replay_flag(response, true)));
+    }
+    reject_validation_errors(&organization_invitation_validation_errors(
+        &state,
+        &actor,
+        &organization,
+        &request,
+        now,
+    ))?;
+    let raw_token = generate_invitation_token();
+    let invitation = state.store.create_organization_invitation(
+        CreateOrganizationInvitationRequest {
+            tenant_id: actor.tenant_id.clone(),
+            organization_id: organization.organization_id.clone(),
+            project_id: request.project_id,
+            invited_email: request
+                .invited_email
+                .and_then(|email| normalized_email(&email)),
+            invited_principal_id: request
+                .invited_principal_id
+                .map(|principal_id| principal_id.trim().to_owned())
+                .filter(|principal_id| !principal_id.is_empty()),
+            invitation_token_hash: invitation_token_hash(&raw_token),
+            role_id: request
+                .role_id
+                .map(|role_id| role_id.trim().to_owned())
+                .filter(|role_id| !role_id.is_empty())
+                .unwrap_or_else(|| "organization_member".to_owned()),
+            expires_at: request
+                .expires_at
+                .unwrap_or_else(|| now + chrono::Duration::days(7)),
+            created_by: actor_principal_or_actor_id(&actor),
+        },
+        now,
+    )?;
+    let audit_event_id = record_admin_resource_audit(
+        &state,
+        &actor,
+        AdminResourceAuditInput {
+            event_type: "gateway.organization_invite.create",
+            scope_kind: "organization",
+            scope_id: organization.organization_id,
+            resource_kind: "OrganizationInvite",
+            resource_id: invitation.invitation_id.clone(),
+            before_version: None,
+            after_version: Some(invitation.resource_version),
+            redacted_diff: organization_invitation_create_diff(&invitation),
+            occurred_at: now,
+        },
+    );
+    let response = json!({
+        "schema": "gateway.admin.organization_invitation_mutation.v1",
+        "resource": organization_invitation_resource_body(&invitation),
+        "invitation_token": raw_token,
+        "audit_event_id": audit_event_id,
+        "idempotency_replayed": false
+    });
+    state.store.record_idempotency_response(IdempotencyRecord {
+        tenant_id: actor.tenant_id,
+        scope_key,
+        request_hash,
+        response_record: response_without_invitation_token(&response),
+        expires_at: now + chrono::Duration::hours(IDEMPOTENCY_TTL_HOURS),
+        created_at: now,
+    });
+    Ok(Json(response))
+}
+
+async fn get_organization_invitation(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path((organization_id, invitation_id)): Path<(String, String)>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_ORGANIZATION_INVITATION_GET_PATH,
+        &invitation_id,
+        now,
+    )?;
+    organization_for_actor(&state, &actor, &organization_id)?;
+    let invitation =
+        organization_invitation_for_actor(&state, &actor, &organization_id, &invitation_id)?;
+    Ok(Json(json!({
+        "schema": "gateway.admin.organization_invitation.v1",
+        "resource": organization_invitation_resource_body(&invitation)
+    })))
+}
+
+async fn revoke_organization_invitation(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path((organization_id, invitation_id)): Path<(String, String)>,
+    Json(request): Json<AdminRevokeOrganizationInvitationRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::POST,
+        ADMIN_ORGANIZATION_INVITATION_REVOKE_PATH,
+        &invitation_id,
+        now,
+    )?;
+    organization_for_actor(&state, &actor, &organization_id)?;
+    let before =
+        organization_invitation_for_actor(&state, &actor, &organization_id, &invitation_id)?;
+    let revoked = state.store.revoke_organization_invitation(
+        &invitation_id,
+        request.expected_version,
+        now,
+    )?;
+    let audit_event_id = record_admin_resource_audit(
+        &state,
+        &actor,
+        AdminResourceAuditInput {
+            event_type: "gateway.organization_invite.revoke",
+            scope_kind: "organization",
+            scope_id: organization_id,
+            resource_kind: "OrganizationInvite",
+            resource_id: revoked.invitation_id.clone(),
+            before_version: Some(before.resource_version),
+            after_version: Some(revoked.resource_version),
+            redacted_diff: json!({
+                "status": {
+                    "before": before.status.as_str(),
+                    "after": revoked.status.as_str()
+                },
+                "reason": request.reason
+            }),
+            occurred_at: now,
+        },
+    );
+    Ok(Json(json!({
+        "schema": "gateway.admin.organization_invitation_mutation.v1",
+        "resource": organization_invitation_resource_body(&revoked),
+        "audit_event_id": audit_event_id
+    })))
+}
+
 async fn list_auth_login_providers(
     State(state): State<AppState>,
     Query(query): Query<AuthProviderListQuery>,
@@ -6751,6 +7723,98 @@ async fn start_auth_login_provider(
     })))
 }
 
+async fn preview_auth_invitation(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    let invitation = invitation_by_raw_token(&state, &token)?;
+    let organization = state
+        .store
+        .organization(&invitation.organization_id)
+        .filter(|organization| organization.tenant_id == invitation.tenant_id)
+        .ok_or_else(|| GatewayError::NotFound {
+            resource: "organization invitation".to_owned(),
+        })?;
+    let project = invitation
+        .project_id
+        .as_deref()
+        .and_then(|project_id| state.store.project(project_id))
+        .filter(|project| project.tenant_id == invitation.tenant_id);
+    Ok(Json(json!({
+        "schema": "gateway.auth.invitation_preview.v1",
+        "resource": organization_invitation_preview_body(
+            &organization,
+            project.as_ref(),
+            &invitation,
+            now
+        )
+    })))
+}
+
+async fn accept_auth_invitation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(token): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    let session = verify_auth_session_from_headers(&state, &headers, now)?;
+    let invitation = invitation_by_raw_token(&state, &token)?;
+    verify_session_matches_invitation(&state, &session, &invitation)?;
+    let accepted = state.store.accept_organization_invitation(
+        &invitation.invitation_id,
+        &session.principal_id,
+        now,
+    )?;
+    let updated_session = state.store.update_session_active_context_by_hash(
+        &session.session_hash,
+        Some(accepted.organization_id.clone()),
+        accepted.project_id.clone(),
+        now,
+    )?;
+    let actor = AuthenticatedActor::for_user_session(
+        ActorScope::new(
+            accepted.tenant_id.clone(),
+            Some(accepted.organization_id.clone()),
+            accepted.project_id.clone(),
+        ),
+        session.principal_id.clone(),
+        session.auth_session_id.clone(),
+        request_id_from_headers(&headers),
+        Some(session.expires_at),
+    );
+    let audit_event_id = record_admin_resource_audit(
+        &state,
+        &actor,
+        AdminResourceAuditInput {
+            event_type: "gateway.organization_invite.accept",
+            scope_kind: "organization",
+            scope_id: accepted.organization_id.clone(),
+            resource_kind: "OrganizationInvite",
+            resource_id: accepted.invitation_id.clone(),
+            before_version: Some(invitation.resource_version),
+            after_version: Some(accepted.resource_version),
+            redacted_diff: json!({
+                "accepted_principal_id": &session.principal_id,
+                "organization_id": &accepted.organization_id,
+                "project_id": &accepted.project_id,
+                "role_id": &accepted.role_id,
+                "status": {
+                    "before": invitation.status.as_str(),
+                    "after": accepted.status.as_str()
+                }
+            }),
+            occurred_at: now,
+        },
+    );
+    Ok(Json(json!({
+        "schema": "gateway.auth.invitation_accept.v1",
+        "resource": organization_invitation_resource_body(&accepted),
+        "session": auth_session_response_body(&state, &updated_session),
+        "audit_event_id": audit_event_id
+    })))
+}
+
 async fn single_user_login(
     State(state): State<AppState>,
     Json(request): Json<SingleUserLoginRequest>,
@@ -6769,6 +7833,8 @@ async fn single_user_login(
         CreateAuthSessionRequest {
             tenant_id: config.tenant_id.clone(),
             principal_id: config.user_id.clone(),
+            active_organization_id: Some(config.organization_id.clone()),
+            active_project_id: Some(config.project_id.clone()),
             expires_at: now + chrono::Duration::seconds(config.session_ttl_seconds),
         },
         now,
@@ -6801,6 +7867,355 @@ async fn single_user_login(
             "display_name": &config.project_display_name
         }
     })))
+}
+
+async fn get_current_auth_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    let session = verify_auth_session_from_headers(&state, &headers, now)?;
+    Ok(Json(auth_session_response_body(&state, &session)))
+}
+
+async fn update_session_default_organization(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<SessionDefaultOrganizationRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    let session = verify_auth_session_from_headers(&state, &headers, now)?;
+    let organization_id = normalized_auth_context_id(&request.organization_id, "organization_id")?;
+    let organization = active_organization_for_session(&state, &session, &organization_id)?;
+    let project = select_session_project_for_organization(
+        &state,
+        &session,
+        &organization_id,
+        request.project_id.as_deref(),
+    )?;
+    let active_project_id = project
+        .as_ref()
+        .map(|membership| membership.project_id.clone());
+    state.store.update_user_default_context(
+        &session.principal_id,
+        Some(organization.organization_id.clone()),
+        active_project_id.clone(),
+        now,
+    )?;
+    let updated = state.store.update_session_active_context_by_hash(
+        &session.session_hash,
+        Some(organization.organization_id),
+        active_project_id,
+        now,
+    )?;
+    Ok(Json(auth_session_response_body(&state, &updated)))
+}
+
+async fn update_session_active_organization(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<SessionActiveOrganizationRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    let session = verify_auth_session_from_headers(&state, &headers, now)?;
+    let organization_id = normalized_auth_context_id(&request.organization_id, "organization_id")?;
+    let organization = active_organization_for_session(&state, &session, &organization_id)?;
+    let project = select_session_project_for_organization(
+        &state,
+        &session,
+        &organization_id,
+        request.project_id.as_deref(),
+    )?;
+    let updated = state.store.update_session_active_context_by_hash(
+        &session.session_hash,
+        Some(organization.organization_id),
+        project.map(|membership| membership.project_id),
+        now,
+    )?;
+    Ok(Json(auth_session_response_body(&state, &updated)))
+}
+
+async fn update_session_active_project(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<SessionActiveProjectRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    let session = verify_auth_session_from_headers(&state, &headers, now)?;
+    let project_id = normalized_auth_context_id(&request.project_id, "project_id")?;
+    let project = active_project_for_session(&state, &session, &project_id, None)?;
+    let updated = state.store.update_session_active_context_by_hash(
+        &session.session_hash,
+        Some(project.organization_id),
+        Some(project.project_id),
+        now,
+    )?;
+    Ok(Json(auth_session_response_body(&state, &updated)))
+}
+
+async fn logout_current_auth_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    let session = verify_auth_session_from_headers(&state, &headers, now)?;
+    let revoked = state
+        .store
+        .revoke_session_by_hash(&session.session_hash, now)?;
+    Ok(Json(json!({
+        "schema": "gateway.auth.logout.v1",
+        "session": safe_auth_session_body(&revoked)
+    })))
+}
+
+fn verify_auth_session_from_headers(
+    state: &AppState,
+    headers: &HeaderMap,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<AuthSessionRecord> {
+    let presented_token = bearer_token(headers)?;
+    if !presented_token.starts_with(SESSION_TOKEN_PREFIX) {
+        return Err(GatewayError::Authentication);
+    }
+    let session = verify_session_token(state.store(), presented_token, now)?;
+    let user = state
+        .store
+        .user(&session.principal_id)
+        .ok_or(GatewayError::Authentication)?;
+    if user.status != DirectoryStatus::Active {
+        return Err(GatewayError::Authentication);
+    }
+    Ok(session)
+}
+
+fn normalized_auth_context_id(value: &str, field_name: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(GatewayError::BadRequest {
+            message: format!("{field_name}_required"),
+        });
+    }
+    Ok(trimmed.to_owned())
+}
+
+fn active_organization_for_session(
+    state: &AppState,
+    session: &AuthSessionRecord,
+    organization_id: &str,
+) -> Result<OrganizationRecord> {
+    let organization = state
+        .store
+        .organization(organization_id)
+        .filter(|organization| organization.tenant_id == session.tenant_id)
+        .ok_or_else(|| GatewayError::NotFound {
+            resource: format!("organization {organization_id}"),
+        })?;
+    if !organization.status.accepts_access() {
+        return Err(GatewayError::Authorization {
+            reason: "organization_inactive",
+        });
+    }
+    let has_membership = state
+        .store
+        .organization_memberships_for_principal(&session.principal_id)
+        .into_iter()
+        .any(|membership| {
+            membership.tenant_id == session.tenant_id
+                && membership.organization_id == organization_id
+                && membership.status.accepts_access()
+        });
+    if !has_membership {
+        return Err(GatewayError::Authorization {
+            reason: "organization_membership_required",
+        });
+    }
+    Ok(organization)
+}
+
+fn active_project_for_session(
+    state: &AppState,
+    session: &AuthSessionRecord,
+    project_id: &str,
+    required_organization_id: Option<&str>,
+) -> Result<ProjectRecord> {
+    let project = state
+        .store
+        .project(project_id)
+        .filter(|project| project.tenant_id == session.tenant_id)
+        .ok_or_else(|| GatewayError::NotFound {
+            resource: format!("project {project_id}"),
+        })?;
+    if required_organization_id
+        .is_some_and(|organization_id| organization_id != project.organization_id.as_str())
+    {
+        return Err(GatewayError::Authorization {
+            reason: "project_organization_mismatch",
+        });
+    }
+    if !project.status.accepts_access() {
+        return Err(GatewayError::Authorization {
+            reason: "project_inactive",
+        });
+    }
+    active_organization_for_session(state, session, &project.organization_id)?;
+    let membership = state
+        .store
+        .project_membership(&session.principal_id, project_id)
+        .ok_or(GatewayError::Authorization {
+            reason: "project_membership_required",
+        })?;
+    if !membership.status.accepts_access() {
+        return Err(GatewayError::Authorization {
+            reason: "project_membership_inactive",
+        });
+    }
+    Ok(project)
+}
+
+fn select_session_project_for_organization(
+    state: &AppState,
+    session: &AuthSessionRecord,
+    organization_id: &str,
+    requested_project_id: Option<&str>,
+) -> Result<Option<ProjectMembershipRecord>> {
+    if let Some(project_id) = requested_project_id {
+        let project_id = normalized_auth_context_id(project_id, "project_id")?;
+        let project =
+            active_project_for_session(state, session, &project_id, Some(organization_id))?;
+        return Ok(state
+            .store
+            .project_membership(&session.principal_id, &project.project_id));
+    }
+
+    let user = state.store.user(&session.principal_id);
+    let mut candidate_ids = Vec::new();
+    if let Some(project_id) = user
+        .as_ref()
+        .and_then(|user| user.default_project_id.as_deref())
+    {
+        candidate_ids.push(project_id.to_owned());
+    }
+    if let Some(project_id) = session.active_project_id.as_deref() {
+        if !candidate_ids
+            .iter()
+            .any(|candidate| candidate == project_id)
+        {
+            candidate_ids.push(project_id.to_owned());
+        }
+    }
+    for membership in state
+        .store
+        .project_memberships_for_principal(&session.principal_id)
+        .into_iter()
+        .filter(|membership| {
+            membership.tenant_id == session.tenant_id
+                && membership.organization_id == organization_id
+                && membership.status.accepts_access()
+        })
+    {
+        if !candidate_ids
+            .iter()
+            .any(|candidate| candidate == &membership.project_id)
+        {
+            candidate_ids.push(membership.project_id);
+        }
+    }
+
+    for project_id in candidate_ids {
+        if active_project_for_session(state, session, &project_id, Some(organization_id)).is_ok() {
+            return Ok(state
+                .store
+                .project_membership(&session.principal_id, &project_id));
+        }
+    }
+    Ok(None)
+}
+
+fn invitation_by_raw_token(
+    state: &AppState,
+    raw_token: &str,
+) -> Result<OrganizationInvitationRecord> {
+    if raw_token.trim().is_empty() || !raw_token.starts_with("gwinv_") {
+        return Err(GatewayError::NotFound {
+            resource: "organization invitation".to_owned(),
+        });
+    }
+    state
+        .store
+        .organization_invitation_by_token_hash(&invitation_token_hash(raw_token))
+        .ok_or_else(|| GatewayError::NotFound {
+            resource: "organization invitation".to_owned(),
+        })
+}
+
+fn verify_session_matches_invitation(
+    state: &AppState,
+    session: &AuthSessionRecord,
+    invitation: &OrganizationInvitationRecord,
+) -> Result<()> {
+    if session.tenant_id != invitation.tenant_id {
+        return Err(GatewayError::Authorization {
+            reason: "invitation_tenant_mismatch",
+        });
+    }
+    if invitation
+        .invited_principal_id
+        .as_deref()
+        .is_some_and(|principal_id| principal_id == session.principal_id)
+    {
+        return Ok(());
+    }
+    let Some(invited_email) = invitation.invited_email.as_deref() else {
+        return Err(GatewayError::Authorization {
+            reason: "invitation_principal_mismatch",
+        });
+    };
+    let user = state
+        .store
+        .user(&session.principal_id)
+        .ok_or(GatewayError::Authentication)?;
+    if user
+        .primary_email
+        .as_deref()
+        .and_then(normalized_email)
+        .as_deref()
+        == Some(invited_email)
+    {
+        Ok(())
+    } else {
+        Err(GatewayError::Authorization {
+            reason: "invitation_email_mismatch",
+        })
+    }
+}
+
+fn auth_session_response_body(state: &AppState, session: &AuthSessionRecord) -> Value {
+    let user = state.store.user(&session.principal_id);
+    let organization_memberships = state
+        .store
+        .organization_memberships_for_principal(&session.principal_id)
+        .into_iter()
+        .filter(|membership| membership.tenant_id == session.tenant_id)
+        .collect::<Vec<_>>();
+    let project_memberships = state
+        .store
+        .project_memberships_for_principal(&session.principal_id)
+        .into_iter()
+        .filter(|membership| membership.tenant_id == session.tenant_id)
+        .collect::<Vec<_>>();
+    json!({
+        "schema": "gateway.auth.session.v1",
+        "session": safe_auth_session_body(session),
+        "user": user.as_ref().map(user_session_resource_body),
+        "organization_memberships": organization_memberships
+            .iter()
+            .map(organization_member_resource_body)
+            .collect::<Vec<_>>(),
+        "project_memberships": project_memberships
+            .iter()
+            .map(project_member_resource_body)
+            .collect::<Vec<_>>()
+    })
 }
 
 async fn list_route_policies(
@@ -8778,7 +10193,9 @@ fn deliver_notification_outbox_event(
             "notification_sink_disabled",
             json!({"transport": "disabled"}),
         ),
-        Some(sink) if sink.sink_kind == "webhook" => webhook_delivery_plan(sink, &event, now)?,
+        Some(sink) if sink.sink_kind == "webhook" => {
+            webhook_delivery_plan(state, sink, &event, now)?
+        }
         Some(sink) => NotificationDeliveryPlan::failure(
             "retryable_failed",
             None,
@@ -8866,6 +10283,7 @@ impl NotificationDeliveryPlan {
 }
 
 fn webhook_delivery_plan(
+    state: &AppState,
     sink: &NotificationSinkRecord,
     event: &crate::domain::NotificationOutboxEventRecord,
     now: chrono::DateTime<chrono::Utc>,
@@ -8886,13 +10304,20 @@ fn webhook_delivery_plan(
             .ok_or_else(|| GatewayError::BadRequest {
                 message: "notification_sink_signing_secret_ref_required".to_owned(),
             })?;
+    let signing_secret = state
+        .store
+        .secret_value(&signing_secret_ref_id)
+        .ok_or_else(|| GatewayError::BadRequest {
+            message: "notification_sink_signing_secret_missing".to_owned(),
+        })?;
     let body =
         serde_json::to_vec(&event.payload_document).map_err(|error| GatewayError::Internal {
             message: format!("failed to encode notification payload: {error}"),
         })?;
     let body_sha256 = sha256_hex(&body);
     let timestamp = now.to_rfc3339();
-    let signature = notification_signature(&signing_secret_ref_id, &timestamp, &body)?;
+    let signature =
+        notification_signature(signing_secret.expose_secret().as_bytes(), &timestamp, &body)?;
     let signature_sha256 = sha256_hex(signature.as_bytes());
     let host_lower = host.to_ascii_lowercase();
     let (status, response_status, error_message, next_attempt_at) = if host_lower.contains("gone")
@@ -8953,16 +10378,10 @@ fn webhook_delivery_plan(
     })
 }
 
-fn notification_signature(
-    signing_secret_ref_id: &str,
-    timestamp: &str,
-    body: &[u8],
-) -> Result<String> {
+fn notification_signature(signing_secret: &[u8], timestamp: &str, body: &[u8]) -> Result<String> {
     let mut mac =
-        HmacSha256::new_from_slice(signing_secret_ref_id.as_bytes()).map_err(|error| {
-            GatewayError::Internal {
-                message: format!("failed to initialize notification signer: {error}"),
-            }
+        HmacSha256::new_from_slice(signing_secret).map_err(|error| GatewayError::Internal {
+            message: format!("failed to initialize notification signer: {error}"),
         })?;
     mac.update(timestamp.as_bytes());
     mac.update(b".");
@@ -9080,7 +10499,9 @@ fn authenticate_request(
     let presented_key = bearer_token(headers)?;
     if presented_key.starts_with(SESSION_TOKEN_PREFIX) {
         let session = verify_session_token(state.store(), presented_key, now)?;
-        let project_id = required_header(headers, PROJECT_ID_HEADER)?;
+        let project_id = optional_header(headers, PROJECT_ID_HEADER)?
+            .or_else(|| session.active_project_id.clone())
+            .ok_or(GatewayError::Authentication)?;
         return resolve_user_session_actor(
             state.store(),
             ResolveUserSessionRequest {
@@ -9168,7 +10589,10 @@ fn admin_route_mutates(method: &Method) -> bool {
 fn route_allowed_during_config_freeze(route: &RouteMetadata) -> bool {
     matches!(
         route.action,
-        GatewayAction::EmergencyDisable | GatewayAction::ConfigRollback
+        GatewayAction::EmergencyDisable
+            | GatewayAction::ConfigRollback
+            | GatewayAction::ExternalIdentityUnlink
+            | GatewayAction::SessionRevoke
     ) || route.audit_event_type.ends_with(".validate")
 }
 
@@ -9289,6 +10713,14 @@ fn export_payload_checksum(bytes: &[u8]) -> String {
 fn response_with_replay_flag(mut response: Value, replayed: bool) -> Value {
     if let Some(object) = response.as_object_mut() {
         object.insert("idempotency_replayed".to_owned(), json!(replayed));
+    }
+    response
+}
+
+fn response_without_invitation_token(response: &Value) -> Value {
+    let mut response = response.clone();
+    if let Some(object) = response.as_object_mut() {
+        object.remove("invitation_token");
     }
     response
 }
@@ -9503,6 +10935,20 @@ fn organization_for_actor(
         })
 }
 
+fn active_organization_for_actor(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    organization_id: &str,
+) -> Result<OrganizationRecord> {
+    let organization = organization_for_actor(state, actor, organization_id)?;
+    if !organization.status.accepts_access() {
+        return Err(GatewayError::Authorization {
+            reason: "organization_inactive",
+        });
+    }
+    Ok(organization)
+}
+
 fn project_for_actor(
     state: &AppState,
     actor: &AuthenticatedActor,
@@ -9514,6 +10960,65 @@ fn project_for_actor(
         .filter(|project| project.tenant_id == actor.tenant_id)
         .ok_or_else(|| GatewayError::NotFound {
             resource: format!("project {project_id}"),
+        })
+}
+
+fn organization_invitation_for_actor(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    organization_id: &str,
+    invitation_id: &str,
+) -> Result<OrganizationInvitationRecord> {
+    state
+        .store
+        .organization_invitation(invitation_id)
+        .filter(|invitation| {
+            invitation.tenant_id == actor.tenant_id && invitation.organization_id == organization_id
+        })
+        .ok_or_else(|| GatewayError::NotFound {
+            resource: format!("organization invitation {invitation_id}"),
+        })
+}
+
+fn user_for_actor(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    user_id: &str,
+) -> Result<crate::domain::UserRecord> {
+    state
+        .store
+        .user(user_id)
+        .filter(|user| user.tenant_id == actor.tenant_id)
+        .ok_or_else(|| GatewayError::NotFound {
+            resource: format!("user {user_id}"),
+        })
+}
+
+fn auth_session_for_actor(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    user_id: &str,
+    auth_session_id: &str,
+) -> Result<AuthSessionRecord> {
+    state
+        .store
+        .session_for_principal(&actor.tenant_id, user_id, auth_session_id)
+        .ok_or_else(|| GatewayError::NotFound {
+            resource: format!("auth session {auth_session_id}"),
+        })
+}
+
+fn external_identity_for_actor(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    user_id: &str,
+    external_identity_id: &str,
+) -> Result<ExternalIdentityRecord> {
+    state
+        .store
+        .external_identity_for_principal(&actor.tenant_id, user_id, external_identity_id)
+        .ok_or_else(|| GatewayError::NotFound {
+            resource: format!("external identity {external_identity_id}"),
         })
 }
 
@@ -9532,6 +11037,37 @@ fn organization_member_for_actor(
         })
         .ok_or_else(|| GatewayError::NotFound {
             resource: format!("organization member {organization_member_id}"),
+        })
+}
+
+fn active_organization_member_for_project_assignment(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    organization_id: &str,
+    principal_id: &str,
+    organization_member_id: Option<&str>,
+) -> Result<OrganizationMembershipRecord> {
+    if let Some(organization_member_id) = organization_member_id {
+        let member =
+            organization_member_for_actor(state, actor, organization_id, organization_member_id)?;
+        if member.principal_id == principal_id && member.status.accepts_access() {
+            return Ok(member);
+        }
+        return Err(GatewayError::Authorization {
+            reason: "active_organization_membership_required",
+        });
+    }
+    state
+        .store
+        .organization_memberships_for_principal(principal_id)
+        .into_iter()
+        .find(|member| {
+            member.tenant_id == actor.tenant_id
+                && member.organization_id == organization_id
+                && member.status.accepts_access()
+        })
+        .ok_or(GatewayError::Authorization {
+            reason: "active_organization_membership_required",
         })
 }
 
@@ -9620,6 +11156,20 @@ fn upstream_credential_for_actor(
         .filter(|credential| credential.tenant_id == actor.tenant_id)
         .ok_or_else(|| GatewayError::NotFound {
             resource: format!("upstream credential {upstream_credential_id}"),
+        })
+}
+
+fn secret_ref_for_actor(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    secret_ref_id: &str,
+) -> Result<SecretRefRecord> {
+    state
+        .store
+        .secret_ref(secret_ref_id)
+        .filter(|secret_ref| secret_ref.tenant_id == actor.tenant_id)
+        .ok_or_else(|| GatewayError::NotFound {
+            resource: format!("secret ref {secret_ref_id}"),
         })
 }
 
@@ -9913,7 +11463,17 @@ fn upstream_credential_validation_errors(
     if request.credential_kind.trim().is_empty() {
         errors.push(validation_error("credential_kind", "required"));
     }
-    if !request.secret_ref_id.starts_with("sec_") {
+    if valid_secret_ref_id(&request.secret_ref_id) {
+        validate_secret_ref_scope_fields(
+            state,
+            actor,
+            "secret_ref_id",
+            &request.secret_ref_id,
+            request.organization_id.as_deref(),
+            None,
+            &mut errors,
+        );
+    } else {
         errors.push(validation_error("secret_ref_id", "invalid_secret_ref"));
     }
     let endpoint = state.store.provider_endpoint(&request.provider_endpoint_id);
@@ -9940,6 +11500,45 @@ fn upstream_credential_validation_errors(
         }
     }
     errors
+}
+
+fn validate_secret_ref_scope_fields(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    field: &str,
+    secret_ref_id: &str,
+    organization_id: Option<&str>,
+    project_id: Option<&str>,
+    errors: &mut Vec<Value>,
+) {
+    let Some(secret_ref) = state.store.secret_ref(secret_ref_id) else {
+        errors.push(validation_error(field, "unknown_secret_ref"));
+        return;
+    };
+    if secret_ref.tenant_id != actor.tenant_id {
+        errors.push(validation_error(field, "unknown_secret_ref"));
+        return;
+    }
+    if !matches!(
+        secret_ref.status,
+        SecretRefStatus::Active | SecretRefStatus::Rotating
+    ) {
+        errors.push(validation_error(field, "inactive_secret_ref"));
+    }
+    if secret_ref
+        .organization_id
+        .as_deref()
+        .is_some_and(|secret_org| organization_id != Some(secret_org))
+    {
+        errors.push(validation_error(field, "secret_ref_scope_mismatch"));
+    }
+    if secret_ref
+        .project_id
+        .as_deref()
+        .is_some_and(|secret_project| project_id != Some(secret_project))
+    {
+        errors.push(validation_error(field, "secret_ref_scope_mismatch"));
+    }
 }
 
 fn model_target_validation_errors(
@@ -10542,6 +12141,7 @@ fn otel_export_config_validation_errors(
     let mut errors = Vec::new();
     validate_otel_export_scope_fields(state, actor, request, &mut errors);
     validate_otel_export_shape_fields(request, &mut errors);
+    validate_otel_header_secret_ref_scope_fields(state, actor, request, &mut errors);
     let duplicate = state
         .store
         .otel_export_configs_for_tenant(&actor.tenant_id)
@@ -10640,6 +12240,28 @@ fn validate_otel_header_ref_fields(header_refs: &[OtelHeaderRef], errors: &mut V
                 "header_refs.secret_ref_id",
                 "invalid_secret_ref",
             ));
+        }
+    }
+}
+
+fn validate_otel_header_secret_ref_scope_fields(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    request: &AdminCreateOtelExportConfigRequest,
+    errors: &mut Vec<Value>,
+) {
+    let organization_id = inferred_otel_organization_id(state, actor, request);
+    for header in &request.header_refs {
+        if valid_secret_ref_id(&header.secret_ref_id) {
+            validate_secret_ref_scope_fields(
+                state,
+                actor,
+                "header_refs.secret_ref_id",
+                &header.secret_ref_id,
+                organization_id.as_deref(),
+                request.project_id.as_deref(),
+                errors,
+            );
         }
     }
 }
@@ -10883,6 +12505,21 @@ fn notification_sink_validation_errors_with_excluded_id(
         request.organization_id.as_deref(),
         request.project_id.as_deref(),
     );
+    if request.sink_kind == "webhook" {
+        if let Some(signing_secret_ref_id) = request.signing_secret_ref_id.as_deref() {
+            if valid_secret_ref_id(signing_secret_ref_id) {
+                validate_secret_ref_scope_fields(
+                    state,
+                    actor,
+                    "signing_secret_ref_id",
+                    signing_secret_ref_id,
+                    inferred_organization_id.as_deref(),
+                    request.project_id.as_deref(),
+                    &mut errors,
+                );
+            }
+        }
+    }
     if state
         .store
         .notification_sinks_for_tenant(&actor.tenant_id)
@@ -11120,6 +12757,67 @@ fn login_provider_validation_errors(
     errors
 }
 
+fn organization_invitation_validation_errors(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    organization: &OrganizationRecord,
+    request: &AdminCreateOrganizationInvitationRequest,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<Value> {
+    let mut errors = Vec::new();
+    if request
+        .invited_email
+        .as_deref()
+        .and_then(normalized_email)
+        .is_none()
+        && request
+            .invited_principal_id
+            .as_deref()
+            .is_none_or(|principal_id| principal_id.trim().is_empty())
+    {
+        errors.push(validation_error("invited_target", "required"));
+    }
+    if request.invited_email.is_some() && request.invited_principal_id.is_some() {
+        errors.push(validation_error("invited_target", "ambiguous"));
+    }
+    if request
+        .role_id
+        .as_deref()
+        .is_some_and(|role_id| role_id.trim().is_empty() || role_id.len() > 80)
+    {
+        errors.push(validation_error("role_id", "invalid_role_id"));
+    }
+    if request.expires_at.is_some_and(|expires_at| {
+        expires_at <= now || expires_at > now + chrono::Duration::days(30)
+    }) {
+        errors.push(validation_error("expires_at", "invalid_expiry"));
+    }
+    if let Some(project_id) = request.project_id.as_deref() {
+        match state.store.project(project_id) {
+            Some(project)
+                if project.tenant_id == actor.tenant_id
+                    && project.organization_id == organization.organization_id
+                    && project.status.accepts_access() => {}
+            Some(_) | None => errors.push(validation_error("project_id", "invalid_project")),
+        }
+    }
+    errors
+}
+
+fn normalized_email(value: &str) -> Option<String> {
+    let email = value.trim().to_ascii_lowercase();
+    if email.len() <= 320
+        && email.contains('@')
+        && !email.contains(char::is_whitespace)
+        && !email.starts_with('@')
+        && !email.ends_with('@')
+    {
+        Some(email)
+    } else {
+        None
+    }
+}
+
 fn validate_notification_sink_status(status: &ResourceStatus) -> Result<()> {
     if matches!(
         status,
@@ -11158,6 +12856,19 @@ fn validate_login_provider_status(status: &ResourceStatus) -> Result<()> {
     } else {
         Err(GatewayError::BadRequest {
             message: "login_provider_status_invalid".to_owned(),
+        })
+    }
+}
+
+fn validate_user_status(status: &DirectoryStatus) -> Result<()> {
+    if matches!(
+        status,
+        DirectoryStatus::Active | DirectoryStatus::Disabled | DirectoryStatus::Deleted
+    ) {
+        Ok(())
+    } else {
+        Err(GatewayError::BadRequest {
+            message: "user_status_invalid".to_owned(),
         })
     }
 }
@@ -11971,6 +13682,85 @@ fn project_member_resource_body(member: &ProjectMembershipRecord) -> Value {
     })
 }
 
+fn safe_auth_session_body(session: &AuthSessionRecord) -> Value {
+    json!({
+        "kind": "auth_session",
+        "id": &session.auth_session_id,
+        "tenant_id": &session.tenant_id,
+        "principal_id": &session.principal_id,
+        "active_organization_id": &session.active_organization_id,
+        "active_project_id": &session.active_project_id,
+        "status": &session.status,
+        "expires_at": session.expires_at,
+        "created_at": session.created_at,
+        "updated_at": session.updated_at
+    })
+}
+
+fn auth_session_resource_envelope(session: &AuthSessionRecord) -> Value {
+    json!({
+        "schema": "gateway.admin.resource.v1",
+        "resource": safe_auth_session_body(session)
+    })
+}
+
+fn external_identity_resource_envelope(identity: &ExternalIdentityRecord) -> Value {
+    json!({
+        "schema": "gateway.admin.resource.v1",
+        "resource": external_identity_resource_body(identity)
+    })
+}
+
+fn external_identity_resource_body(identity: &ExternalIdentityRecord) -> Value {
+    json!({
+        "kind": "external_identity",
+        "id": &identity.external_identity_id,
+        "tenant_id": &identity.tenant_id,
+        "principal_id": &identity.principal_id,
+        "login_provider_id": &identity.login_provider_id,
+        "provider_kind": &identity.provider_kind,
+        "provider_subject": &identity.provider_subject,
+        "email_hash": identity.email.as_deref().and_then(external_identity_email_hash),
+        "email_verified": identity.email_verified,
+        "status": identity.status.as_str(),
+        "created_at": identity.created_at,
+        "updated_at": identity.updated_at
+    })
+}
+
+fn external_identity_email_hash(email: &str) -> Option<String> {
+    let normalized = normalized_email(email)?;
+    let digest = Sha256::digest(normalized.as_bytes());
+    Some(format!("sha256:{digest:x}"))
+}
+
+fn user_resource_envelope(user: &crate::domain::UserRecord) -> Value {
+    json!({
+        "schema": "gateway.admin.resource.v1",
+        "resource": user_resource_body(user)
+    })
+}
+
+fn user_resource_body(user: &crate::domain::UserRecord) -> Value {
+    json!({
+        "kind": "user",
+        "id": &user.user_id,
+        "tenant_id": &user.tenant_id,
+        "display_name": &user.display_name,
+        "primary_email": &user.primary_email,
+        "default_organization_id": &user.default_organization_id,
+        "default_project_id": &user.default_project_id,
+        "status": &user.status,
+        "version": user.resource_version,
+        "created_at": user.created_at,
+        "updated_at": user.updated_at
+    })
+}
+
+fn user_session_resource_body(user: &crate::domain::UserRecord) -> Value {
+    user_resource_body(user)
+}
+
 fn service_account_resource_envelope(account: &ServiceAccountRecord) -> Value {
     json!({
         "schema": "gateway.admin.resource.v1",
@@ -12040,6 +13830,47 @@ fn upstream_credential_resource_body(credential: &UpstreamCredentialRecord) -> V
         "created_by": &credential.created_by,
         "created_at": credential.created_at,
         "updated_at": credential.updated_at
+    })
+}
+
+fn secret_ref_resource_envelope(secret_ref: &SecretRefRecord) -> Value {
+    json!({
+        "schema": "gateway.admin.resource.v1",
+        "resource": secret_ref_resource_body(secret_ref)
+    })
+}
+
+fn secret_ref_resource_body(secret_ref: &SecretRefRecord) -> Value {
+    json!({
+        "kind": "secret_ref",
+        "id": &secret_ref.secret_ref_id,
+        "tenant_id": &secret_ref.tenant_id,
+        "organization_id": &secret_ref.organization_id,
+        "project_id": &secret_ref.project_id,
+        "purpose": &secret_ref.purpose,
+        "backend_kind": &secret_ref.backend_kind,
+        "display_mask": &secret_ref.display_mask,
+        "fingerprint": &secret_ref.fingerprint,
+        "version": secret_ref.resource_version,
+        "status": &secret_ref.status,
+        "created_by": &secret_ref.created_by,
+        "created_at": secret_ref.created_at,
+        "updated_at": secret_ref.updated_at
+    })
+}
+
+fn secret_ref_locator_resource_body(secret_ref: &SecretRefRecord) -> Value {
+    json!({
+        "kind": "secret_ref_locator",
+        "id": &secret_ref.secret_ref_id,
+        "tenant_id": &secret_ref.tenant_id,
+        "backend_kind": &secret_ref.backend_kind,
+        "backend_locator": &secret_ref.backend_locator,
+        "display_mask": &secret_ref.display_mask,
+        "fingerprint": &secret_ref.fingerprint,
+        "version": secret_ref.resource_version,
+        "status": &secret_ref.status,
+        "updated_at": secret_ref.updated_at
     })
 }
 
@@ -12328,6 +14159,83 @@ fn mask_secret_ref_id(secret_ref_id: &str) -> String {
     } else {
         "***".to_owned()
     }
+}
+
+fn organization_invitation_resource_envelope(invitation: &OrganizationInvitationRecord) -> Value {
+    json!({
+        "schema": "gateway.admin.resource.v1",
+        "resource": organization_invitation_resource_body(invitation)
+    })
+}
+
+fn organization_invitation_resource_body(invitation: &OrganizationInvitationRecord) -> Value {
+    json!({
+        "kind": "organization_invitation",
+        "id": &invitation.invitation_id,
+        "tenant_id": &invitation.tenant_id,
+        "organization_id": &invitation.organization_id,
+        "project_id": &invitation.project_id,
+        "invited_email": &invitation.invited_email,
+        "invited_principal_id": &invitation.invited_principal_id,
+        "role_id": &invitation.role_id,
+        "status": &invitation.status,
+        "expires_at": invitation.expires_at,
+        "accepted_at": invitation.accepted_at,
+        "created_by": &invitation.created_by,
+        "version": invitation.resource_version,
+        "created_at": invitation.created_at,
+        "updated_at": invitation.updated_at
+    })
+}
+
+fn organization_invitation_preview_body(
+    organization: &OrganizationRecord,
+    project: Option<&ProjectRecord>,
+    invitation: &OrganizationInvitationRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Value {
+    json!({
+        "kind": "organization_invitation_preview",
+        "id": &invitation.invitation_id,
+        "tenant_id": &invitation.tenant_id,
+        "organization": {
+            "id": &organization.organization_id,
+            "display_name": &organization.display_name
+        },
+        "project": project.map(|project| json!({
+            "id": &project.project_id,
+            "display_name": &project.display_name
+        })),
+        "invited_email": &invitation.invited_email,
+        "role_id": &invitation.role_id,
+        "status": invitation_effective_status(invitation, now),
+        "expires_at": invitation.expires_at
+    })
+}
+
+fn invitation_effective_status(
+    invitation: &OrganizationInvitationRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> &'static str {
+    if invitation.status.accepts_at(invitation.expires_at, now) {
+        "pending"
+    } else if invitation.status == crate::domain::InvitationStatus::Pending {
+        "expired"
+    } else {
+        invitation.status.as_str()
+    }
+}
+
+fn organization_invitation_create_diff(invitation: &OrganizationInvitationRecord) -> Value {
+    json!({
+        "organization_id": &invitation.organization_id,
+        "project_id": &invitation.project_id,
+        "invited_email": &invitation.invited_email,
+        "invited_principal_id": &invitation.invited_principal_id,
+        "role_id": &invitation.role_id,
+        "status": invitation.status.as_str(),
+        "expires_at": invitation.expires_at
+    })
 }
 
 fn notification_sink_resource_envelope(sink: &NotificationSinkRecord) -> Value {
@@ -12629,6 +14537,15 @@ fn random_login_token(prefix: &str) -> String {
     let mut bytes = [0_u8; 32];
     OsRng.fill_bytes(&mut bytes);
     format!("{prefix}_{}", base64_url_no_pad(&bytes))
+}
+
+fn generate_invitation_token() -> String {
+    random_login_token("gwinv")
+}
+
+fn invitation_token_hash(raw_token: &str) -> String {
+    let digest = Sha256::digest(raw_token.as_bytes());
+    format!("sha256:{digest:x}")
 }
 
 fn random_pkce_code_verifier() -> String {
@@ -14058,6 +15975,10 @@ const fn default_true() -> bool {
     true
 }
 
+fn default_secret_ref_backend_kind() -> String {
+    "memory".to_owned()
+}
+
 const fn default_otel_export_interval_seconds() -> i64 {
     60
 }
@@ -14093,15 +16014,19 @@ fn bearer_token(headers: &HeaderMap) -> Result<&str> {
     Ok(token)
 }
 
-fn required_header(headers: &HeaderMap, name: &'static str) -> Result<String> {
+fn optional_header(headers: &HeaderMap, name: &'static str) -> Result<Option<String>> {
     headers
         .get(name)
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.trim().is_empty())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| GatewayError::BadRequest {
-            message: format!("missing required header {name}"),
+        .map(|value| {
+            value
+                .to_str()
+                .map(|value| value.trim().to_owned())
+                .map_err(|_| GatewayError::BadRequest {
+                    message: format!("invalid header {name}"),
+                })
         })
+        .transpose()
+        .map(|value| value.filter(|value| !value.is_empty()))
 }
 
 fn request_body_from_bytes(bytes: &[u8]) -> Result<Value> {
@@ -14304,13 +16229,14 @@ mod tests {
         runtime_budget_reservation_key, runtime_quota_counter_key, runtime_route_target,
         validate_gateway_config, AppState, DependencyProbeMode, GatewayConfig,
         SingleUserAuthConfig, PROJECT_ID_HEADER, REQUEST_ID_HEADER, SESSION_TOKEN_PREFIX,
-        SINGLE_USER_ID, SINGLE_USER_PROJECT_ID, SINGLE_USER_PROVIDER_ID, SINGLE_USER_TENANT_ID,
+        SINGLE_USER_ID, SINGLE_USER_ORGANIZATION_ID, SINGLE_USER_PROJECT_ID,
+        SINGLE_USER_PROVIDER_ID, SINGLE_USER_TENANT_ID,
     };
     use crate::action::{ActionGrant, BuiltInRole};
     use crate::auth::{create_auth_session, verify_api_key, CreateAuthSessionRequest};
     use crate::config::{publish_config_snapshot, PublishConfigSnapshotRequest};
     use crate::domain::{
-        new_prefixed_id, ActorKind, DirectoryStatus, MembershipStatus,
+        new_prefixed_id, ActorKind, DirectoryStatus, ExternalIdentityRecord, MembershipStatus,
         NotificationDeliveryAttemptRecord, ResourceStatus, UpstreamCredentialStatus,
         UsageEventRecord, ValidationDiagnosticRecord,
     };
@@ -14327,9 +16253,10 @@ mod tests {
     };
     use crate::storage::{
         CatalogAdminRepository, ConfigPublicationRepository, CreateNotificationOutboxEventRequest,
-        InMemoryGatewayStore, NotificationOutboxRepository, ProviderAdminRepository,
-        RuntimePolicyRepository, ServiceAccountAdminRepository, TenancyBootstrapRepository,
-        TenancyRepository, UsageAccountingRepository, ValidationDiagnosticRepository,
+        CreateSecretRefRequest, InMemoryGatewayStore, NotificationOutboxRepository,
+        ProviderAdminRepository, RuntimePolicyRepository, SecretRefAdminRepository,
+        ServiceAccountAdminRepository, TenancyBootstrapRepository, TenancyRepository,
+        UsageAccountingRepository, ValidationDiagnosticRepository,
     };
     use crate::ProtocolFamily;
 
@@ -14409,9 +16336,20 @@ mod tests {
         std::env::set_var("STARWEAVER_GATEWAY_SINGLE_USER_USERNAME", "admin");
         assert!(GatewayConfig::from_env().single_user_auth.is_none());
 
+        std::env::set_var("STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD", " ");
+        assert!(GatewayConfig::from_env().single_user_auth.is_none());
+
+        std::env::set_var("STARWEAVER_GATEWAY_SINGLE_USER_USERNAME", " ");
         std::env::set_var("STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD", "secret");
-        std::env::set_var("STARWEAVER_GATEWAY_SINGLE_USER_EMAIL", "admin@example.com");
-        std::env::set_var("STARWEAVER_GATEWAY_SINGLE_USER_DISPLAY_NAME", "Admin");
+        assert!(GatewayConfig::from_env().single_user_auth.is_none());
+
+        std::env::set_var("STARWEAVER_GATEWAY_SINGLE_USER_USERNAME", " admin ");
+        std::env::set_var("STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD", " secret ");
+        std::env::set_var(
+            "STARWEAVER_GATEWAY_SINGLE_USER_EMAIL",
+            " admin@example.com ",
+        );
+        std::env::set_var("STARWEAVER_GATEWAY_SINGLE_USER_DISPLAY_NAME", " Admin ");
         std::env::set_var("STARWEAVER_GATEWAY_SINGLE_USER_SESSION_TTL_SECONDS", "600");
 
         let config = GatewayConfig::from_env();
@@ -15889,6 +17827,7 @@ mod tests {
         )
         .await;
         assert_eq!(create_policy.status(), StatusCode::OK);
+        wait_for_quota_fixed_window_margin().await;
 
         let first = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
         let first_status = first.status();
@@ -16744,6 +18683,9 @@ mod tests {
         let member = store
             .organization_member("om_test")
             .unwrap_or_else(|| panic!("organization member should exist"));
+        let project_member = store
+            .project_member("pm_test")
+            .unwrap_or_else(|| panic!("project member should exist"));
 
         assert_eq!(list_status, StatusCode::OK);
         assert_eq!(get_status, StatusCode::OK);
@@ -16755,12 +18697,19 @@ mod tests {
         );
         assert_eq!(get_body["resource"]["id"], "om_test");
         assert_eq!(update_body["resource"]["status"], "suspended");
+        assert_eq!(update_body["cascaded_project_member_count"], 1);
         assert_eq!(member.status, MembershipStatus::Suspended);
         assert_eq!(member.resource_version, 2);
+        assert_eq!(project_member.status, MembershipStatus::Suspended);
+        assert_eq!(project_member.resource_version, 2);
         assert_eq!(store.audit_events().len(), 1);
         assert_eq!(
             store.audit_events()[0].event_type,
             "gateway.organization_member.update"
+        );
+        assert_eq!(
+            store.audit_events()[0].redacted_diff["cascaded_project_member_count"],
+            1
         );
     }
 
@@ -16817,6 +18766,70 @@ mod tests {
         assert_eq!(
             store.audit_events()[0].event_type,
             "gateway.project_member.update"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_project_member_create_requires_parent_organization_membership() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+
+        let created = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/projects/prj_test/members",
+            json!({
+                "idempotency_key": "idem_project_member_create",
+                "principal_id": TEST_USER_ID,
+                "organization_member_id": "om_test"
+            }),
+        )
+        .await;
+        let created_status = created.status();
+        let created_body = response_json(created).await;
+        let replay = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/projects/prj_test/members",
+            json!({
+                "idempotency_key": "idem_project_member_create",
+                "principal_id": TEST_USER_ID,
+                "organization_member_id": "om_test"
+            }),
+        )
+        .await;
+        let replay_status = replay.status();
+        let replay_body = response_json(replay).await;
+        let invalid_parent = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/projects/prj_test/members",
+            json!({
+                "idempotency_key": "idem_project_member_invalid_parent",
+                "principal_id": TEST_USER_ID,
+                "organization_member_id": "om_missing"
+            }),
+        )
+        .await;
+        let invalid_parent_status = invalid_parent.status();
+        let invalid_parent_body = response_json(invalid_parent).await;
+
+        assert_eq!(created_status, StatusCode::OK, "{created_body:?}");
+        assert_eq!(created_body["resource"]["id"], "pm_test");
+        assert_eq!(created_body["resource"]["principal_id"], TEST_USER_ID);
+        assert_eq!(created_body["resource"]["project_id"], TEST_PROJECT_ID);
+        assert_eq!(created_body["resource"]["status"], "active");
+        assert_eq!(created_body["idempotency_replayed"], false);
+        assert_eq!(replay_status, StatusCode::OK, "{replay_body:?}");
+        assert_eq!(replay_body["idempotency_replayed"], true);
+        assert_eq!(invalid_parent_status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            invalid_parent_body["error"]["code"],
+            "gateway.resource.not_found"
+        );
+        assert_eq!(store.audit_events().len(), 1);
+        assert_eq!(
+            store.audit_events()[0].event_type,
+            "gateway.project_member.create"
         );
     }
 
@@ -17024,6 +19037,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_secret_ref_create_lists_and_reads_locator_without_secret_material() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        let request = valid_secret_ref_request("idem_secret_ref_create", "super-secret-value-1234");
+
+        let first = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/secret-refs",
+            request.clone(),
+        )
+        .await;
+        let first_status = first.status();
+        let first_body = response_json(first).await;
+        let second = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/secret-refs",
+            request,
+        )
+        .await;
+        let second_status = second.status();
+        let second_body = response_json(second).await;
+        let secret_ref_id = first_body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("secret ref id should be present"))
+            .to_owned();
+        let list = get_admin(store.clone(), &raw_session, "/admin/v1/secret-refs").await;
+        let list_body = response_json(list).await;
+        let get = get_admin(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/secret-refs/{secret_ref_id}"),
+        )
+        .await;
+        let get_body = response_json(get).await;
+        let locator = get_admin(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/secret-refs/{secret_ref_id}/locator"),
+        )
+        .await;
+        let locator_status = locator.status();
+        let locator_body = response_json(locator).await;
+        let api_key_locator = get_public_with_bearer(
+            store.clone(),
+            &raw_key,
+            &format!("/admin/v1/secret-refs/{secret_ref_id}/locator"),
+        )
+        .await;
+        let audit_text = serde_json::to_string(&store.audit_events())
+            .unwrap_or_else(|error| panic!("audit events should serialize: {error}"));
+
+        assert_eq!(first_status, StatusCode::OK);
+        assert_eq!(second_status, StatusCode::OK);
+        assert!(secret_ref_id.starts_with("sec_"));
+        assert_eq!(first_body["resource"]["kind"], "secret_ref");
+        assert_eq!(first_body["resource"]["display_mask"], "****1234");
+        assert!(first_body["resource"]["fingerprint"]
+            .as_str()
+            .is_some_and(|fingerprint| fingerprint.starts_with("sha256:")));
+        assert!(first_body["resource"].get("secret_value").is_none());
+        assert!(first_body["resource"].get("backend_locator").is_none());
+        assert_eq!(second_body["idempotency_replayed"], true);
+        assert_eq!(list_body["resources"].as_array().map_or(0, Vec::len), 1);
+        assert_eq!(get_body["resource"]["id"], secret_ref_id);
+        assert!(get_body["resource"].get("backend_locator").is_none());
+        assert_eq!(locator_status, StatusCode::OK);
+        assert_eq!(locator_body["resource"]["id"], secret_ref_id);
+        assert_eq!(locator_body["resource"]["backend_kind"], "memory");
+        assert!(locator_body["resource"]["backend_locator"]
+            .as_str()
+            .is_some_and(|locator| locator.starts_with("memory://gateway-secrets/sec_")));
+        assert!(locator_body["resource"].get("secret_value").is_none());
+        assert_eq!(api_key_locator.status(), StatusCode::FORBIDDEN);
+        assert_eq!(store.secret_refs_for_tenant(TEST_TENANT_ID).len(), 1);
+        assert_eq!(
+            store
+                .secret_value(&secret_ref_id)
+                .map(|value| value.expose_secret().to_owned()),
+            Some("super-secret-value-1234".to_owned())
+        );
+        assert!(!audit_text.contains("super-secret-value-1234"));
+        assert!(!first_body.to_string().contains("super-secret-value-1234"));
+        assert!(!locator_body.to_string().contains("super-secret-value-1234"));
+    }
+
+    #[tokio::test]
     async fn admin_upstream_credential_validate_is_dry_run() {
         let (store, raw_session) = gateway_store_with_admin_session();
 
@@ -17053,15 +19153,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_upstream_credential_rejects_missing_secret_ref() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let endpoint_id = create_provider_endpoint_over_http(store.clone(), &raw_session).await;
+        let request = json!({
+            "idempotency_key": "idem_credential_missing_secret",
+            "organization_id": TEST_ORGANIZATION_ID,
+            "provider_endpoint_id": endpoint_id,
+            "credential_kind": "api_key",
+            "secret_ref_id": "sec_missing_provider_key"
+        });
+
+        let validation = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/upstream-credentials:validate",
+            request.clone(),
+        )
+        .await;
+        let validation_body = response_json(validation).await;
+        let create = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/upstream-credentials",
+            request,
+        )
+        .await;
+
+        assert_eq!(validation_body["valid"], false);
+        assert!(validation_body["errors"].as_array().is_some_and(|errors| {
+            errors.iter().any(|error| {
+                error["field"] == "secret_ref_id" && error["reason"] == "unknown_secret_ref"
+            })
+        }));
+        assert_eq!(create.status(), StatusCode::BAD_REQUEST);
+        assert!(store
+            .upstream_credentials_for_tenant(TEST_TENANT_ID)
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn admin_upstream_credential_create_redacts_secret_material() {
         let (store, raw_session) = gateway_store_with_admin_session();
         let endpoint_id = create_provider_endpoint_over_http(store.clone(), &raw_session).await;
+        let secret_ref_id = seed_secret_ref_for_test(
+            &store,
+            Some(TEST_ORGANIZATION_ID),
+            None,
+            "upstream provider credential",
+            "provider-api-key-value",
+        );
         let request = json!({
             "idempotency_key": "idem_credential_create",
             "organization_id": "org_test",
             "provider_endpoint_id": endpoint_id,
             "credential_kind": "api_key",
-            "secret_ref_id": "sec_openai"
+            "secret_ref_id": &secret_ref_id
         });
 
         let first = post_admin_json(
@@ -17096,7 +19243,7 @@ mod tests {
         assert_eq!(first_status, StatusCode::OK);
         assert_eq!(second_status, StatusCode::OK);
         assert_eq!(first_body["resource"]["kind"], "upstream_credential");
-        assert_eq!(first_body["resource"]["secret_ref_id"], "sec_openai");
+        assert_eq!(first_body["resource"]["secret_ref_id"], secret_ref_id);
         assert!(first_body["resource"].get("secret").is_none());
         assert!(first_body["resource"].get("raw_secret").is_none());
         assert_eq!(second_body["idempotency_replayed"], true);
@@ -17116,7 +19263,7 @@ mod tests {
         );
         let audit_text = serde_json::to_string(&store.audit_events())
             .unwrap_or_else(|error| panic!("audit events should serialize: {error}"));
-        assert!(!audit_text.contains("sec_openai"));
+        assert!(!audit_text.contains("provider-api-key-value"));
     }
 
     #[tokio::test]
@@ -17909,9 +20056,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_otel_and_notification_validate_missing_secret_refs() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+
+        let otel = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/observability/otel-export/configs/otel_candidate/validate",
+            valid_otel_export_config_request_with_secret(
+                "idem_otel_missing_secret",
+                "sec_missing_otel_collector",
+            ),
+        )
+        .await;
+        let otel_body = response_json(otel).await;
+        let notification = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/notification/sinks:validate",
+            valid_notification_sink_request_with_secret(
+                "idem_notification_missing_secret",
+                "sec_missing_notification_signing",
+            ),
+        )
+        .await;
+        let notification_body = response_json(notification).await;
+
+        assert_eq!(otel_body["valid"], false);
+        assert!(otel_body["errors"].as_array().is_some_and(|errors| {
+            errors.iter().any(|error| {
+                error["field"] == "header_refs.secret_ref_id"
+                    && error["reason"] == "unknown_secret_ref"
+            })
+        }));
+        assert_eq!(notification_body["valid"], false);
+        assert!(notification_body["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.iter().any(|error| {
+                error["field"] == "signing_secret_ref_id" && error["reason"] == "unknown_secret_ref"
+            })));
+    }
+
+    #[tokio::test]
     async fn admin_otel_export_config_create_is_idempotent_and_redacted() {
         let (store, raw_session) = gateway_store_with_admin_session();
-        let request = valid_otel_export_config_request("idem_otel_create");
+        let secret_ref_id = seed_secret_ref_for_test(
+            &store,
+            Some(TEST_ORGANIZATION_ID),
+            Some(TEST_PROJECT_ID),
+            "otel collector authorization",
+            "otel-collector-token-value",
+        );
+        let request =
+            valid_otel_export_config_request_with_secret("idem_otel_create", &secret_ref_id);
 
         let first = post_admin_json(
             store.clone(),
@@ -17966,14 +20163,16 @@ mod tests {
             first_body["resource"]["header_refs"][0]["secret_ref_id"],
             "sec_***"
         );
-        assert!(!response_text.contains("sec_otel_collector_token"));
+        assert!(!response_text.contains(&secret_ref_id));
+        assert!(!response_text.contains("otel-collector-token-value"));
         assert_eq!(second_body["idempotency_replayed"], true);
         assert_eq!(list_body["resources"].as_array().map_or(0, Vec::len), 1);
         assert_eq!(get_body["resource"]["id"], otel_export_config_id);
         assert_eq!(store.audit_events().len(), 1);
         let audit_text = serde_json::to_string(&store.audit_events())
             .unwrap_or_else(|error| panic!("audit events should serialize: {error}"));
-        assert!(!audit_text.contains("sec_otel_collector_token"));
+        assert!(!audit_text.contains(&secret_ref_id));
+        assert!(!audit_text.contains("otel-collector-token-value"));
     }
 
     #[tokio::test]
@@ -17981,6 +20180,13 @@ mod tests {
         let (store, raw_session) = gateway_store_with_admin_session();
         let otel_export_config_id =
             create_otel_export_config_over_http(store.clone(), &raw_session).await;
+        let rotated_secret_ref_id = seed_secret_ref_for_test(
+            &store,
+            Some(TEST_ORGANIZATION_ID),
+            Some(TEST_PROJECT_ID),
+            "otel collector rotated authorization",
+            "otel-rotated-token-value",
+        );
 
         let update = patch_admin_json(
             store.clone(),
@@ -17991,7 +20197,7 @@ mod tests {
                 "endpoint_url": "https://collector.example/v1/metrics",
                 "header_refs": [{
                     "name": "x-otlp-api-key",
-                    "secret_ref_id": "sec_otel_rotated_token"
+                    "secret_ref_id": &rotated_secret_ref_id
                 }],
                 "resource_attributes": [{
                     "key": "deployment.environment",
@@ -18028,7 +20234,8 @@ mod tests {
             update_body["resource"]["header_refs"][0]["secret_ref_id"],
             "sec_***"
         );
-        assert!(!update_text.contains("sec_otel_rotated_token"));
+        assert!(!update_text.contains(&rotated_secret_ref_id));
+        assert!(!update_text.contains("otel-rotated-token-value"));
         assert_eq!(update_body["resource"]["version"], 2);
         assert_eq!(disable_body["resource"]["status"], "disabled");
         assert_eq!(disable_body["resource"]["version"], 3);
@@ -18037,7 +20244,7 @@ mod tests {
                 .otel_export_configs_for_tenant(TEST_TENANT_ID)
                 .first()
                 .map(|config| config.header_refs[0].secret_ref_id.as_str()),
-            Some("sec_otel_rotated_token")
+            Some(rotated_secret_ref_id.as_str())
         );
         assert_eq!(store.audit_events().len(), 3);
         assert_eq!(
@@ -18046,8 +20253,8 @@ mod tests {
         );
         let audit_text = serde_json::to_string(&store.audit_events())
             .unwrap_or_else(|error| panic!("audit events should serialize: {error}"));
-        assert!(!audit_text.contains("sec_otel_collector_token"));
-        assert!(!audit_text.contains("sec_otel_rotated_token"));
+        assert!(!audit_text.contains(&rotated_secret_ref_id));
+        assert!(!audit_text.contains("otel-rotated-token-value"));
     }
 
     #[tokio::test]
@@ -18103,7 +20310,15 @@ mod tests {
     #[tokio::test]
     async fn otel_exporter_outage_records_drops_without_blocking_model_requests() {
         let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
-        let mut request = valid_otel_export_config_request("idem_otel_unreachable");
+        let secret_ref_id = seed_secret_ref_for_test(
+            &store,
+            Some(TEST_ORGANIZATION_ID),
+            Some(TEST_PROJECT_ID),
+            "otel collector authorization",
+            "otel-collector-token-value",
+        );
+        let mut request =
+            valid_otel_export_config_request_with_secret("idem_otel_unreachable", &secret_ref_id);
         request["endpoint_url"] = json!("https://unreachable.example/v1/metrics");
         let create = post_admin_json(
             store.clone(),
@@ -18247,7 +20462,17 @@ mod tests {
     #[tokio::test]
     async fn admin_notification_sink_create_is_idempotent_and_redacted() {
         let (store, raw_session) = gateway_store_with_admin_session();
-        let request = valid_notification_sink_request("idem_notification_sink_create");
+        let signing_secret_ref_id = seed_secret_ref_for_test(
+            &store,
+            Some(TEST_ORGANIZATION_ID),
+            Some(TEST_PROJECT_ID),
+            "notification webhook signing",
+            "notification-webhook-secret-value",
+        );
+        let request = valid_notification_sink_request_with_secret(
+            "idem_notification_sink_create",
+            &signing_secret_ref_id,
+        );
 
         let first = post_admin_json(
             store.clone(),
@@ -18311,7 +20536,8 @@ mod tests {
             "hooks.example"
         );
         assert_eq!(first_body["resource"]["signing_secret_ref_id"], "sec_***");
-        assert!(!response_text.contains("sec_notification_webhook"));
+        assert!(!response_text.contains(&signing_secret_ref_id));
+        assert!(!response_text.contains("notification-webhook-secret-value"));
         assert_eq!(second_body["idempotency_replayed"], true);
         assert_eq!(list_body["resources"].as_array().map_or(0, Vec::len), 1);
         assert_eq!(get_body["resource"]["id"], notification_sink_id);
@@ -18322,11 +20548,12 @@ mod tests {
                 .notification_sinks_for_tenant(TEST_TENANT_ID)
                 .first()
                 .and_then(|sink| sink.signing_secret_ref_id.as_deref()),
-            Some("sec_notification_webhook")
+            Some(signing_secret_ref_id.as_str())
         );
         let audit_text = serde_json::to_string(&store.audit_events())
             .unwrap_or_else(|error| panic!("audit events should serialize: {error}"));
-        assert!(!audit_text.contains("sec_notification_webhook"));
+        assert!(!audit_text.contains(&signing_secret_ref_id));
+        assert!(!audit_text.contains("notification-webhook-secret-value"));
     }
 
     #[tokio::test]
@@ -18425,11 +20652,7 @@ mod tests {
         assert_eq!(get_body["resource"]["id"], subscription_id);
         assert_eq!(update_body["resource"]["status"], "disabled");
         assert_eq!(update_body["resource"]["version"], 2);
-        assert_eq!(store.audit_events().len(), 3);
-        assert_eq!(
-            store.audit_events()[2].event_type,
-            "gateway.notification_subscription.update"
-        );
+        assert_notification_subscription_audit_events(&store);
     }
 
     #[tokio::test]
@@ -18611,6 +20834,343 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn organization_invitation_create_preview_and_accept_are_redacted() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let created_body = create_organization_invitation_over_http(
+            store.clone(),
+            &raw_session,
+            "idem_org_invite_create",
+            Some(TEST_PROJECT_ID),
+        )
+        .await;
+        let invitation_token = invitation_token_from_body(&created_body);
+        let invitation_id = resource_id_from_body(&created_body);
+
+        let replay = post_admin_json(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/organizations/{TEST_ORGANIZATION_ID}/invitations"),
+            json!({
+                "idempotency_key": "idem_org_invite_create",
+                "invited_principal_id": TEST_USER_ID,
+                "project_id": TEST_PROJECT_ID,
+                "role_id": "organization_member"
+            }),
+        )
+        .await;
+        let replay_body = response_json(replay).await;
+        let list = get_admin(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/organizations/{TEST_ORGANIZATION_ID}/invitations"),
+        )
+        .await;
+        let list_body = response_json(list).await;
+        let get = get_admin(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/organizations/{TEST_ORGANIZATION_ID}/invitations/{invitation_id}"),
+        )
+        .await;
+        let get_body = response_json(get).await;
+        let preview = get_public(
+            store.clone(),
+            &format!("/auth/v1/invitations/{invitation_token}/preview"),
+        )
+        .await;
+        let preview_body = response_json(preview).await;
+        let accepted = post_public_with_bearer(
+            store.clone(),
+            &raw_session,
+            &format!("/auth/v1/invitations/{invitation_token}/accept"),
+        )
+        .await;
+        let accepted_body = response_json(accepted).await;
+        let accepted_again = post_public_with_bearer(
+            store.clone(),
+            &raw_session,
+            &format!("/auth/v1/invitations/{invitation_token}/accept"),
+        )
+        .await;
+        let accepted_again_status = accepted_again.status();
+        let combined_text = serde_json::to_string(&json!({
+            "replay": replay_body,
+            "list": list_body,
+            "get": get_body,
+            "preview": preview_body,
+            "accepted": accepted_body
+        }))
+        .unwrap_or_else(|error| panic!("response bodies should serialize: {error}"));
+
+        assert_eq!(accepted_again_status, StatusCode::BAD_REQUEST);
+        assert!(invitation_token.starts_with("gwinv_"));
+        assert_eq!(replay_body["idempotency_replayed"], true);
+        assert!(replay_body.get("invitation_token").is_none());
+        assert_eq!(preview_body["resource"]["status"], "pending");
+        assert_eq!(accepted_body["resource"]["status"], "accepted");
+        assert_eq!(
+            accepted_body["session"]["session"]["active_organization_id"],
+            TEST_ORGANIZATION_ID
+        );
+        assert_eq!(
+            accepted_body["session"]["session"]["active_project_id"],
+            TEST_PROJECT_ID
+        );
+        assert!(!combined_text.contains(&invitation_token));
+        assert!(!combined_text.contains("invitation_token_hash"));
+        assert!(store
+            .project_membership(TEST_USER_ID, TEST_PROJECT_ID)
+            .is_some());
+        assert!(store.audit_events().iter().any(|event| {
+            event.event_type == "gateway.organization_invite.accept"
+                && event.resource_id == invitation_id
+        }));
+    }
+
+    #[tokio::test]
+    async fn organization_invitation_revoke_marks_pending_invite_revoked() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let created_body = create_organization_invitation_over_http(
+            store.clone(),
+            &raw_session,
+            "idem_org_invite_revoke",
+            None,
+        )
+        .await;
+        let invitation_token = invitation_token_from_body(&created_body);
+        let invitation_id = resource_id_from_body(&created_body);
+        let invitation_version = created_body["resource"]["version"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("version should be present"));
+
+        let revoked = post_admin_json(
+            store.clone(),
+            &raw_session,
+            &format!(
+                "/admin/v1/organizations/{TEST_ORGANIZATION_ID}/invitations/{invitation_id}/revoke"
+            ),
+            json!({
+                "expected_version": invitation_version,
+                "reason": "No longer needed"
+            }),
+        )
+        .await;
+        let revoked_status = revoked.status();
+        let revoked_body = response_json(revoked).await;
+        let preview = get_public(
+            store,
+            &format!("/auth/v1/invitations/{invitation_token}/preview"),
+        )
+        .await;
+        let preview_body = response_json(preview).await;
+
+        assert_eq!(revoked_status, StatusCode::OK);
+        assert_eq!(revoked_body["resource"]["status"], "revoked");
+        assert_eq!(preview_body["resource"]["status"], "revoked");
+        assert!(!revoked_body.to_string().contains(&invitation_token));
+    }
+
+    #[tokio::test]
+    async fn admin_user_disable_revokes_active_sessions() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+
+        let list = get_admin(store.clone(), &raw_session, "/admin/v1/users").await;
+        let list_status = list.status();
+        let list_body = response_json(list).await;
+        let get = get_admin(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/users/{TEST_USER_ID}"),
+        )
+        .await;
+        let get_status = get.status();
+        let get_body = response_json(get).await;
+        let user_version = get_body["resource"]["version"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("user version should be present"));
+
+        let disabled = patch_admin_json(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/users/{TEST_USER_ID}"),
+            json!({
+                "expected_version": user_version,
+                "status": "disabled",
+                "reason": "Security response"
+            }),
+        )
+        .await;
+        let disabled_status = disabled.status();
+        let disabled_body = response_json(disabled).await;
+        let session_after_disable =
+            get_public_with_bearer(store.clone(), &raw_session, "/auth/v1/session").await;
+        let session_after_disable_status = session_after_disable.status();
+
+        assert_eq!(list_status, StatusCode::OK);
+        assert_eq!(get_status, StatusCode::OK);
+        assert_eq!(disabled_status, StatusCode::OK);
+        assert_eq!(session_after_disable_status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            list_body["resources"][0]["resource"]["id"],
+            serde_json::Value::String(TEST_USER_ID.to_owned())
+        );
+        assert_eq!(disabled_body["resource"]["status"], "disabled");
+        assert_eq!(disabled_body["revoked_session_count"], 1);
+        assert!(store.audit_events().iter().any(|event| {
+            event.event_type == "gateway.user.disable" && event.resource_id == TEST_USER_ID
+        }));
+    }
+
+    #[tokio::test]
+    async fn admin_user_session_list_and_revoke_are_scoped_and_redacted() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let (target_raw_session, target_session_id) = insert_admin_session_with_id(&store);
+
+        let list = get_admin(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/users/{TEST_USER_ID}/sessions"),
+        )
+        .await;
+        let list_status = list.status();
+        let list_body = response_json(list).await;
+        let list_text = list_body.to_string();
+        let listed_resources = list_body["resources"]
+            .as_array()
+            .unwrap_or_else(|| panic!("session list should include resources"));
+        let freeze = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/emergency/config/freeze",
+            json!({
+                "idempotency_key": "idem_session_revoke_during_freeze",
+                "reason": "Freeze config while responding to an auth incident.",
+                "expires_at": (chrono::Utc::now() + Duration::minutes(30)).to_rfc3339()
+            }),
+        )
+        .await;
+        let freeze_status = freeze.status();
+        let freeze_body = response_json(freeze).await;
+
+        let revoked = post_admin_json(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/users/{TEST_USER_ID}/sessions/{target_session_id}/revoke"),
+            json!({
+                "reason": "Compromised browser"
+            }),
+        )
+        .await;
+        let revoked_status = revoked.status();
+        let revoked_body = response_json(revoked).await;
+        let revoked_text = revoked_body.to_string();
+        let target_after_revoke =
+            get_public_with_bearer(store.clone(), &target_raw_session, "/auth/v1/session").await;
+        let admin_after_revoke =
+            get_public_with_bearer(store.clone(), &raw_session, "/auth/v1/session").await;
+
+        assert_eq!(list_status, StatusCode::OK);
+        assert_eq!(freeze_status, StatusCode::OK, "{freeze_body:?}");
+        assert_eq!(listed_resources.len(), 2);
+        assert!(listed_resources.iter().any(|resource| {
+            resource["resource"]["id"] == serde_json::Value::String(target_session_id.clone())
+        }));
+        assert!(!list_text.contains(&target_raw_session));
+        assert!(!list_text.contains("session_hash"));
+        assert_eq!(revoked_status, StatusCode::OK);
+        assert_eq!(revoked_body["resource"]["id"], target_session_id);
+        assert_eq!(revoked_body["resource"]["status"], "revoked");
+        assert!(!revoked_text.contains(&target_raw_session));
+        assert!(!revoked_text.contains("session_hash"));
+        assert_eq!(target_after_revoke.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(admin_after_revoke.status(), StatusCode::OK);
+        assert!(store.audit_events().iter().any(|event| {
+            event.event_type == "gateway.session.revoke"
+                && event.resource_kind == "AuthSession"
+                && event.resource_id == target_session_id
+        }));
+    }
+
+    #[tokio::test]
+    async fn admin_user_external_identity_list_get_and_unlink_are_redacted() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let external_identity_id = insert_external_identity(&store, "Admin@Example.COM");
+
+        let list = get_admin(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/users/{TEST_USER_ID}/external-identities"),
+        )
+        .await;
+        let list_status = list.status();
+        let list_body = response_json(list).await;
+        let list_text = list_body.to_string();
+        let get = get_admin(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/users/{TEST_USER_ID}/external-identities/{external_identity_id}"),
+        )
+        .await;
+        let get_status = get.status();
+        let get_body = response_json(get).await;
+        let get_text = get_body.to_string();
+        let freeze = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/emergency/config/freeze",
+            json!({
+                "idempotency_key": "idem_external_identity_unlink_during_freeze",
+                "reason": "Freeze config while unlinking an external identity.",
+                "expires_at": (chrono::Utc::now() + Duration::minutes(30)).to_rfc3339()
+            }),
+        )
+        .await;
+        let freeze_status = freeze.status();
+        let freeze_body = response_json(freeze).await;
+
+        let unlinked = post_admin_json(
+            store.clone(),
+            &raw_session,
+            &format!(
+                "/admin/v1/users/{TEST_USER_ID}/external-identities/{external_identity_id}/unlink"
+            ),
+            json!({
+                "reason": "Account link removed by admin"
+            }),
+        )
+        .await;
+        let unlinked_status = unlinked.status();
+        let unlinked_body = response_json(unlinked).await;
+        let unlinked_text = unlinked_body.to_string();
+
+        assert_eq!(list_status, StatusCode::OK);
+        assert_eq!(get_status, StatusCode::OK);
+        assert_eq!(freeze_status, StatusCode::OK, "{freeze_body:?}");
+        assert_eq!(unlinked_status, StatusCode::OK);
+        assert_eq!(
+            list_body["resources"][0]["resource"]["id"],
+            serde_json::Value::String(external_identity_id.clone())
+        );
+        assert_eq!(get_body["resource"]["id"], external_identity_id);
+        assert_eq!(get_body["resource"]["email_verified"], true);
+        assert!(get_body["resource"]["email_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:")));
+        assert!(!list_text.contains("Admin@Example.COM"));
+        assert!(!list_text.contains("admin@example.com"));
+        assert!(!get_text.contains("Admin@Example.COM"));
+        assert!(!get_text.contains("admin@example.com"));
+        assert_eq!(unlinked_body["resource"]["status"], "deleted");
+        assert!(!unlinked_text.contains("Admin@Example.COM"));
+        assert!(!unlinked_text.contains("admin@example.com"));
+        assert!(store.audit_events().iter().any(|event| {
+            event.event_type == "gateway.external_identity.unlink"
+                && event.resource_kind == "ExternalIdentity"
+                && event.resource_id == external_identity_id
+        }));
+    }
+
+    #[tokio::test]
     async fn single_user_provider_is_hidden_until_credentials_are_configured() {
         let store = InMemoryGatewayStore::default();
 
@@ -18705,6 +21265,9 @@ mod tests {
         .await;
         let admin_projects_status = admin_projects.status();
         let admin_projects_body = response_json(admin_projects).await;
+        let admin_projects_without_header =
+            get_admin_without_project(store.clone(), &session_token, "/admin/v1/projects").await;
+        let admin_projects_without_header_status = admin_projects_without_header.status();
 
         assert_eq!(provider_status, StatusCode::OK);
         assert_eq!(direct_provider_status, StatusCode::OK);
@@ -18731,12 +21294,188 @@ mod tests {
             grant.tenant_id == SINGLE_USER_TENANT_ID && grant.principal_id == SINGLE_USER_ID
         }));
         assert_eq!(admin_projects_status, StatusCode::OK);
+        assert_eq!(admin_projects_without_header_status, StatusCode::OK);
         assert_eq!(
             admin_projects_body["resources"]
                 .as_array()
                 .map_or(0, Vec::len),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn auth_session_read_and_logout_revoke_current_session() {
+        let store = InMemoryGatewayStore::default();
+        let config = gateway_config_with_single_user();
+        let login = post_public_json_with_config(
+            store.clone(),
+            config,
+            "/auth/v1/single-user/login",
+            json!({
+                "username": "admin",
+                "password": "correct horse battery staple"
+            }),
+        )
+        .await;
+        let login_status = login.status();
+        let login_body = response_json(login).await;
+        let session_token = login_body["session"]["session_token"]
+            .as_str()
+            .unwrap_or_else(|| panic!("session token should be present"))
+            .to_owned();
+
+        let session =
+            get_public_with_bearer(store.clone(), &session_token, "/auth/v1/session").await;
+        let session_status = session.status();
+        let session_body = response_json(session).await;
+        let session_text = serde_json::to_string(&session_body)
+            .unwrap_or_else(|error| panic!("session response should serialize: {error}"));
+        let logout =
+            post_public_with_bearer(store.clone(), &session_token, "/auth/v1/logout").await;
+        let logout_status = logout.status();
+        let logout_body = response_json(logout).await;
+        let revoked_session =
+            get_public_with_bearer(store.clone(), &session_token, "/auth/v1/session").await;
+        let revoked_session_status = revoked_session.status();
+        let admin_after_logout =
+            get_admin(store.clone(), &session_token, "/admin/v1/projects").await;
+        let admin_after_logout_status = admin_after_logout.status();
+
+        assert_eq!(login_status, StatusCode::OK);
+        assert_eq!(session_status, StatusCode::OK);
+        assert_eq!(session_body["schema"], "gateway.auth.session.v1");
+        assert_eq!(session_body["session"]["kind"], "auth_session");
+        assert_eq!(session_body["session"]["principal_id"], SINGLE_USER_ID);
+        assert_eq!(
+            session_body["session"]["active_organization_id"],
+            SINGLE_USER_ORGANIZATION_ID
+        );
+        assert_eq!(
+            session_body["session"]["active_project_id"],
+            SINGLE_USER_PROJECT_ID
+        );
+        assert_eq!(session_body["session"]["status"], "active");
+        assert_eq!(session_body["user"]["id"], SINGLE_USER_ID);
+        assert_eq!(
+            session_body["user"]["default_organization_id"],
+            SINGLE_USER_ORGANIZATION_ID
+        );
+        assert_eq!(
+            session_body["user"]["default_project_id"],
+            SINGLE_USER_PROJECT_ID
+        );
+        assert_eq!(
+            session_body["organization_memberships"][0]["organization_id"],
+            SINGLE_USER_ORGANIZATION_ID
+        );
+        assert_eq!(
+            session_body["project_memberships"][0]["project_id"],
+            SINGLE_USER_PROJECT_ID
+        );
+        assert!(!session_text.contains(&session_token));
+        assert!(!session_text.contains("session_hash"));
+        assert_eq!(logout_status, StatusCode::OK);
+        assert_eq!(logout_body["schema"], "gateway.auth.logout.v1");
+        assert_eq!(logout_body["session"]["status"], "revoked");
+        assert_eq!(revoked_session_status, StatusCode::UNAUTHORIZED);
+        assert_eq!(admin_after_logout_status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_session_context_update_endpoints_validate_memberships() {
+        let store = InMemoryGatewayStore::default();
+        let config = gateway_config_with_single_user();
+        let login = post_public_json_with_config(
+            store.clone(),
+            config,
+            "/auth/v1/single-user/login",
+            json!({
+                "username": "admin",
+                "password": "correct horse battery staple"
+            }),
+        )
+        .await;
+        let login_body = response_json(login).await;
+        let session_token = login_body["session"]["session_token"]
+            .as_str()
+            .unwrap_or_else(|| panic!("session token should be present"))
+            .to_owned();
+
+        let active_project = post_public_json_with_bearer(
+            store.clone(),
+            &session_token,
+            "/auth/v1/session/active-project",
+            json!({
+                "project_id": SINGLE_USER_PROJECT_ID
+            }),
+        )
+        .await;
+        let active_project_status = active_project.status();
+        let active_project_body = response_json(active_project).await;
+        let active_organization = post_public_json_with_bearer(
+            store.clone(),
+            &session_token,
+            "/auth/v1/session/active-organization",
+            json!({
+                "organization_id": SINGLE_USER_ORGANIZATION_ID
+            }),
+        )
+        .await;
+        let active_organization_status = active_organization.status();
+        let active_organization_body = response_json(active_organization).await;
+        let default_organization = post_public_json_with_bearer(
+            store.clone(),
+            &session_token,
+            "/auth/v1/session/default-organization",
+            json!({
+                "organization_id": SINGLE_USER_ORGANIZATION_ID,
+                "project_id": SINGLE_USER_PROJECT_ID
+            }),
+        )
+        .await;
+        let default_organization_status = default_organization.status();
+        let default_organization_body = response_json(default_organization).await;
+        let missing_project = post_public_json_with_bearer(
+            store,
+            &session_token,
+            "/auth/v1/session/active-project",
+            json!({
+                "project_id": "prj_missing"
+            }),
+        )
+        .await;
+        let missing_project_status = missing_project.status();
+
+        assert_eq!(active_project_status, StatusCode::OK);
+        assert_eq!(active_organization_status, StatusCode::OK);
+        assert_eq!(default_organization_status, StatusCode::OK);
+        assert_eq!(missing_project_status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            active_project_body["session"]["active_organization_id"],
+            SINGLE_USER_ORGANIZATION_ID
+        );
+        assert_eq!(
+            active_project_body["session"]["active_project_id"],
+            SINGLE_USER_PROJECT_ID
+        );
+        assert_eq!(
+            active_organization_body["session"]["active_project_id"],
+            SINGLE_USER_PROJECT_ID
+        );
+        assert_eq!(
+            default_organization_body["user"]["default_organization_id"],
+            SINGLE_USER_ORGANIZATION_ID
+        );
+        assert_eq!(
+            default_organization_body["user"]["default_project_id"],
+            SINGLE_USER_PROJECT_ID
+        );
+        assert!(!default_organization_body
+            .to_string()
+            .contains(&session_token));
+        assert!(!default_organization_body
+            .to_string()
+            .contains("session_hash"));
     }
 
     #[tokio::test]
@@ -18924,6 +21663,10 @@ mod tests {
         let (store, raw_session) = gateway_store_with_admin_session();
         let notification_sink_id =
             create_notification_sink_over_http(store.clone(), &raw_session).await;
+        let first_signing_secret_ref_id = store
+            .notification_sink(&notification_sink_id)
+            .and_then(|sink| sink.signing_secret_ref_id)
+            .unwrap_or_else(|| panic!("notification sink should have signing secret"));
         let first_event_id = append_synthetic_notification_event(
             &store,
             &notification_sink_id,
@@ -18934,13 +21677,19 @@ mod tests {
         let first_signature_sha256 = assert_signed_webhook_attempt(
             &first_attempt,
             &first_event_id,
-            "sec_notification_webhook",
+            &first_signing_secret_ref_id,
         );
+        let rotated_signing_secret_ref_id = create_secret_ref_over_http(
+            store.clone(),
+            &raw_session,
+            "notification-webhook-rotated-secret-value",
+        )
+        .await;
         rotate_notification_sink_signing_secret(
             store.clone(),
             &raw_session,
             &notification_sink_id,
-            "sec_notification_webhook_rotated",
+            &rotated_signing_secret_ref_id,
         )
         .await;
         let rotated_event_id = append_synthetic_notification_event(
@@ -18956,18 +21705,28 @@ mod tests {
         let rotated_signature_sha256 = assert_signed_webhook_attempt(
             &rotated_attempt,
             &rotated_event_id,
-            "sec_notification_webhook_rotated",
+            &rotated_signing_secret_ref_id,
         );
 
         assert_ne!(rotated_signature_sha256, first_signature_sha256);
         let audit_text = serde_json::to_string(&store.audit_events())
             .unwrap_or_else(|error| panic!("audit events should serialize: {error}"));
-        assert!(!audit_text.contains("sec_notification_webhook_rotated"));
+        assert!(!audit_text.contains("notification-webhook-rotated-secret-value"));
+        assert!(store.audit_events().iter().any(|event| {
+            event.event_type == "gateway.notification_sink.update"
+                && event.redacted_diff["signing_secret_ref_id"]["after"] == "sec_***"
+        }));
     }
 
     #[tokio::test]
     async fn notification_webhook_delivery_records_permanent_failure_without_retry() {
         let (store, raw_session) = gateway_store_with_admin_session();
+        let signing_secret_ref_id = create_secret_ref_over_http(
+            store.clone(),
+            &raw_session,
+            "notification-webhook-permanent-secret-value",
+        )
+        .await;
         let sink = post_admin_json(
             store.clone(),
             &raw_session,
@@ -18985,7 +21744,7 @@ mod tests {
                     },
                     "batching": false
                 },
-                "signing_secret_ref_id": "sec_notification_webhook"
+                "signing_secret_ref_id": signing_secret_ref_id
             }),
         )
         .await;
@@ -19833,18 +22592,44 @@ mod tests {
     }
 
     fn insert_admin_session(store: &InMemoryGatewayStore) -> String {
+        insert_admin_session_with_id(store).0
+    }
+
+    fn insert_admin_session_with_id(store: &InMemoryGatewayStore) -> (String, String) {
         let now = chrono::Utc::now();
         let session = create_auth_session(
             CreateAuthSessionRequest {
                 tenant_id: TEST_TENANT_ID.to_owned(),
                 principal_id: TEST_USER_ID.to_owned(),
+                active_organization_id: Some(TEST_ORGANIZATION_ID.to_owned()),
+                active_project_id: Some(TEST_PROJECT_ID.to_owned()),
                 expires_at: now + Duration::hours(1),
             },
             now,
         );
         let raw_session = session.raw_token.expose_secret().to_owned();
+        let auth_session_id = session.record.auth_session_id.clone();
         store.insert_auth_session(session.record);
-        raw_session
+        (raw_session, auth_session_id)
+    }
+
+    fn insert_external_identity(store: &InMemoryGatewayStore, email: &str) -> String {
+        let now = chrono::Utc::now();
+        let external_identity_id = new_prefixed_id("xid");
+        store.insert_external_identity(ExternalIdentityRecord {
+            external_identity_id: external_identity_id.clone(),
+            tenant_id: TEST_TENANT_ID.to_owned(),
+            principal_id: TEST_USER_ID.to_owned(),
+            login_provider_id: Some("lp_github".to_owned()),
+            provider_kind: "github_oauth_app".to_owned(),
+            provider_subject: "github-user-123".to_owned(),
+            email: Some(email.to_owned()),
+            email_verified: true,
+            status: ResourceStatus::Active,
+            created_at: now,
+            updated_at: now,
+        });
+        external_identity_id
     }
 
     fn seed_tenant_owner_grants(store: &InMemoryGatewayStore) {
@@ -19910,7 +22695,10 @@ mod tests {
         })
     }
 
-    fn valid_otel_export_config_request(idempotency_key: &str) -> serde_json::Value {
+    fn valid_otel_export_config_request_with_secret(
+        idempotency_key: &str,
+        secret_ref_id: &str,
+    ) -> serde_json::Value {
         json!({
             "idempotency_key": idempotency_key,
             "project_id": "prj_test",
@@ -19918,7 +22706,7 @@ mod tests {
             "protocol": "otlp_http",
             "header_refs": [{
                 "name": "Authorization",
-                "secret_ref_id": "sec_otel_collector_token"
+                "secret_ref_id": secret_ref_id
             }],
             "enabled_signals": ["metrics"],
             "resource_attributes": [{
@@ -19940,7 +22728,21 @@ mod tests {
         }
     }
 
-    fn valid_notification_sink_request(idempotency_key: &str) -> serde_json::Value {
+    fn valid_secret_ref_request(idempotency_key: &str, secret_value: &str) -> serde_json::Value {
+        json!({
+            "idempotency_key": idempotency_key,
+            "organization_id": TEST_ORGANIZATION_ID,
+            "project_id": TEST_PROJECT_ID,
+            "purpose": "notification webhook signing",
+            "backend_kind": "memory",
+            "secret_value": secret_value
+        })
+    }
+
+    fn valid_notification_sink_request_with_secret(
+        idempotency_key: &str,
+        signing_secret_ref_id: &str,
+    ) -> serde_json::Value {
         json!({
             "idempotency_key": idempotency_key,
             "project_id": "prj_test",
@@ -19954,7 +22756,7 @@ mod tests {
                 },
                 "batching": false
             },
-            "signing_secret_ref_id": "sec_notification_webhook"
+            "signing_secret_ref_id": signing_secret_ref_id
         })
     }
 
@@ -20354,6 +23156,17 @@ mod tests {
         post_responses_request_with_body(store, raw_key, json!({"model": model})).await
     }
 
+    async fn wait_for_quota_fixed_window_margin() {
+        const MIN_REMAINING_SECONDS: i64 = 10;
+        let elapsed_seconds = chrono::Utc::now().timestamp().rem_euclid(60);
+        let remaining_seconds = 60 - elapsed_seconds;
+        if remaining_seconds < MIN_REMAINING_SECONDS {
+            let wait_seconds = u64::try_from(remaining_seconds + 1)
+                .unwrap_or_else(|error| panic!("wait duration should fit u64: {error}"));
+            tokio::time::sleep(std::time::Duration::from_secs(wait_seconds)).await;
+        }
+    }
+
     async fn post_responses_request_with_body(
         store: InMemoryGatewayStore,
         raw_key: &str,
@@ -20503,6 +23316,27 @@ mod tests {
         }
     }
 
+    async fn get_admin_without_project(
+        store: InMemoryGatewayStore,
+        raw_session: &str,
+        uri: &str,
+    ) -> Response<Body> {
+        match router(AppState::new(GatewayConfig::default(), store))
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {raw_session}"))
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("request should build: {error}")),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => panic!("request should complete: {error}"),
+        }
+    }
+
     async fn get_public(store: InMemoryGatewayStore, uri: &str) -> Response<Body> {
         get_public_with_config(store, GatewayConfig::default(), uri).await
     }
@@ -20518,6 +23352,71 @@ mod tests {
                     .method("GET")
                     .uri(uri)
                     .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("request should build: {error}")),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => panic!("request should complete: {error}"),
+        }
+    }
+
+    async fn get_public_with_bearer(
+        store: InMemoryGatewayStore,
+        bearer: &str,
+        uri: &str,
+    ) -> Response<Body> {
+        match router(AppState::new(GatewayConfig::default(), store))
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("request should build: {error}")),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => panic!("request should complete: {error}"),
+        }
+    }
+
+    async fn post_public_with_bearer(
+        store: InMemoryGatewayStore,
+        bearer: &str,
+        uri: &str,
+    ) -> Response<Body> {
+        match router(AppState::new(GatewayConfig::default(), store))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("request should build: {error}")),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => panic!("request should complete: {error}"),
+        }
+    }
+
+    async fn post_public_json_with_bearer(
+        store: InMemoryGatewayStore,
+        bearer: &str,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> Response<Body> {
+        match router(AppState::new(GatewayConfig::default(), store))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
                     .unwrap_or_else(|error| panic!("request should build: {error}")),
             )
             .await
@@ -20553,11 +23452,18 @@ mod tests {
         store: InMemoryGatewayStore,
         raw_session: &str,
     ) -> String {
+        let secret_ref_id = seed_secret_ref_for_test(
+            &store,
+            Some(TEST_ORGANIZATION_ID),
+            Some(TEST_PROJECT_ID),
+            "otel collector authorization",
+            "otel-collector-token-value",
+        );
         let response = post_admin_json(
             store,
             raw_session,
             "/admin/v1/observability/otel-export/configs",
-            valid_otel_export_config_request(&new_prefixed_id("idem")),
+            valid_otel_export_config_request_with_secret(&new_prefixed_id("idem"), &secret_ref_id),
         )
         .await;
         let status = response.status();
@@ -20569,16 +23475,68 @@ mod tests {
             .to_owned()
     }
 
+    async fn create_secret_ref_over_http(
+        store: InMemoryGatewayStore,
+        raw_session: &str,
+        secret_value: &str,
+    ) -> String {
+        let response = post_admin_json(
+            store,
+            raw_session,
+            "/admin/v1/secret-refs",
+            valid_secret_ref_request(&new_prefixed_id("idem"), secret_value),
+        )
+        .await;
+        let status = response.status();
+        let body = response_json(response).await;
+        assert_eq!(status, StatusCode::OK);
+        body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("secret ref id should be present"))
+            .to_owned()
+    }
+
+    fn seed_secret_ref_for_test(
+        store: &InMemoryGatewayStore,
+        organization_id: Option<&str>,
+        project_id: Option<&str>,
+        purpose: &str,
+        secret_value: &str,
+    ) -> String {
+        let record = store
+            .create_secret_ref(
+                CreateSecretRefRequest {
+                    tenant_id: TEST_TENANT_ID.to_owned(),
+                    organization_id: organization_id.map(str::to_owned),
+                    project_id: project_id.map(str::to_owned),
+                    purpose: purpose.to_owned(),
+                    backend_kind: "memory".to_owned(),
+                    secret_value: secrecy::SecretString::from(secret_value.to_owned()),
+                    created_by: TEST_USER_ID.to_owned(),
+                },
+                chrono::Utc::now(),
+            )
+            .unwrap_or_else(|error| panic!("test secret ref should be seeded: {error}"));
+        record.secret_ref_id
+    }
+
     async fn create_notification_sink_over_http(
         store: InMemoryGatewayStore,
         raw_session: &str,
     ) -> String {
         let idempotency_key = new_prefixed_id("idem");
+        let signing_secret_ref_id = seed_secret_ref_for_test(
+            &store,
+            Some(TEST_ORGANIZATION_ID),
+            Some(TEST_PROJECT_ID),
+            "notification webhook signing",
+            "notification-webhook-secret-value",
+        );
         let response = post_admin_json(
             store,
             raw_session,
             "/admin/v1/notification/sinks",
-            valid_notification_sink_request(&idempotency_key),
+            valid_notification_sink_request_with_secret(&idempotency_key, &signing_secret_ref_id),
         )
         .await;
         let status = response.status();
@@ -20597,6 +23555,13 @@ mod tests {
         name: &str,
         url: &str,
     ) -> String {
+        let signing_secret_ref_id = seed_secret_ref_for_test(
+            &store,
+            Some(TEST_ORGANIZATION_ID),
+            Some(TEST_PROJECT_ID),
+            "notification webhook signing",
+            "notification-webhook-secret-value",
+        );
         let response = post_admin_json(
             store,
             raw_session,
@@ -20614,7 +23579,7 @@ mod tests {
                     },
                     "batching": false
                 },
-                "signing_secret_ref_id": "sec_notification_webhook"
+                "signing_secret_ref_id": signing_secret_ref_id
             }),
         )
         .await;
@@ -20742,14 +23707,23 @@ mod tests {
             .request_body_sha256
             .as_deref()
             .is_some_and(|value| value.starts_with("sha256:")));
-        assert_eq!(
-            attempt.signing_secret_ref_id.as_deref(),
-            Some("sec_notification_webhook")
-        );
+        assert!(attempt
+            .signing_secret_ref_id
+            .as_deref()
+            .is_some_and(|value| value.starts_with("sec_")));
         assert!(attempt
             .signature_sha256
             .as_deref()
             .is_some_and(|value| value.starts_with("sha256:")));
+    }
+
+    fn assert_notification_subscription_audit_events(store: &InMemoryGatewayStore) {
+        let audit_events = store.audit_events();
+        assert_eq!(audit_events.len(), 3);
+        assert_eq!(
+            audit_events.last().map(|event| event.event_type.as_str()),
+            Some("gateway.notification_subscription.update")
+        );
     }
 
     fn assert_signed_webhook_attempt(
@@ -20826,6 +23800,47 @@ mod tests {
             .to_owned()
     }
 
+    async fn create_organization_invitation_over_http(
+        store: InMemoryGatewayStore,
+        raw_session: &str,
+        idempotency_key: &str,
+        project_id: Option<&str>,
+    ) -> serde_json::Value {
+        let mut request = json!({
+            "idempotency_key": idempotency_key,
+            "invited_principal_id": TEST_USER_ID,
+            "role_id": "organization_member"
+        });
+        if let Some(project_id) = project_id {
+            request["project_id"] = json!(project_id);
+        }
+        let response = post_admin_json(
+            store,
+            raw_session,
+            &format!("/admin/v1/organizations/{TEST_ORGANIZATION_ID}/invitations"),
+            request,
+        )
+        .await;
+        let status = response.status();
+        let body = response_json(response).await;
+        assert_eq!(status, StatusCode::OK);
+        body
+    }
+
+    fn invitation_token_from_body(body: &serde_json::Value) -> String {
+        body["invitation_token"]
+            .as_str()
+            .unwrap_or_else(|| panic!("invitation token should be returned once"))
+            .to_owned()
+    }
+
+    fn resource_id_from_body(body: &serde_json::Value) -> String {
+        body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("resource id should be returned"))
+            .to_owned()
+    }
+
     async fn create_service_account_over_http(
         store: InMemoryGatewayStore,
         raw_session: &str,
@@ -20883,6 +23898,13 @@ mod tests {
         raw_session: &str,
         provider_endpoint_id: &str,
     ) -> String {
+        let secret_ref_id = seed_secret_ref_for_test(
+            &store,
+            Some(TEST_ORGANIZATION_ID),
+            None,
+            "upstream provider credential",
+            "provider-api-key-value",
+        );
         let response = post_admin_json(
             store,
             raw_session,
@@ -20892,7 +23914,7 @@ mod tests {
                 "organization_id": "org_test",
                 "provider_endpoint_id": provider_endpoint_id,
                 "credential_kind": "api_key",
-                "secret_ref_id": "sec_openai"
+                "secret_ref_id": &secret_ref_id
             }),
         )
         .await;
