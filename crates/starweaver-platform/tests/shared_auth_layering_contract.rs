@@ -206,5 +206,6 @@ fn gateway_project_api_key_actor() -> GatewayActor {
         api_key_allowed_actions: Vec::new(),
         api_key_allowed_resources: Vec::new(),
         request_id: "req_contract".to_owned(),
+        trace_id: "tr_contract".to_owned(),
     }
 }

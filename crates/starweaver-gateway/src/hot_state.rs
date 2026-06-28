@@ -86,6 +86,39 @@ impl EndpointDrainRecord {
     }
 }
 
+/// Sticky route mapping for one affinity key and model alias.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StickyRouteRecord {
+    /// Tenant boundary.
+    pub tenant_id: String,
+    /// Optional project boundary.
+    pub project_id: Option<String>,
+    /// Model alias id.
+    pub model_alias_id: String,
+    /// Hash of the caller-provided affinity key.
+    pub affinity_hash: String,
+    /// Routing group selected when the mapping was written.
+    pub routing_group_id: String,
+    /// Model target selected when the mapping was written.
+    pub model_target_id: String,
+    /// Provider endpoint selected when the mapping was written.
+    pub provider_endpoint_id: String,
+    /// Config version that produced this value.
+    pub config_version: i64,
+    /// Creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// TTL expiry timestamp.
+    pub expires_at: DateTime<Utc>,
+}
+
+impl StickyRouteRecord {
+    /// Returns whether the record applies to the active config and time.
+    #[must_use]
+    pub fn is_fresh_for(&self, config_version: Option<i64>, now: DateTime<Utc>) -> bool {
+        config_version == Some(self.config_version) && self.expires_at > now
+    }
+}
+
 /// Hot-state boundary used by route selection.
 pub trait RouteHotState: Send + Sync {
     /// Returns endpoint health, or `Unknown` when hot state is missing or stale.
@@ -105,6 +138,20 @@ pub trait RouteHotState: Send + Sync {
         config_version: Option<i64>,
         now: DateTime<Utc>,
     ) -> bool;
+
+    /// Returns a fresh sticky route mapping when one exists.
+    fn sticky_route(
+        &self,
+        tenant_id: &str,
+        project_id: Option<&str>,
+        model_alias_id: &str,
+        affinity_hash: &str,
+        config_version: Option<i64>,
+        now: DateTime<Utc>,
+    ) -> Option<StickyRouteRecord>;
+
+    /// Writes or replaces a sticky route mapping.
+    fn set_sticky_route(&self, record: StickyRouteRecord);
 }
 
 /// Null hot-state implementation used when the backend is unavailable.
@@ -131,6 +178,20 @@ impl RouteHotState for NullRouteHotState {
     ) -> bool {
         false
     }
+
+    fn sticky_route(
+        &self,
+        _tenant_id: &str,
+        _project_id: Option<&str>,
+        _model_alias_id: &str,
+        _affinity_hash: &str,
+        _config_version: Option<i64>,
+        _now: DateTime<Utc>,
+    ) -> Option<StickyRouteRecord> {
+        None
+    }
+
+    fn set_sticky_route(&self, _record: StickyRouteRecord) {}
 }
 
 /// Returns the Redis-compatible endpoint health key shape.
@@ -145,12 +206,27 @@ pub fn endpoint_drain_key(tenant_id: &str, provider_endpoint_id: &str) -> String
     format!("gateway:drain:{tenant_id}:{provider_endpoint_id}")
 }
 
+/// Returns the Redis-compatible sticky route key shape.
+#[must_use]
+pub fn sticky_route_key(
+    tenant_id: &str,
+    project_id: Option<&str>,
+    model_alias_id: &str,
+    affinity_hash: &str,
+) -> String {
+    format!(
+        "gateway:sticky:{tenant_id}:{}:{model_alias_id}:{affinity_hash}",
+        project_id.unwrap_or("_")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Duration;
 
     use crate::hot_state::{
-        endpoint_drain_key, endpoint_health_key, EndpointHealthRecord, EndpointHealthState,
+        endpoint_drain_key, endpoint_health_key, sticky_route_key, EndpointHealthRecord,
+        EndpointHealthState, StickyRouteRecord,
     };
 
     #[test]
@@ -163,6 +239,14 @@ mod tests {
             endpoint_drain_key("ten_test", "pep_test"),
             "gateway:drain:ten_test:pep_test"
         );
+        assert_eq!(
+            sticky_route_key("ten_test", Some("prj_test"), "ma_test", "sha256:test"),
+            "gateway:sticky:ten_test:prj_test:ma_test:sha256:test"
+        );
+        assert_eq!(
+            sticky_route_key("ten_test", None, "ma_test", "sha256:test"),
+            "gateway:sticky:ten_test:_:ma_test:sha256:test"
+        );
     }
 
     #[test]
@@ -174,6 +258,27 @@ mod tests {
             config_version: 7,
             state: EndpointHealthState::Healthy,
             observed_at: now,
+            expires_at: now + Duration::seconds(30),
+        };
+
+        assert!(record.is_fresh_for(Some(7), now));
+        assert!(!record.is_fresh_for(Some(8), now));
+        assert!(!record.is_fresh_for(Some(7), now + Duration::seconds(31)));
+    }
+
+    #[test]
+    fn sticky_route_record_requires_fresh_matching_config() {
+        let now = chrono::Utc::now();
+        let record = StickyRouteRecord {
+            tenant_id: "ten_test".to_owned(),
+            project_id: Some("prj_test".to_owned()),
+            model_alias_id: "ma_test".to_owned(),
+            affinity_hash: "sha256:test".to_owned(),
+            routing_group_id: "rg_test".to_owned(),
+            model_target_id: "mt_test".to_owned(),
+            provider_endpoint_id: "pep_test".to_owned(),
+            config_version: 7,
+            created_at: now,
             expires_at: now + Duration::seconds(30),
         };
 

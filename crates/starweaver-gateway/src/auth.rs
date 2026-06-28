@@ -10,7 +10,7 @@ use subtle::ConstantTimeEq;
 
 use crate::domain::{
     new_prefixed_id, ActorScope, ApiKeyRecord, ApiKeyStatus, AuthSessionRecord, AuthSessionStatus,
-    AuthenticatedActor, PrincipalId, ProjectId, RequestId,
+    AuthenticatedActor, PrincipalId, ProjectId, RequestId, TraceId,
 };
 use crate::error::{GatewayError, Result};
 use crate::storage::{
@@ -90,6 +90,8 @@ pub struct ResolveUserSessionRequest {
     pub project_id: ProjectId,
     /// Gateway request id.
     pub request_id: RequestId,
+    /// Gateway trace id.
+    pub trace_id: TraceId,
     /// Session expiry.
     pub expires_at: Option<DateTime<Utc>>,
 }
@@ -103,6 +105,8 @@ pub struct ResolveServiceAccountRequest {
     pub project_id: ProjectId,
     /// Gateway request id.
     pub request_id: RequestId,
+    /// Gateway trace id.
+    pub trace_id: TraceId,
 }
 
 /// Creates an API key record and one-time raw value.
@@ -171,6 +175,7 @@ pub fn verify_api_key(
     repository: &dyn ApiKeyRepository,
     presented_key: &str,
     request_id: RequestId,
+    trace_id: TraceId,
     now: DateTime<Utc>,
 ) -> Result<AuthenticatedActor> {
     let prefix = key_prefix(presented_key)?;
@@ -198,7 +203,9 @@ pub fn verify_api_key(
                 request_id: request_id.clone(),
                 used_at: now,
             });
-            return Ok(AuthenticatedActor::for_api_key(&candidate, request_id));
+            return Ok(AuthenticatedActor::for_api_key(
+                &candidate, request_id, trace_id,
+            ));
         }
     }
     repository.record_api_key_failed_auth(&prefix, now);
@@ -242,6 +249,7 @@ pub fn resolve_user_session_actor(
         request.principal_id,
         request.session_id,
         request.request_id,
+        request.trace_id,
         request.expires_at,
     ))
 }
@@ -261,6 +269,7 @@ pub fn resolve_service_account_actor(
         ActorScope::from_project_membership(&membership),
         request.service_account_id,
         request.request_id,
+        request.trace_id,
     ))
 }
 
@@ -283,7 +292,7 @@ fn active_project_membership(
     Ok(membership)
 }
 
-fn verify_secret(presented_key: &str, secret_hash: &str) -> Result<bool> {
+pub(crate) fn verify_secret(presented_key: &str, secret_hash: &str) -> Result<bool> {
     let parsed_hash = PasswordHash::new(secret_hash).map_err(|error| GatewayError::Internal {
         message: format!("stored api key hash is invalid: {error}"),
     })?;
@@ -312,12 +321,12 @@ fn generate_raw_prefixed_token(prefix: &str) -> SecretString {
     SecretString::from(encoded)
 }
 
-fn session_token_hash(raw_token: &str) -> String {
+pub(crate) fn session_token_hash(raw_token: &str) -> String {
     let digest = Sha256::digest(raw_token.as_bytes());
     format!("sha256:{digest:x}")
 }
 
-fn key_prefix(raw_key: &str) -> Result<String> {
+pub(crate) fn key_prefix(raw_key: &str) -> Result<String> {
     let prefix_len = "swg_".len() + API_KEY_PREFIX_LEN;
     if !raw_key.is_ascii() || !raw_key.starts_with("swg_") || raw_key.len() < prefix_len {
         return Err(GatewayError::Authentication);
@@ -325,7 +334,7 @@ fn key_prefix(raw_key: &str) -> Result<String> {
     Ok(raw_key[..prefix_len].to_owned())
 }
 
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     left.len() == right.len() && left.ct_eq(right).into()
 }
 
@@ -385,6 +394,7 @@ mod tests {
             &store,
             created.raw_key.expose_secret(),
             "req_1".to_owned(),
+            "tr_1".to_owned(),
             now,
         ) {
             Ok(actor) => actor,
@@ -394,6 +404,7 @@ mod tests {
         assert_eq!(actor.tenant_id, "ten_test");
         assert_eq!(actor.project_id.as_deref(), Some("prj_test"));
         assert_eq!(actor.principal_id.as_deref(), Some("usr_test"));
+        assert_eq!(actor.trace_id, "tr_1");
         let updates = store.api_key_last_used_updates();
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].tenant_id, "ten_test");
@@ -513,6 +524,7 @@ mod tests {
             &store,
             created.raw_key.expose_secret(),
             "req_1".to_owned(),
+            "tr_1".to_owned(),
             now
         )
         .is_err());
@@ -545,6 +557,7 @@ mod tests {
             &store,
             created.raw_key.expose_secret(),
             "req_1".to_owned(),
+            "tr_1".to_owned(),
             now
         )
         .is_err());
@@ -557,6 +570,7 @@ mod tests {
             &store,
             "not-a-gateway-key",
             "req_1".to_owned(),
+            "tr_1".to_owned(),
             chrono::Utc::now()
         )
         .is_err());
@@ -587,7 +601,14 @@ mod tests {
         let store = InMemoryGatewayStore::default();
         store.insert_api_key(created.record);
 
-        assert!(verify_api_key(&store, &wrong_key, "req_1".to_owned(), now).is_err());
+        assert!(verify_api_key(
+            &store,
+            &wrong_key,
+            "req_1".to_owned(),
+            "tr_1".to_owned(),
+            now
+        )
+        .is_err());
         assert_eq!(store.failed_api_key_auth_count(&prefix, now), 1);
     }
 
@@ -617,14 +638,35 @@ mod tests {
         store.insert_api_key(created.record);
 
         for index in 0..8 {
-            assert!(verify_api_key(&store, &wrong_key, format!("req_{index}"), now).is_err());
+            assert!(verify_api_key(
+                &store,
+                &wrong_key,
+                format!("req_{index}"),
+                format!("tr_{index}"),
+                now
+            )
+            .is_err());
         }
         assert_eq!(store.failed_api_key_auth_count(&prefix, now), 8);
-        assert!(verify_api_key(&store, &wrong_key, "req_blocked".to_owned(), now).is_err());
+        assert!(verify_api_key(
+            &store,
+            &wrong_key,
+            "req_blocked".to_owned(),
+            "tr_blocked".to_owned(),
+            now
+        )
+        .is_err());
         assert_eq!(store.failed_api_key_auth_count(&prefix, now), 8);
 
         let later = now + Duration::seconds(61);
-        assert!(verify_api_key(&store, &wrong_key, "req_later".to_owned(), later).is_err());
+        assert!(verify_api_key(
+            &store,
+            &wrong_key,
+            "req_later".to_owned(),
+            "tr_later".to_owned(),
+            later
+        )
+        .is_err());
         assert_eq!(store.failed_api_key_auth_count(&prefix, later), 1);
     }
 
@@ -656,6 +698,7 @@ mod tests {
             &store,
             created.raw_key.expose_secret(),
             "req_1".to_owned(),
+            "tr_1".to_owned(),
             now
         )
         .is_ok());
@@ -673,6 +716,7 @@ mod tests {
                 session_id: "sess_test".to_owned(),
                 project_id: "prj_test".to_owned(),
                 request_id: "req_test".to_owned(),
+                trace_id: "tr_test".to_owned(),
                 expires_at: None,
             },
         ) {
@@ -685,6 +729,7 @@ mod tests {
         assert_eq!(actor.tenant_id, "ten_test");
         assert_eq!(actor.organization_id.as_deref(), Some("org_test"));
         assert_eq!(actor.project_id.as_deref(), Some("prj_test"));
+        assert_eq!(actor.trace_id, "tr_test");
     }
 
     #[test]
@@ -701,6 +746,7 @@ mod tests {
                 session_id: "sess_test".to_owned(),
                 project_id: "prj_test".to_owned(),
                 request_id: "req_test".to_owned(),
+                trace_id: "tr_test".to_owned(),
                 expires_at: None,
             },
         )
@@ -718,6 +764,7 @@ mod tests {
                 service_account_id: "svc_test".to_owned(),
                 project_id: "prj_test".to_owned(),
                 request_id: "req_test".to_owned(),
+                trace_id: "tr_test".to_owned(),
             },
         ) {
             Ok(actor) => actor,
@@ -728,5 +775,6 @@ mod tests {
         assert_eq!(actor.credential_kind, CredentialKind::ServiceToken);
         assert_eq!(actor.tenant_id, "ten_test");
         assert_eq!(actor.project_id.as_deref(), Some("prj_test"));
+        assert_eq!(actor.trace_id, "tr_test");
     }
 }

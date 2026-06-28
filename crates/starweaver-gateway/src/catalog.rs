@@ -120,6 +120,7 @@ impl GatewayCatalogSnapshot {
             hot_state: &NullRouteHotState,
             config_version: None,
             now: Utc::now(),
+            route_affinity_hash: None,
         })
     }
 
@@ -194,32 +195,33 @@ impl GatewayCatalogSnapshot {
         };
         let mut filtered_summary = Vec::new();
         let mut provider_grant_denied = false;
-        for candidate in candidates {
-            match self.evaluate_candidate(candidate, &context) {
-                CandidateEvaluation::Selected { target, endpoint } => {
-                    let selection = RouteSelection {
-                        model_alias_id: alias.model_alias_id.clone(),
-                        alias_name: alias.alias_name.clone(),
-                        route_policy_id: policy.route_policy_id.clone(),
-                        routing_group_id: group.routing_group_id.clone(),
-                        model_target_id: target.model_target_id.clone(),
-                        upstream_model_id: target.upstream_model_id.clone(),
-                        provider_endpoint: (*endpoint).clone(),
-                        upstream_credential_id: target.upstream_credential_id.clone(),
-                        filtered_summary: filtered_summary.clone(),
-                    };
-                    return Ok(RoutePlan {
-                        outcome: RoutePlanOutcome::Selected(Box::new(selection)),
-                        filtered_summary,
-                    });
-                }
-                CandidateEvaluation::Filtered(reason) => {
-                    if reason == RouteFilterReason::ProviderGrantDenied {
-                        provider_grant_denied = true;
-                    }
-                    add_filter_reason(&mut filtered_summary, reason);
-                }
+        let sticky_miss_reason = match self.try_sticky_route_selection(
+            request,
+            &context,
+            &candidates,
+            &mut filtered_summary,
+            &mut provider_grant_denied,
+        ) {
+            StickyRouteSelection::Selected(selection) => {
+                return Ok(RoutePlan {
+                    outcome: RoutePlanOutcome::Selected(selection),
+                    filtered_summary,
+                });
             }
+            StickyRouteSelection::Miss(reason) => reason,
+            StickyRouteSelection::Unavailable => None,
+        };
+        if let Some(selection) = self.first_eligible_route_selection(
+            &context,
+            &candidates,
+            &mut filtered_summary,
+            &mut provider_grant_denied,
+            sticky_miss_reason,
+        ) {
+            return Ok(RoutePlan {
+                outcome: RoutePlanOutcome::Selected(Box::new(selection)),
+                filtered_summary,
+            });
         }
 
         if provider_grant_denied {
@@ -232,6 +234,89 @@ impl GatewayCatalogSnapshot {
             outcome: RoutePlanOutcome::NoRoute,
             filtered_summary,
         })
+    }
+
+    fn try_sticky_route_selection<'a>(
+        &self,
+        request: &RoutePlanRequest<'a>,
+        context: &RouteCandidateContext<'a>,
+        candidates: &[&'a RoutingGroupTargetConfig],
+        filtered_summary: &mut Vec<RouteFilterSummary>,
+        provider_grant_denied: &mut bool,
+    ) -> StickyRouteSelection {
+        let Some(affinity_hash) = request.route_affinity_hash else {
+            return StickyRouteSelection::Unavailable;
+        };
+        let Some(sticky) =
+            sticky_route_for_policy(context.policy, request, context.alias, affinity_hash)
+        else {
+            return StickyRouteSelection::Unavailable;
+        };
+        if sticky.routing_group_id != context.group.routing_group_id {
+            return StickyRouteSelection::Miss(Some("routing_group_changed".to_owned()));
+        }
+        let Some(candidate) = candidates
+            .iter()
+            .copied()
+            .find(|candidate| candidate.model_target_id == sticky.model_target_id)
+        else {
+            return StickyRouteSelection::Miss(Some("model_target_missing".to_owned()));
+        };
+        match self.evaluate_candidate(candidate, context) {
+            CandidateEvaluation::Selected { target, endpoint }
+                if endpoint.provider_endpoint_id == sticky.provider_endpoint_id =>
+            {
+                StickyRouteSelection::Selected(Box::new(route_selection(RouteSelectionInput {
+                    context,
+                    target,
+                    endpoint,
+                    filtered_summary: filtered_summary.clone(),
+                    sticky_hit: true,
+                    sticky_miss_reason: None,
+                })))
+            }
+            CandidateEvaluation::Selected { .. } => {
+                StickyRouteSelection::Miss(Some("provider_endpoint_changed".to_owned()))
+            }
+            CandidateEvaluation::Filtered(reason) => {
+                if reason == RouteFilterReason::ProviderGrantDenied {
+                    *provider_grant_denied = true;
+                }
+                add_filter_reason(filtered_summary, reason);
+                StickyRouteSelection::Miss(Some(reason.as_str().to_owned()))
+            }
+        }
+    }
+
+    fn first_eligible_route_selection<'a>(
+        &self,
+        context: &RouteCandidateContext<'a>,
+        candidates: &[&'a RoutingGroupTargetConfig],
+        filtered_summary: &mut Vec<RouteFilterSummary>,
+        provider_grant_denied: &mut bool,
+        sticky_miss_reason: Option<String>,
+    ) -> Option<RouteSelection> {
+        for candidate in candidates {
+            match self.evaluate_candidate(candidate, context) {
+                CandidateEvaluation::Selected { target, endpoint } => {
+                    return Some(route_selection(RouteSelectionInput {
+                        context,
+                        target,
+                        endpoint,
+                        filtered_summary: filtered_summary.clone(),
+                        sticky_hit: false,
+                        sticky_miss_reason,
+                    }));
+                }
+                CandidateEvaluation::Filtered(reason) => {
+                    if reason == RouteFilterReason::ProviderGrantDenied {
+                        *provider_grant_denied = true;
+                    }
+                    add_filter_reason(filtered_summary, reason);
+                }
+            }
+        }
+        None
     }
 
     fn resolve_alias(
@@ -510,6 +595,8 @@ pub struct RoutePlanRequest<'a> {
     pub config_version: Option<i64>,
     /// Routing decision timestamp.
     pub now: DateTime<Utc>,
+    /// Optional hashed route-affinity key from a trusted request header.
+    pub route_affinity_hash: Option<&'a str>,
 }
 
 /// Upstream credential metadata included in runtime config snapshots.
@@ -639,6 +726,9 @@ pub struct RoutePolicyConfig {
     pub routing_group_id: String,
     /// Policy lifecycle status.
     pub status: ResourceStatus,
+    /// Optional sticky-route TTL in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticky_ttl_seconds: Option<i64>,
 }
 
 /// Runtime provider grant configuration.
@@ -767,6 +857,12 @@ pub struct RouteSelection {
     pub upstream_credential_id: Option<String>,
     /// Counts of candidates filtered before this selection.
     pub filtered_summary: Vec<RouteFilterSummary>,
+    /// Whether an existing sticky mapping selected this target.
+    pub sticky_hit: bool,
+    /// Safe explanation when a sticky mapping existed but could not be reused.
+    pub sticky_miss_reason: Option<String>,
+    /// Sticky-route TTL in seconds when the policy permits writing mappings.
+    pub sticky_ttl_seconds: Option<i64>,
 }
 
 /// Route planning result.
@@ -810,6 +906,56 @@ enum CandidateEvaluation<'a> {
         endpoint: &'a ProviderEndpoint,
     },
     Filtered(RouteFilterReason),
+}
+
+enum StickyRouteSelection {
+    Selected(Box<RouteSelection>),
+    Miss(Option<String>),
+    Unavailable,
+}
+
+struct RouteSelectionInput<'a> {
+    context: &'a RouteCandidateContext<'a>,
+    target: &'a ModelTargetConfig,
+    endpoint: &'a ProviderEndpoint,
+    filtered_summary: Vec<RouteFilterSummary>,
+    sticky_hit: bool,
+    sticky_miss_reason: Option<String>,
+}
+
+fn sticky_route_for_policy(
+    policy: &RoutePolicyConfig,
+    request: &RoutePlanRequest<'_>,
+    alias: &ModelAliasConfig,
+    affinity_hash: &str,
+) -> Option<crate::hot_state::StickyRouteRecord> {
+    policy.sticky_ttl_seconds?;
+    request.hot_state.sticky_route(
+        &request.actor.tenant_id,
+        request.actor.project_id.as_deref(),
+        &alias.model_alias_id,
+        affinity_hash,
+        request.config_version,
+        request.now,
+    )
+}
+
+fn route_selection(input: RouteSelectionInput<'_>) -> RouteSelection {
+    let context = input.context;
+    RouteSelection {
+        model_alias_id: context.alias.model_alias_id.clone(),
+        alias_name: context.alias.alias_name.clone(),
+        route_policy_id: context.policy.route_policy_id.clone(),
+        routing_group_id: context.group.routing_group_id.clone(),
+        model_target_id: input.target.model_target_id.clone(),
+        upstream_model_id: input.target.upstream_model_id.clone(),
+        provider_endpoint: input.endpoint.clone(),
+        upstream_credential_id: input.target.upstream_credential_id.clone(),
+        filtered_summary: input.filtered_summary,
+        sticky_hit: input.sticky_hit,
+        sticky_miss_reason: input.sticky_miss_reason,
+        sticky_ttl_seconds: context.policy.sticky_ttl_seconds,
+    }
 }
 
 struct ProviderGrantPath<'a> {
@@ -1029,6 +1175,15 @@ fn validate_policies(
     group_targets: &HashMap<&str, Vec<&RoutingGroupTargetConfig>>,
 ) -> Result<()> {
     for policy in policies {
+        if policy
+            .sticky_ttl_seconds
+            .is_some_and(|ttl| !(60..=86_400).contains(&ttl))
+        {
+            return invalid_catalog(format!(
+                "route policy {} sticky_ttl_seconds must be between 60 and 86400",
+                policy.route_policy_id
+            ));
+        }
         if !groups.contains_key(policy.routing_group_id.as_str()) {
             return invalid_catalog(format!(
                 "route policy {} references missing routing group {}",
@@ -1482,6 +1637,7 @@ mod tests {
             api_key_allowed_actions: Vec::new(),
             api_key_allowed_resources: Vec::new(),
             request_id: "req_test".to_owned(),
+            trace_id: "tr_test".to_owned(),
         }
     }
 

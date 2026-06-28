@@ -153,6 +153,8 @@ pub struct RouteDecisionRecord {
     pub actor_kind: ActorKind,
     /// Request id.
     pub request_id: String,
+    /// Trace id.
+    pub trace_id: String,
     /// Ingress protocol family.
     pub protocol_family: ProtocolFamily,
     /// Config snapshot id.
@@ -175,6 +177,10 @@ pub struct RouteDecisionRecord {
     pub upstream_credential_id: Option<String>,
     /// Counts of candidates filtered during selection.
     pub filtered_summary: Vec<RouteFilterSummary>,
+    /// Whether a fresh sticky mapping selected the target.
+    pub sticky_hit: bool,
+    /// Safe explanation when a sticky mapping existed but was not reused.
+    pub sticky_miss_reason: Option<String>,
     /// Decision status.
     pub status: RouteDecisionStatus,
     /// Safe status reason.
@@ -202,6 +208,7 @@ impl RouteDecisionRecord {
             actor_id: actor.actor_id.clone(),
             actor_kind: actor.actor_kind.clone(),
             request_id: actor.request_id.clone(),
+            trace_id: actor.trace_id.clone(),
             protocol_family: request.protocol_family,
             config_snapshot_id: request.config_snapshot_id,
             config_version: request.config_version,
@@ -213,6 +220,8 @@ impl RouteDecisionRecord {
             provider_endpoint_id: Some(selected.provider_endpoint_id),
             upstream_credential_id: selected.upstream_credential_id,
             filtered_summary: selected.filtered_summary,
+            sticky_hit: selected.sticky_hit,
+            sticky_miss_reason: selected.sticky_miss_reason,
             status: RouteDecisionStatus::Selected,
             reason: "selected".to_owned(),
             occurred_at,
@@ -239,6 +248,7 @@ impl RouteDecisionRecord {
             actor_id: actor.actor_id.clone(),
             actor_kind: actor.actor_kind.clone(),
             request_id: actor.request_id.clone(),
+            trace_id: actor.trace_id.clone(),
             protocol_family: request.protocol_family,
             config_snapshot_id: request.config_snapshot_id,
             config_version: request.config_version,
@@ -250,6 +260,8 @@ impl RouteDecisionRecord {
             provider_endpoint_id: None,
             upstream_credential_id: None,
             filtered_summary,
+            sticky_hit: false,
+            sticky_miss_reason: None,
             status,
             reason: reason.into(),
             occurred_at,
@@ -287,6 +299,10 @@ pub struct SelectedRouteEvidence {
     pub upstream_credential_id: Option<String>,
     /// Filtered candidate summary.
     pub filtered_summary: Vec<RouteFilterSummary>,
+    /// Whether a fresh sticky mapping selected the target.
+    pub sticky_hit: bool,
+    /// Safe explanation when a sticky mapping existed but was not reused.
+    pub sticky_miss_reason: Option<String>,
 }
 
 /// Route attempt evidence.
@@ -443,6 +459,8 @@ mod tests {
             provider_endpoint_id: "pep_test".to_owned(),
             upstream_credential_id: Some("upc_test".to_owned()),
             filtered_summary: Vec::new(),
+            sticky_hit: false,
+            sticky_miss_reason: None,
         };
         let started_at = chrono::Utc::now();
         let ended_at = started_at + chrono::Duration::milliseconds(10);

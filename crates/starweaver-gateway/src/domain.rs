@@ -41,6 +41,9 @@ pub type ProjectMemberId = String;
 /// Gateway request identifier.
 pub type RequestId = String;
 
+/// Gateway distributed trace identifier.
+pub type TraceId = String;
+
 /// Directory resource lifecycle status.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -258,6 +261,8 @@ pub struct AuthenticatedActor {
     pub api_key_allowed_resources: Vec<String>,
     /// Gateway request id.
     pub request_id: RequestId,
+    /// Gateway trace id.
+    pub trace_id: TraceId,
 }
 
 /// Tenant, organization, and project scope resolved for an actor.
@@ -300,7 +305,7 @@ impl ActorScope {
 impl AuthenticatedActor {
     /// Builds an actor for a verified API key.
     #[must_use]
-    pub fn for_api_key(record: &ApiKeyRecord, request_id: RequestId) -> Self {
+    pub fn for_api_key(record: &ApiKeyRecord, request_id: RequestId, trace_id: TraceId) -> Self {
         Self {
             actor_id: record.api_key_id.clone(),
             actor_kind: ActorKind::ApiKey,
@@ -315,6 +320,7 @@ impl AuthenticatedActor {
             api_key_allowed_actions: record.allowed_actions.clone(),
             api_key_allowed_resources: record.allowed_resources.clone(),
             request_id,
+            trace_id,
         }
     }
 
@@ -325,6 +331,7 @@ impl AuthenticatedActor {
         principal_id: PrincipalId,
         session_id: String,
         request_id: RequestId,
+        trace_id: TraceId,
         expires_at: Option<DateTime<Utc>>,
     ) -> Self {
         Self {
@@ -341,6 +348,7 @@ impl AuthenticatedActor {
             api_key_allowed_actions: Vec::new(),
             api_key_allowed_resources: Vec::new(),
             request_id,
+            trace_id,
         }
     }
 
@@ -350,6 +358,7 @@ impl AuthenticatedActor {
         scope: ActorScope,
         service_account_id: PrincipalId,
         request_id: RequestId,
+        trace_id: TraceId,
     ) -> Self {
         Self {
             actor_id: service_account_id.clone(),
@@ -365,6 +374,7 @@ impl AuthenticatedActor {
             api_key_allowed_actions: Vec::new(),
             api_key_allowed_resources: Vec::new(),
             request_id,
+            trace_id,
         }
     }
 
@@ -374,6 +384,7 @@ impl AuthenticatedActor {
         tenant_id: TenantId,
         service_name: impl Into<String>,
         request_id: RequestId,
+        trace_id: TraceId,
     ) -> Self {
         Self {
             actor_id: service_name.into(),
@@ -389,6 +400,7 @@ impl AuthenticatedActor {
             api_key_allowed_actions: Vec::new(),
             api_key_allowed_resources: Vec::new(),
             request_id,
+            trace_id,
         }
     }
 
@@ -398,6 +410,7 @@ impl AuthenticatedActor {
         tenant_id: TenantId,
         task_id: impl Into<String>,
         request_id: RequestId,
+        trace_id: TraceId,
     ) -> Self {
         Self {
             actor_id: task_id.into(),
@@ -413,6 +426,7 @@ impl AuthenticatedActor {
             api_key_allowed_actions: Vec::new(),
             api_key_allowed_resources: Vec::new(),
             request_id,
+            trace_id,
         }
     }
 }
@@ -1677,6 +1691,8 @@ pub struct UsageEventRecord {
     pub api_key_id: Option<ApiKeyId>,
     /// Gateway request id.
     pub request_id: RequestId,
+    /// Gateway trace id.
+    pub trace_id: TraceId,
     /// Ingress protocol family.
     pub protocol_family: ProtocolFamily,
     /// Route decision evidence id.
@@ -2217,6 +2233,8 @@ pub struct AuditEventRecord {
     pub principal_id: Option<PrincipalId>,
     /// Gateway request id.
     pub request_id: RequestId,
+    /// Gateway trace id.
+    pub trace_id: TraceId,
     /// Safe redacted diff payload.
     pub redacted_diff: serde_json::Value,
     /// Event timestamp.
@@ -2243,6 +2261,7 @@ mod tests {
             "usr_test".to_owned(),
             "sess_test".to_owned(),
             "req_test".to_owned(),
+            "tr_test".to_owned(),
             None,
         );
 
@@ -2251,6 +2270,7 @@ mod tests {
         assert_eq!(actor.principal_id.as_deref(), Some("usr_test"));
         assert_eq!(actor.organization_id.as_deref(), Some("org_test"));
         assert_eq!(actor.project_id.as_deref(), Some("prj_test"));
+        assert_eq!(actor.trace_id, "tr_test");
     }
 
     #[test]
@@ -2259,11 +2279,13 @@ mod tests {
             ActorScope::new("ten_test", Some("org_test"), Some("prj_test")),
             "svc_test".to_owned(),
             "req_test".to_owned(),
+            "tr_test".to_owned(),
         );
 
         assert_eq!(actor.actor_kind, ActorKind::ServiceAccount);
         assert_eq!(actor.credential_kind, CredentialKind::ServiceToken);
         assert_eq!(actor.principal_id.as_deref(), Some("svc_test"));
+        assert_eq!(actor.trace_id, "tr_test");
     }
 
     #[test]
@@ -2272,12 +2294,14 @@ mod tests {
             "ten_test".to_owned(),
             "sys_rollup",
             "req_test".to_owned(),
+            "tr_test".to_owned(),
         );
 
         assert_eq!(actor.actor_kind, ActorKind::System);
         assert_eq!(actor.credential_kind, CredentialKind::System);
         assert_eq!(actor.auth_strength, 100);
         assert!(actor.principal_id.is_none());
+        assert_eq!(actor.trace_id, "tr_test");
     }
 
     #[test]

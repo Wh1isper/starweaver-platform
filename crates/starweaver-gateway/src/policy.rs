@@ -376,6 +376,7 @@ mod tests {
             api_key_allowed_actions: Vec::new(),
             api_key_allowed_resources: Vec::new(),
             request_id: "req_test".to_owned(),
+            trace_id: "tr_test".to_owned(),
         }
     }
 }

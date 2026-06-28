@@ -30,7 +30,8 @@ use crate::action::{
     FoundationAuthorizationEngine, GatewayAction,
 };
 use crate::auth::{
-    create_auth_session, resolve_user_session_actor, verify_api_key, verify_session_token,
+    constant_time_eq, create_auth_session, key_prefix, resolve_user_session_actor,
+    session_token_hash, verify_api_key, verify_secret, verify_session_token,
     CreateAuthSessionRequest, ResolveUserSessionRequest,
 };
 use crate::catalog::{GatewayCatalogSnapshot, RoutePlanOutcome, RoutePlanRequest, RouteSelection};
@@ -50,13 +51,16 @@ use crate::domain::{
     NotificationSubscriptionRecord, OrganizationInvitationRecord, OrganizationMembershipRecord,
     OrganizationRecord, OtelExportConfigRecord, OtelExporterHealthRecord, OtelHeaderRef,
     OtelResourceAttribute, PricingSkuRecord, ProjectMembershipRecord, ProjectRecord,
-    ProviderEndpointRecord, ProviderGrantRecord, QuotaPolicyRecord, ResourceStatus,
-    RoutePolicyRecord, RoutingGroupRecord, RoutingGroupTargetRecord, RuntimeBudgetLeaseRecord,
-    SecretRefRecord, SecretRefStatus, ServiceAccountRecord, UpstreamCredentialRecord,
-    UpstreamCredentialStatus, UsageEventRecord, ValidationDiagnosticRecord,
+    ProviderEndpoint, ProviderEndpointRecord, ProviderGrantRecord, QuotaPolicyRecord,
+    ResourceStatus, RoutePolicyRecord, RoutingGroupRecord, RoutingGroupTargetRecord,
+    RuntimeBudgetLeaseRecord, SecretRefRecord, SecretRefStatus, ServiceAccountRecord,
+    UpstreamCredentialRecord, UpstreamCredentialStatus, UsageEventRecord,
+    ValidationDiagnosticRecord,
 };
 use crate::error::{GatewayError, Result};
-use crate::hot_state::{EndpointDrainRecord, EndpointHealthState, RouteHotState};
+use crate::hot_state::{
+    EndpointDrainRecord, EndpointHealthState, RouteHotState, StickyRouteRecord,
+};
 use crate::migrations;
 use crate::policy::CedarAuthorizationEngine;
 use crate::replay::{foundation_route_replay_cases, GatewayReplayCase};
@@ -66,25 +70,28 @@ use crate::routing::{
     RouteDecisionStatus, RouteEvidenceSink, SelectedRouteEvidence,
 };
 use crate::runtime::{
-    authorize_fake_provider_replay_target, fake_provider_response_for_authorization,
-    FakeProviderReplayEvidence, FakeProviderReplayTarget, RuntimeIngressResponse,
+    authorize_fake_provider_replay_target, build_provider_adapter_request,
+    fake_provider_response_for_authorization, FakeProviderReplayEvidence, FakeProviderReplayTarget,
+    ProviderAdapterCredential, ProviderAdapterRequestMetadata, ProviderAdapterTarget,
+    RuntimeIngressResponse,
 };
 use crate::storage::{
-    AuthSessionRepository, BootstrapDefaultProjectRequest, CatalogAdminRepository,
-    CodexOAuthRepository, CompleteExportJobRequest, ConfigPublicationRepository,
-    ConfigSnapshotRepository, ConfigSnapshotStore, ConsumedLoginAttempt, CreateBudgetPolicyRequest,
-    CreateCodexOAuthConnectionRequest, CreateEmergencyOperationRequest, CreateExportJobRequest,
-    CreateLoginAttemptRequest, CreateLoginProviderRequest, CreateModelAliasRequest,
-    CreateModelTargetRequest, CreateNotificationDeliveryAttemptRequest,
-    CreateNotificationOutboxEventRequest, CreateNotificationSinkRequest,
-    CreateNotificationSubscriptionRequest, CreateOrganizationInvitationRequest,
-    CreateOtelExportConfigRequest, CreatePricingSkuRequest, CreateProjectMembershipRequest,
-    CreateProviderEndpointRequest, CreateProviderGrantRequest, CreateQuotaPolicyRequest,
-    CreateRoutePolicyRequest, CreateRoutingGroupRequest, CreateRoutingGroupTargetRequest,
-    CreateSecretRefRequest, CreateServiceAccountRequest, CreateUpstreamCredentialRequest,
-    EmergencyOperationRepository, ExportRepository, ExternalIdentityRepository, IdempotencyRecord,
-    InMemoryGatewayStore, NotificationOutboxRepository, NullablePatch,
-    OrganizationInvitationRepository, ProviderAdminRepository, RecordOtelExporterHealthRequest,
+    ApiKeyRepository, AuthSessionRepository, BootstrapDefaultProjectRequest,
+    CatalogAdminRepository, CodexOAuthRepository, CompleteExportJobRequest,
+    ConfigPublicationRepository, ConfigSnapshotRepository, ConfigSnapshotStore,
+    ConsumedLoginAttempt, CreateBudgetPolicyRequest, CreateCodexOAuthConnectionRequest,
+    CreateEmergencyOperationRequest, CreateExportJobRequest, CreateLoginAttemptRequest,
+    CreateLoginProviderRequest, CreateModelAliasRequest, CreateModelTargetRequest,
+    CreateNotificationDeliveryAttemptRequest, CreateNotificationOutboxEventRequest,
+    CreateNotificationSinkRequest, CreateNotificationSubscriptionRequest,
+    CreateOrganizationInvitationRequest, CreateOtelExportConfigRequest, CreatePricingSkuRequest,
+    CreateProjectMembershipRequest, CreateProviderEndpointRequest, CreateProviderGrantRequest,
+    CreateQuotaPolicyRequest, CreateRoutePolicyRequest, CreateRoutingGroupRequest,
+    CreateRoutingGroupTargetRequest, CreateSecretRefRequest, CreateServiceAccountRequest,
+    CreateUpstreamCredentialRequest, EmergencyOperationRepository, ExportRepository,
+    ExternalIdentityRepository, IdempotencyRecord, InMemoryGatewayStore,
+    NotificationOutboxRepository, NullablePatch, OrganizationInvitationRepository,
+    PostgresGatewayStore, ProviderAdminRepository, RecordOtelExporterHealthRequest,
     RuntimePolicyRepository, SecretRefAdminRepository, ServiceAccountAdminRepository,
     StartCodexOAuthSessionRequest, TenancyBootstrapRepository, TenancyRepository,
     UpdateModelAliasRequest, UpdateNotificationSinkRequest, UpdateOtelExportConfigRequest,
@@ -93,12 +100,22 @@ use crate::storage::{
 use crate::{ProtocolFamily, SERVICE_NAME};
 
 const REQUEST_ID_HEADER: &str = "x-gateway-request-id";
+const TRACE_ID_HEADER: &str = "x-gateway-trace-id";
+const TRACEPARENT_HEADER: &str = "traceparent";
 const PROJECT_ID_HEADER: &str = "x-gateway-project-id";
+const GATEWAY_SESSION_ID_HEADER: &str = "x-gateway-session-id";
+const SESSION_ID_HEADER: &str = "x-session-id";
 const PERCENT_HEX: &[u8; 16] = b"0123456789ABCDEF";
 const ADMIN_CONFIG_SNAPSHOT_GET_PATH: &str =
     concat!("/admin/v1/config/snapshots/", "{snapshot_id}");
 const ADMIN_CONFIG_VALIDATION_DIAGNOSTICS_PATH: &str = "/admin/v1/config/validation-diagnostics";
 const ADMIN_ROUTE_SIMULATION_LIST_PATH: &str = "/admin/v1/route-simulations";
+const ADMIN_ROUTE_DECISION_LIST_PATH: &str = "/admin/v1/route-decisions";
+const ADMIN_ROUTE_DECISION_GET_PATH: &str =
+    concat!("/admin/v1/route-decisions/", "{route_decision_id}");
+const ADMIN_ROUTE_ATTEMPT_LIST_PATH: &str = "/admin/v1/route-attempts";
+const ADMIN_ROUTE_ATTEMPT_GET_PATH: &str =
+    concat!("/admin/v1/route-attempts/", "{route_attempt_event_id}");
 const ADMIN_AUDIT_EVENT_LIST_PATH: &str = "/admin/v1/audit/events";
 const ADMIN_EXPORT_JOB_LIST_PATH: &str = "/admin/v1/exports/jobs";
 const ADMIN_EXPORT_JOB_GET_PATH: &str = concat!("/admin/v1/exports/jobs/", "{export_job_id}");
@@ -375,6 +392,7 @@ const MAX_EXPORT_OBJECT_STORAGE_TIMEOUT_SECONDS: u64 = 60;
 const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
 const MIN_REQUEST_TIMEOUT_MS: u64 = 100;
 const MAX_REQUEST_TIMEOUT_MS: u64 = 300_000;
+const ROUTE_EVIDENCE_DURABLE_SCAN_LIMIT: i64 = 10_000;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Gateway service configuration.
@@ -1034,13 +1052,32 @@ fn single_user_auth_from_env() -> Option<SingleUserAuthConfig> {
 pub struct AppState {
     config: GatewayConfig,
     store: InMemoryGatewayStore,
+    postgres_store: Option<PostgresGatewayStore>,
 }
 
 impl AppState {
     /// Creates app state from config and in-memory foundation store.
     #[must_use]
     pub const fn new(config: GatewayConfig, store: InMemoryGatewayStore) -> Self {
-        Self { config, store }
+        Self {
+            config,
+            store,
+            postgres_store: None,
+        }
+    }
+
+    /// Creates app state with an additional durable `PostgreSQL` store.
+    #[must_use]
+    pub const fn new_with_postgres_store(
+        config: GatewayConfig,
+        store: InMemoryGatewayStore,
+        postgres_store: PostgresGatewayStore,
+    ) -> Self {
+        Self {
+            config,
+            store,
+            postgres_store: Some(postgres_store),
+        }
     }
 
     /// Returns the service configuration.
@@ -1053,6 +1090,18 @@ impl AppState {
     #[must_use]
     pub const fn store(&self) -> &InMemoryGatewayStore {
         &self.store
+    }
+
+    /// Returns whether route decisions and attempts are bridged to `PostgreSQL`.
+    #[must_use]
+    pub const fn durable_route_evidence_enabled(&self) -> bool {
+        self.postgres_store.is_some()
+    }
+
+    /// Returns whether authentication can read from durable `PostgreSQL`.
+    #[must_use]
+    pub const fn durable_auth_enabled(&self) -> bool {
+        self.postgres_store.is_some()
     }
 }
 
@@ -1122,6 +1171,10 @@ fn admin_routes(state: &AppState) -> Router<AppState> {
             get(list_validation_diagnostics),
         )
         .route(ADMIN_ROUTE_SIMULATION_LIST_PATH, post(run_route_simulation))
+        .route(ADMIN_ROUTE_DECISION_LIST_PATH, get(list_route_decisions))
+        .route(ADMIN_ROUTE_DECISION_GET_PATH, get(get_route_decision))
+        .route(ADMIN_ROUTE_ATTEMPT_LIST_PATH, get(list_route_attempts))
+        .route(ADMIN_ROUTE_ATTEMPT_GET_PATH, get(get_route_attempt))
         .route(ADMIN_AUDIT_EVENT_LIST_PATH, get(list_audit_events))
         .merge(dashboard_admin_routes())
         .merge(user_admin_routes())
@@ -1636,15 +1689,12 @@ fn routing_group_admin_routes() -> Router<AppState> {
 
 /// Runs the gateway HTTP server.
 pub async fn run(config: GatewayConfig) -> crate::error::Result<()> {
-    validate_gateway_config(&config)?;
     let listener = tokio::net::TcpListener::bind(&config.listen_addr)
         .await
         .map_err(|error| crate::error::GatewayError::Internal {
             message: format!("failed to bind gateway listener: {error}"),
         })?;
-    let store = InMemoryGatewayStore::default();
-    bootstrap_single_user_if_configured(&store, &config, chrono::Utc::now())?;
-    let state = AppState::new(config, store);
+    let state = build_app_state(config).await?;
     let worker_handle = spawn_background_worker_scheduler(state.clone());
     let server_result = axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown_signal())
@@ -1658,11 +1708,41 @@ pub async fn run(config: GatewayConfig) -> crate::error::Result<()> {
     server_result
 }
 
+/// Builds gateway app state from startup configuration.
+///
+/// # Errors
+///
+/// Returns [`GatewayError`] when configuration is unsafe, `PostgreSQL` cannot be
+/// reached, embedded migrations fail, or local single-user bootstrap is invalid.
+pub async fn build_app_state(config: GatewayConfig) -> crate::error::Result<AppState> {
+    validate_gateway_config(&config)?;
+    let store = InMemoryGatewayStore::default();
+    bootstrap_single_user_if_configured(&store, &config, chrono::Utc::now())?;
+    if let Some(database_url) = config.database_url.as_deref() {
+        let pool = PgPoolOptions::new()
+            .connect(database_url)
+            .await
+            .map_err(|error| crate::error::GatewayError::Internal {
+                message: format!(
+                    "failed to connect gateway PostgreSQL route evidence store: {error}"
+                ),
+            })?;
+        migrations::run(&pool).await?;
+        return Ok(AppState::new_with_postgres_store(
+            config,
+            store,
+            PostgresGatewayStore::new(pool),
+        ));
+    }
+    Ok(AppState::new(config, store))
+}
+
 async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
     let wait_forever = tokio::time::sleep(Duration::from_secs(u64::MAX));
+
     tokio::select! {
         () = ctrl_c => {}
         () = wait_forever => {}
@@ -1826,13 +1906,21 @@ async fn request_id_middleware(mut request: Request<Body>, next: Next) -> Respon
         .and_then(|value| value.to_str().ok())
         .filter(|value| is_safe_request_id(value))
         .map_or_else(|| new_prefixed_id("req"), ToOwned::to_owned);
+    let trace_id = trace_id_from_headers(request.headers());
     if let Ok(value) = HeaderValue::from_str(&request_id) {
         request.headers_mut().insert(REQUEST_ID_HEADER, value);
     }
+    if let Ok(value) = HeaderValue::from_str(&trace_id) {
+        request.headers_mut().insert(TRACE_ID_HEADER, value);
+    }
     let response = next.run(request).await;
-    let mut response = inject_request_id_into_error_envelope(response, &request_id).await;
+    let mut response =
+        inject_request_context_into_error_envelope(response, &request_id, &trace_id).await;
     if let Ok(value) = HeaderValue::from_str(&request_id) {
         response.headers_mut().insert(REQUEST_ID_HEADER, value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&trace_id) {
+        response.headers_mut().insert(TRACE_ID_HEADER, value);
     }
     response
 }
@@ -1848,7 +1936,11 @@ async fn request_timeout_middleware(
         .unwrap_or_else(|_| GatewayError::RequestTimeout.into_response())
 }
 
-async fn inject_request_id_into_error_envelope(response: Response, request_id: &str) -> Response {
+async fn inject_request_context_into_error_envelope(
+    response: Response,
+    request_id: &str,
+    trace_id: &str,
+) -> Response {
     if !response.status().is_client_error() && !response.status().is_server_error() {
         return response;
     }
@@ -1866,7 +1958,8 @@ async fn inject_request_id_into_error_envelope(response: Response, request_id: &
                             "code": "gateway.internal",
                             "message": format!("internal error: failed to read error body: {error}"),
                             "retryable": true,
-                            "request_id": request_id
+                            "request_id": request_id,
+                            "trace_id": trace_id
                         }
                     })
                     .to_string(),
@@ -1882,6 +1975,7 @@ async fn inject_request_id_into_error_envelope(response: Response, request_id: &
     }
     if let Some(error) = value.get_mut("error").and_then(Value::as_object_mut) {
         error.insert("request_id".to_owned(), json!(request_id));
+        error.insert("trace_id".to_owned(), json!(trace_id));
     }
     parts.headers.remove(header::CONTENT_LENGTH);
     parts.headers.insert(
@@ -1896,7 +1990,7 @@ async fn auth_context_middleware(
     mut request: Request<Body>,
     next: Next,
 ) -> Result<Response> {
-    let actor = authenticate_request(&state, request.headers(), chrono::Utc::now())?;
+    let actor = authenticate_request(&state, request.headers(), chrono::Utc::now()).await?;
     request.extensions_mut().insert(actor);
     Ok(next.run(request).await)
 }
@@ -1907,6 +2001,72 @@ fn is_safe_request_id(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+fn is_safe_trace_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+fn trace_id_from_headers(headers: &HeaderMap) -> String {
+    headers
+        .get(TRACE_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| is_safe_trace_id(value))
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            headers
+                .get(TRACEPARENT_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(trace_id_from_traceparent)
+        })
+        .unwrap_or_else(|| new_prefixed_id("tr"))
+}
+
+fn trace_id_from_traceparent(value: &str) -> Option<String> {
+    let mut parts = value.split('-');
+    let version = parts.next()?;
+    let trace_id = parts.next()?;
+    let parent_id = parts.next()?;
+    let flags = parts.next()?;
+    if parts.next().is_some()
+        || version.len() != 2
+        || trace_id.len() != 32
+        || parent_id.len() != 16
+        || flags.len() != 2
+        || trace_id.bytes().all(|byte| byte == b'0')
+        || !trace_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !version.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !parent_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !flags.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some(trace_id.to_ascii_lowercase())
+}
+
+fn route_affinity_hash_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(GATEWAY_SESSION_ID_HEADER)
+        .or_else(|| headers.get(SESSION_ID_HEADER))
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| is_safe_route_affinity_key(value))
+        .map(route_affinity_hash)
+}
+
+fn is_safe_route_affinity_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+fn route_affinity_hash(value: &str) -> String {
+    format!("sha256:{}", sha256_hex(value.as_bytes()))
 }
 
 #[derive(Debug, Serialize)]
@@ -2584,6 +2744,35 @@ struct AdminAuditEventListQuery {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+struct AdminRouteDecisionListQuery {
+    organization_id: Option<String>,
+    project_id: Option<String>,
+    principal_id: Option<String>,
+    actor_id: Option<String>,
+    api_key_id: Option<String>,
+    request_id: Option<String>,
+    trace_id: Option<String>,
+    protocol_family: Option<String>,
+    status: Option<String>,
+    model_alias_id: Option<String>,
+    model_target_id: Option<String>,
+    provider_endpoint_id: Option<String>,
+    limit: Option<usize>,
+    cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AdminRouteAttemptListQuery {
+    route_decision_id: Option<String>,
+    status: Option<String>,
+    routing_group_id: Option<String>,
+    model_target_id: Option<String>,
+    provider_endpoint_id: Option<String>,
+    limit: Option<usize>,
+    cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 struct AdminUsageScopeQuery {
     scope_kind: Option<String>,
     scope_id: Option<String>,
@@ -3089,7 +3278,9 @@ async fn run_route_simulation(
             message: "alias_name is required".to_owned(),
         });
     }
-    let loaded_catalog = latest_catalog_for_actor(&state, &actor)?.ok_or(GatewayError::NotReady)?;
+    let loaded_catalog = latest_catalog_for_actor(&state, &actor)
+        .await?
+        .ok_or(GatewayError::NotReady)?;
     let plan = loaded_catalog
         .catalog
         .plan_runtime_route_with_hot_state(&RoutePlanRequest {
@@ -3100,6 +3291,7 @@ async fn run_route_simulation(
             hot_state: state.store(),
             config_version: Some(loaded_catalog.version),
             now,
+            route_affinity_hash: None,
         })?;
     let (status, reason, selected) = match plan.outcome {
         RoutePlanOutcome::Selected(selection) => (
@@ -3149,8 +3341,253 @@ fn route_simulation_selected_body(selection: &RouteSelection) -> Value {
         "provider_endpoint_id": &selection.provider_endpoint.provider_endpoint_id,
         "provider_kind": &selection.provider_endpoint.provider_kind,
         "upstream_credential_id": &selection.upstream_credential_id,
+        "sticky_hit": selection.sticky_hit,
+        "sticky_miss_reason": &selection.sticky_miss_reason,
         "filtered_summary": &selection.filtered_summary
     })
+}
+
+async fn record_route_decision_evidence(
+    state: &AppState,
+    record: RouteDecisionRecord,
+) -> Result<()> {
+    state.store.record_route_decision(record.clone());
+    if let Some(store) = state.postgres_store.as_ref() {
+        store.insert_route_decision(&record).await?;
+    }
+    Ok(())
+}
+
+async fn record_route_attempt_evidence(state: &AppState, record: RouteAttemptRecord) -> Result<()> {
+    state.store.record_route_attempt(record.clone());
+    if let Some(store) = state.postgres_store.as_ref() {
+        store.insert_route_attempt(&record).await?;
+    }
+    Ok(())
+}
+
+async fn route_decision_evidence_for_tenant(
+    state: &AppState,
+    tenant_id: &str,
+) -> Result<Vec<RouteDecisionRecord>> {
+    if let Some(store) = state.postgres_store.as_ref() {
+        store
+            .route_decisions_for_tenant(tenant_id, ROUTE_EVIDENCE_DURABLE_SCAN_LIMIT)
+            .await
+    } else {
+        Ok(state
+            .store
+            .route_decisions()
+            .into_iter()
+            .filter(|decision| decision.tenant_id == tenant_id)
+            .collect())
+    }
+}
+
+async fn route_attempt_evidence_for_tenant(
+    state: &AppState,
+    tenant_id: &str,
+) -> Result<Vec<RouteAttemptRecord>> {
+    if let Some(store) = state.postgres_store.as_ref() {
+        store
+            .route_attempts_for_tenant(tenant_id, ROUTE_EVIDENCE_DURABLE_SCAN_LIMIT)
+            .await
+    } else {
+        let decision_ids = state
+            .store
+            .route_decisions()
+            .into_iter()
+            .filter(|decision| decision.tenant_id == tenant_id)
+            .map(|decision| decision.route_decision_id)
+            .collect::<HashSet<_>>();
+        Ok(state
+            .store
+            .route_attempts()
+            .into_iter()
+            .filter(|attempt| decision_ids.contains(&attempt.route_decision_id))
+            .collect())
+    }
+}
+
+async fn list_route_decisions(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Query(query): Query<AdminRouteDecisionListQuery>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_ROUTE_DECISION_LIST_PATH,
+        &actor.tenant_id,
+        now,
+    )?;
+    let limit = route_evidence_list_limit(query.limit)?;
+    let offset = route_evidence_list_offset(query.cursor.as_deref())?;
+    let mut decisions = route_decision_evidence_for_tenant(&state, &actor.tenant_id)
+        .await?
+        .into_iter()
+        .filter(|decision| route_decision_matches_query(decision, &query))
+        .collect::<Vec<_>>();
+    decisions.sort_by(|left, right| {
+        right
+            .occurred_at
+            .cmp(&left.occurred_at)
+            .then_with(|| right.route_decision_id.cmp(&left.route_decision_id))
+    });
+    let total_filtered_count = decisions.len();
+    let page = decisions
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .map(route_decision_body)
+        .collect::<Vec<_>>();
+    let next_offset = offset.saturating_add(page.len());
+    let next_cursor = (next_offset < total_filtered_count).then(|| next_offset.to_string());
+    Ok(Json(json!({
+        "schema": "gateway.admin.route_decision_list.v1",
+        "route_decisions": page,
+        "limit": limit,
+        "cursor": query.cursor,
+        "next_cursor": next_cursor,
+        "total_filtered_count": total_filtered_count
+    })))
+}
+
+async fn get_route_decision(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(route_decision_id): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_ROUTE_DECISION_GET_PATH,
+        &route_decision_id,
+        now,
+    )?;
+    let decision = route_decision_evidence_for_tenant(&state, &actor.tenant_id)
+        .await?
+        .into_iter()
+        .find(|decision| decision.route_decision_id == route_decision_id)
+        .ok_or_else(|| GatewayError::NotFound {
+            resource: format!("route decision {route_decision_id}"),
+        })?;
+    let attempts = route_attempt_evidence_for_tenant(&state, &actor.tenant_id)
+        .await?
+        .into_iter()
+        .filter(|attempt| attempt.route_decision_id == decision.route_decision_id)
+        .map(|attempt| route_attempt_body(&attempt, &decision))
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "schema": "gateway.admin.route_decision.v1",
+        "route_decision": route_decision_body(&decision),
+        "attempts": attempts
+    })))
+}
+
+async fn list_route_attempts(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Query(query): Query<AdminRouteAttemptListQuery>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_ROUTE_ATTEMPT_LIST_PATH,
+        &actor.tenant_id,
+        now,
+    )?;
+    let limit = route_evidence_list_limit(query.limit)?;
+    let offset = route_evidence_list_offset(query.cursor.as_deref())?;
+    let decisions = route_decision_evidence_for_tenant(&state, &actor.tenant_id)
+        .await?
+        .into_iter()
+        .map(|decision| (decision.route_decision_id.clone(), decision))
+        .collect::<HashMap<_, _>>();
+    let mut attempts = route_attempt_evidence_for_tenant(&state, &actor.tenant_id)
+        .await?
+        .into_iter()
+        .filter_map(|attempt| {
+            decisions
+                .get(&attempt.route_decision_id)
+                .filter(|decision| route_attempt_matches_query(&attempt, decision, &query))
+                .map(|decision| (attempt, decision.clone()))
+        })
+        .collect::<Vec<_>>();
+    attempts.sort_by(
+        |(left_attempt, left_decision), (right_attempt, right_decision)| {
+            right_attempt
+                .started_at
+                .cmp(&left_attempt.started_at)
+                .then_with(|| {
+                    right_decision
+                        .route_decision_id
+                        .cmp(&left_decision.route_decision_id)
+                })
+                .then_with(|| {
+                    right_attempt
+                        .route_attempt_event_id
+                        .cmp(&left_attempt.route_attempt_event_id)
+                })
+        },
+    );
+    let total_filtered_count = attempts.len();
+    let page = attempts
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .map(|(attempt, decision)| route_attempt_body(attempt, decision))
+        .collect::<Vec<_>>();
+    let next_offset = offset.saturating_add(page.len());
+    let next_cursor = (next_offset < total_filtered_count).then(|| next_offset.to_string());
+    Ok(Json(json!({
+        "schema": "gateway.admin.route_attempt_list.v1",
+        "route_attempts": page,
+        "limit": limit,
+        "cursor": query.cursor,
+        "next_cursor": next_cursor,
+        "total_filtered_count": total_filtered_count
+    })))
+}
+
+async fn get_route_attempt(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(route_attempt_event_id): Path<String>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::GET,
+        ADMIN_ROUTE_ATTEMPT_GET_PATH,
+        &route_attempt_event_id,
+        now,
+    )?;
+    let attempts = route_attempt_evidence_for_tenant(&state, &actor.tenant_id).await?;
+    let attempt = attempts
+        .into_iter()
+        .find(|attempt| attempt.route_attempt_event_id == route_attempt_event_id)
+        .ok_or_else(|| GatewayError::NotFound {
+            resource: format!("route attempt {route_attempt_event_id}"),
+        })?;
+    let decision = route_decision_evidence_for_tenant(&state, &actor.tenant_id)
+        .await?
+        .into_iter()
+        .find(|decision| decision.route_decision_id == attempt.route_decision_id)
+        .ok_or_else(|| GatewayError::NotFound {
+            resource: format!("route attempt {route_attempt_event_id}"),
+        })?;
+    Ok(Json(json!({
+        "schema": "gateway.admin.route_attempt.v1",
+        "route_attempt": route_attempt_body(&attempt, &decision)
+    })))
 }
 
 async fn list_audit_events(
@@ -9644,6 +10081,7 @@ async fn accept_auth_invitation(
         session.principal_id.clone(),
         session.auth_session_id.clone(),
         request_id_from_headers(&headers),
+        trace_id_from_headers(&headers),
         Some(session.expires_at),
     );
     let audit_event_id = record_admin_resource_audit(
@@ -11017,16 +11455,20 @@ async fn model_ingress(
     let path = parts.uri.path().to_owned();
     let replay_case = replay_case_for_request(&method, &path)?;
     let actor = authenticated_actor_from_extensions(&parts.extensions)?;
-    let body_bytes = to_bytes(body, state.config.max_body_bytes)
-        .await
-        .map_err(|error| GatewayError::BadRequest {
-            message: format!("failed to read request body: {error}"),
-        })?;
-    let request_body_bytes = body_bytes.len();
-    let body = request_body_from_bytes(&body_bytes)?;
+    let (request_body_bytes, body) =
+        runtime_request_body(body, state.config.max_body_bytes).await?;
     let requested_model = requested_resource_id(&body, &path);
-    let route_target = runtime_route_target(&state, &actor, replay_case, &requested_model)?;
-    let (engine, policy_snapshot_id) = authorization_engine_for_actor(&state, &actor)?;
+    let route_affinity_hash = route_affinity_hash_from_headers(&parts.headers);
+    let route_target = runtime_route_target(
+        &state,
+        &actor,
+        replay_case,
+        &requested_model,
+        route_affinity_hash.as_deref(),
+    )
+    .await?;
+    let (engine, policy_snapshot_id) =
+        runtime_authorization_engine_for_actor(&state, &actor).await?;
     let attempt_started_at = chrono::Utc::now();
     let provider_target = FakeProviderReplayTarget {
         alias_resource_id: route_target.authorization_resource_id.clone(),
@@ -11065,10 +11507,13 @@ async fn model_ingress(
                 &requested_model,
                 &route_target,
                 &error,
-            );
+            )
+            .await?;
             return Err(error);
         }
     };
+    let _provider_request_metadata =
+        runtime_provider_adapter_metadata(&state, replay_case, &route_target, &body)?;
     let response =
         fake_provider_response_for_authorization(&authorization, &provider_target, &body);
     if let (Some(route_decision_id), Some(selected)) = (
@@ -11076,14 +11521,14 @@ async fn model_ingress(
         route_target.selected_route.as_ref(),
     ) {
         let attempt_ended_at = chrono::Utc::now();
-        state
-            .store
-            .record_route_attempt(RouteAttemptRecord::completed(
-                route_decision_id,
-                selected,
-                attempt_started_at,
-                attempt_ended_at,
-            ));
+        record_completed_route_attempt_evidence(
+            &state,
+            route_decision_id,
+            selected,
+            attempt_started_at,
+            attempt_ended_at,
+        )
+        .await?;
         record_terminal_usage_event(
             &state,
             &actor,
@@ -11100,6 +11545,72 @@ async fn model_ingress(
     }
     release_runtime_policy_reservations(&state, &preflight);
     Ok(Json(response))
+}
+
+async fn runtime_request_body(body: Body, max_body_bytes: usize) -> Result<(usize, Value)> {
+    let body_bytes =
+        to_bytes(body, max_body_bytes)
+            .await
+            .map_err(|error| GatewayError::BadRequest {
+                message: format!("failed to read request body: {error}"),
+            })?;
+    let request_body_bytes = body_bytes.len();
+    let body = request_body_from_bytes(&body_bytes)?;
+    Ok((request_body_bytes, body))
+}
+
+fn runtime_provider_adapter_metadata(
+    state: &AppState,
+    replay_case: &GatewayReplayCase,
+    route_target: &RuntimeRouteTarget,
+    body: &Value,
+) -> Result<Option<ProviderAdapterRequestMetadata>> {
+    let Some(provider_endpoint) = route_target.provider_endpoint.clone() else {
+        return Ok(None);
+    };
+    let upstream_credential = route_target
+        .upstream_credential_id
+        .as_deref()
+        .and_then(|credential_id| state.store.upstream_credential(credential_id))
+        .and_then(|credential| {
+            state
+                .store
+                .secret_value(&credential.secret_ref_id)
+                .map(|secret_value| ProviderAdapterCredential {
+                    upstream_credential_id: credential.upstream_credential_id,
+                    credential_kind: credential.credential_kind,
+                    secret_value,
+                })
+        });
+    let request = build_provider_adapter_request(
+        &ProviderAdapterTarget {
+            protocol_family: replay_case.protocol_family,
+            provider_endpoint,
+            upstream_model_id: route_target.upstream_model_id.clone(),
+            upstream_credential,
+        },
+        body,
+    )?;
+    Ok(Some(request.into_safe_metadata()))
+}
+
+async fn record_completed_route_attempt_evidence(
+    state: &AppState,
+    route_decision_id: &str,
+    selected: &SelectedRouteEvidence,
+    attempt_started_at: chrono::DateTime<chrono::Utc>,
+    attempt_ended_at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    record_route_attempt_evidence(
+        state,
+        RouteAttemptRecord::completed(
+            route_decision_id,
+            selected,
+            attempt_started_at,
+            attempt_ended_at,
+        ),
+    )
+    .await
 }
 
 struct TerminalUsageInput<'a> {
@@ -11173,6 +11684,7 @@ fn record_terminal_usage_event(
         service_account_id,
         api_key_id: actor.api_key_id.clone(),
         request_id: actor.request_id.clone(),
+        trace_id: actor.trace_id.clone(),
         protocol_family: input.replay_case.protocol_family,
         route_decision_id: Some(input.route_decision_id.to_owned()),
         model_alias_id: Some(input.selected.model_alias_id.clone()),
@@ -12284,6 +12796,7 @@ fn record_runtime_budget_lease_expiry_audit(
         actor_kind: ActorKind::System,
         principal_id: None,
         request_id: format!("req_runtime_policy_reconcile_{worker_id}"),
+        trace_id: format!("tr_runtime_policy_reconcile_{worker_id}"),
         redacted_diff: json!({
             "schema": "gateway.runtime_policy.budget_lease_expiry.v1",
             "repair_action": "expire_budget_lease",
@@ -12420,6 +12933,7 @@ fn record_runtime_policy_reconciliation_audit(
         actor_kind: ActorKind::System,
         principal_id: None,
         request_id: format!("req_runtime_policy_reconcile_{worker_id}"),
+        trace_id: format!("tr_runtime_policy_reconcile_{worker_id}"),
         redacted_diff: json!({
             "schema": "gateway.runtime_policy.reconciliation_repair.v1",
             "repair_action": "increase_hot_counter",
@@ -12447,18 +12961,18 @@ fn record_runtime_policy_reconciliation_audit(
     });
 }
 
-fn record_runtime_policy_block_decision(
+async fn record_runtime_policy_block_decision(
     state: &AppState,
     actor: &AuthenticatedActor,
     replay_case: &GatewayReplayCase,
     requested_model: &str,
     route_target: &RuntimeRouteTarget,
     error: &GatewayError,
-) {
+) -> Result<()> {
     let reason = match error {
         GatewayError::BudgetExceeded { .. } => "budget_exceeded",
         GatewayError::QuotaExceeded { .. } => "quota_exceeded",
-        _ => return,
+        _ => return Ok(()),
     };
     let now = chrono::Utc::now();
     let decision_request =
@@ -12475,16 +12989,18 @@ fn record_runtime_policy_block_decision(
         .selected_route
         .as_ref()
         .map_or_else(Vec::new, |route| route.filtered_summary.clone());
-    state
-        .store
-        .record_route_decision(RouteDecisionRecord::terminal(
+    record_route_decision_evidence(
+        state,
+        RouteDecisionRecord::terminal(
             actor,
             decision_request,
             RouteDecisionStatus::Blocked,
             reason,
             filtered_summary,
             now,
-        ));
+        ),
+    )
+    .await?;
     enqueue_runtime_policy_notification_events(
         state,
         actor,
@@ -12494,6 +13010,7 @@ fn record_runtime_policy_block_decision(
         error,
         now,
     );
+    Ok(())
 }
 
 fn enqueue_runtime_policy_notification_events(
@@ -13762,7 +14279,36 @@ fn authorization_engine_for_actor(
     state: &AppState,
     actor: &AuthenticatedActor,
 ) -> Result<(Box<dyn AuthorizationEngine>, Option<String>)> {
-    let Some(snapshot) = latest_snapshot_for_actor(state, actor)? else {
+    let Some(snapshot) = latest_snapshot_for_actor_in_memory(state, actor)? else {
+        return Ok((
+            Box::new(FoundationAuthorizationEngine::new(
+                state.store.action_grants(),
+            )),
+            None,
+        ));
+    };
+    let Some(policy_bundle) = snapshot
+        .document
+        .payload
+        .get("cedar_policy_bundle")
+        .and_then(Value::as_str)
+    else {
+        return Ok((
+            Box::new(FoundationAuthorizationEngine::new(
+                state.store.action_grants(),
+            )),
+            None,
+        ));
+    };
+    let engine = CedarAuthorizationEngine::from_policy_source(policy_bundle)?;
+    Ok((Box::new(engine), Some(snapshot.metadata.snapshot_id)))
+}
+
+async fn runtime_authorization_engine_for_actor(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+) -> Result<(Box<dyn AuthorizationEngine>, Option<String>)> {
+    let Some(snapshot) = latest_snapshot_for_actor(state, actor).await? else {
         return Ok((
             Box::new(FoundationAuthorizationEngine::new(
                 state.store.action_grants(),
@@ -13796,13 +14342,26 @@ fn replay_case_for_request(method: &Method, path: &str) -> Result<&'static Gatew
         })
 }
 
-fn authenticate_request(
+async fn authenticate_request(
     state: &AppState,
     headers: &HeaderMap,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<AuthenticatedActor> {
     let request_id = request_id_from_headers(headers);
+    let trace_id = trace_id_from_headers(headers);
     let presented_key = bearer_token(headers)?;
+    if let Some(store) = state.postgres_store.as_ref() {
+        return authenticate_request_with_postgres(
+            state,
+            store,
+            headers,
+            presented_key,
+            request_id,
+            trace_id,
+            now,
+        )
+        .await;
+    }
     if presented_key.starts_with(SESSION_TOKEN_PREFIX) {
         let session = verify_session_token(state.store(), presented_key, now)?;
         let project_id = optional_header(headers, PROJECT_ID_HEADER)?
@@ -13815,11 +14374,135 @@ fn authenticate_request(
                 session_id: session.auth_session_id,
                 project_id,
                 request_id,
+                trace_id,
                 expires_at: Some(session.expires_at),
             },
         );
     }
-    verify_api_key(state.store(), presented_key, request_id, now)
+    verify_api_key(state.store(), presented_key, request_id, trace_id, now)
+}
+
+async fn authenticate_request_with_postgres(
+    state: &AppState,
+    store: &PostgresGatewayStore,
+    headers: &HeaderMap,
+    presented_key: &str,
+    request_id: String,
+    trace_id: String,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<AuthenticatedActor> {
+    if presented_key.starts_with(SESSION_TOKEN_PREFIX) {
+        let session = verify_session_token_with_postgres(store, presented_key, now).await?;
+        let project_id = optional_header(headers, PROJECT_ID_HEADER)?
+            .or_else(|| session.active_project_id.clone())
+            .ok_or(GatewayError::Authentication)?;
+        return resolve_user_session_actor_with_postgres(
+            store,
+            ResolveUserSessionRequest {
+                principal_id: session.principal_id,
+                session_id: session.auth_session_id,
+                project_id,
+                request_id,
+                trace_id,
+                expires_at: Some(session.expires_at),
+            },
+        )
+        .await;
+    }
+    verify_api_key_with_postgres(state, store, presented_key, request_id, trace_id, now).await
+}
+
+async fn verify_session_token_with_postgres(
+    store: &PostgresGatewayStore,
+    presented_token: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<AuthSessionRecord> {
+    if !presented_token.is_ascii() || !presented_token.starts_with(SESSION_TOKEN_PREFIX) {
+        return Err(GatewayError::Authentication);
+    }
+    let presented_hash = session_token_hash(presented_token);
+    let Some(session) = store.auth_session_by_hash(&presented_hash).await? else {
+        return Err(GatewayError::Authentication);
+    };
+    if !constant_time_eq(session.session_hash.as_bytes(), presented_hash.as_bytes())
+        || !session.can_authenticate_at(now)
+    {
+        return Err(GatewayError::Authentication);
+    }
+    Ok(session)
+}
+
+async fn resolve_user_session_actor_with_postgres(
+    store: &PostgresGatewayStore,
+    request: ResolveUserSessionRequest,
+) -> Result<AuthenticatedActor> {
+    let Some(membership) = store
+        .project_membership_for_principal(&request.principal_id, &request.project_id)
+        .await?
+    else {
+        return Err(GatewayError::Authorization {
+            reason: "user_project_membership_required",
+        });
+    };
+    if !membership.accepts_access() {
+        return Err(GatewayError::Authorization {
+            reason: "project_membership_inactive",
+        });
+    }
+    Ok(AuthenticatedActor::for_user_session(
+        ActorScope::from_project_membership(&membership),
+        request.principal_id,
+        request.session_id,
+        request.request_id,
+        request.trace_id,
+        request.expires_at,
+    ))
+}
+
+async fn verify_api_key_with_postgres(
+    state: &AppState,
+    store: &PostgresGatewayStore,
+    presented_key: &str,
+    request_id: String,
+    trace_id: String,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<AuthenticatedActor> {
+    let prefix = key_prefix(presented_key)?;
+    if !state.store.api_key_failed_auth_allowed(&prefix, now) {
+        return Err(GatewayError::Authentication);
+    }
+    let candidates = store.api_key_candidates_by_prefix(&prefix).await?;
+    if candidates.is_empty() {
+        state.store.record_api_key_failed_auth(&prefix, now);
+        return Err(GatewayError::Authentication);
+    }
+
+    for candidate in candidates {
+        if !constant_time_eq(candidate.key_prefix.as_bytes(), prefix.as_bytes()) {
+            continue;
+        }
+        if !candidate.can_authenticate_at(now) {
+            continue;
+        }
+        if verify_secret(presented_key, &candidate.secret_hash)? {
+            let update = crate::storage::ApiKeyLastUsedUpdate {
+                tenant_id: candidate.tenant_id.clone(),
+                api_key_id: candidate.api_key_id.clone(),
+                key_prefix: prefix.clone(),
+                request_id: request_id.clone(),
+                used_at: now,
+            };
+            store
+                .flush_api_key_last_used_updates(std::slice::from_ref(&update))
+                .await?;
+            state.store.record_api_key_last_used(update);
+            return Ok(AuthenticatedActor::for_api_key(
+                &candidate, request_id, trace_id,
+            ));
+        }
+    }
+    state.store.record_api_key_failed_auth(&prefix, now);
+    Err(GatewayError::Authentication)
 }
 
 fn authenticated_actor_from_extensions(extensions: &Extensions) -> Result<AuthenticatedActor> {
@@ -14069,6 +14752,7 @@ fn record_config_snapshot_audit(
         actor_kind: actor.actor_kind.clone(),
         principal_id: actor.principal_id.clone(),
         request_id: actor.request_id.clone(),
+        trace_id: actor.trace_id.clone(),
         redacted_diff: input.redacted_diff,
         occurred_at: input.occurred_at,
     });
@@ -14097,6 +14781,7 @@ fn record_project_audit(
         actor_kind: actor.actor_kind.clone(),
         principal_id: actor.principal_id.clone(),
         request_id: actor.request_id.clone(),
+        trace_id: actor.trace_id.clone(),
         redacted_diff: input.redacted_diff,
         occurred_at: input.occurred_at,
     });
@@ -14125,6 +14810,7 @@ fn record_admin_resource_audit(
         actor_kind: actor.actor_kind.clone(),
         principal_id: actor.principal_id.clone(),
         request_id: actor.request_id.clone(),
+        trace_id: actor.trace_id.clone(),
         redacted_diff: input.redacted_diff,
         occurred_at: input.occurred_at,
     });
@@ -16885,6 +17571,149 @@ fn validation_diagnostic_body(record: &ValidationDiagnosticRecord) -> Value {
     })
 }
 
+fn route_decision_body(record: &RouteDecisionRecord) -> Value {
+    json!({
+        "kind": "route_decision",
+        "id": &record.route_decision_id,
+        "route_decision_id": &record.route_decision_id,
+        "tenant_id": &record.tenant_id,
+        "organization_id": &record.organization_id,
+        "project_id": &record.project_id,
+        "principal_id": &record.principal_id,
+        "api_key_id": &record.api_key_id,
+        "actor_id": &record.actor_id,
+        "actor_kind": record.actor_kind.as_str(),
+        "request_id": &record.request_id,
+        "trace_id": &record.trace_id,
+        "protocol_family": record.protocol_family.as_str(),
+        "config_snapshot_id": &record.config_snapshot_id,
+        "config_version": record.config_version,
+        "model_alias_id": &record.model_alias_id,
+        "alias_name": &record.alias_name,
+        "route_policy_id": &record.route_policy_id,
+        "routing_group_id": &record.routing_group_id,
+        "model_target_id": &record.model_target_id,
+        "provider_endpoint_id": &record.provider_endpoint_id,
+        "upstream_credential_id": &record.upstream_credential_id,
+        "filtered_summary": &record.filtered_summary,
+        "sticky_hit": record.sticky_hit,
+        "sticky_miss_reason": &record.sticky_miss_reason,
+        "status": record.status.as_str(),
+        "reason": &record.reason,
+        "occurred_at": record.occurred_at
+    })
+}
+
+fn route_attempt_body(attempt: &RouteAttemptRecord, decision: &RouteDecisionRecord) -> Value {
+    json!({
+        "kind": "route_attempt",
+        "id": &attempt.route_attempt_event_id,
+        "route_attempt_event_id": &attempt.route_attempt_event_id,
+        "route_decision_id": &attempt.route_decision_id,
+        "tenant_id": &decision.tenant_id,
+        "organization_id": &decision.organization_id,
+        "project_id": &decision.project_id,
+        "principal_id": &decision.principal_id,
+        "api_key_id": &decision.api_key_id,
+        "request_id": &decision.request_id,
+        "trace_id": &decision.trace_id,
+        "protocol_family": decision.protocol_family.as_str(),
+        "attempt_index": attempt.attempt_index,
+        "routing_group_id": &attempt.routing_group_id,
+        "model_target_id": &attempt.model_target_id,
+        "provider_endpoint_id": &attempt.provider_endpoint_id,
+        "status": attempt.status.as_str(),
+        "started_at": attempt.started_at,
+        "ended_at": attempt.ended_at
+    })
+}
+
+fn route_decision_matches_query(
+    record: &RouteDecisionRecord,
+    query: &AdminRouteDecisionListQuery,
+) -> bool {
+    matches_optional_filter(
+        query.organization_id.as_ref(),
+        record.organization_id.as_deref(),
+    ) && matches_optional_filter(query.project_id.as_ref(), record.project_id.as_deref())
+        && matches_optional_filter(query.principal_id.as_ref(), record.principal_id.as_deref())
+        && matches_optional_filter(query.actor_id.as_ref(), Some(record.actor_id.as_str()))
+        && matches_optional_filter(query.api_key_id.as_ref(), record.api_key_id.as_deref())
+        && matches_optional_filter(query.request_id.as_ref(), Some(record.request_id.as_str()))
+        && matches_optional_filter(query.trace_id.as_ref(), Some(record.trace_id.as_str()))
+        && matches_optional_filter(
+            query.protocol_family.as_ref(),
+            Some(record.protocol_family.as_str()),
+        )
+        && matches_optional_filter(query.status.as_ref(), Some(record.status.as_str()))
+        && matches_optional_filter(
+            query.model_alias_id.as_ref(),
+            record.model_alias_id.as_deref(),
+        )
+        && matches_optional_filter(
+            query.model_target_id.as_ref(),
+            record.model_target_id.as_deref(),
+        )
+        && matches_optional_filter(
+            query.provider_endpoint_id.as_ref(),
+            record.provider_endpoint_id.as_deref(),
+        )
+}
+
+fn route_attempt_matches_query(
+    attempt: &RouteAttemptRecord,
+    decision: &RouteDecisionRecord,
+    query: &AdminRouteAttemptListQuery,
+) -> bool {
+    matches_optional_filter(
+        query.route_decision_id.as_ref(),
+        Some(attempt.route_decision_id.as_str()),
+    ) && matches_optional_filter(query.status.as_ref(), Some(attempt.status.as_str()))
+        && matches_optional_filter(
+            query.routing_group_id.as_ref(),
+            Some(attempt.routing_group_id.as_str()),
+        )
+        && matches_optional_filter(
+            query.model_target_id.as_ref(),
+            Some(attempt.model_target_id.as_str()),
+        )
+        && matches_optional_filter(
+            query.provider_endpoint_id.as_ref(),
+            Some(attempt.provider_endpoint_id.as_str()),
+        )
+        && decision.route_decision_id == attempt.route_decision_id
+}
+
+fn route_evidence_list_limit(limit: Option<usize>) -> Result<usize> {
+    const DEFAULT_LIMIT: usize = 50;
+    const MAX_LIMIT: usize = 200;
+    match limit.unwrap_or(DEFAULT_LIMIT) {
+        0 => Err(GatewayError::BadRequest {
+            message: "route_evidence_limit_must_be_positive".to_owned(),
+        }),
+        value if value > MAX_LIMIT => Err(GatewayError::BadRequest {
+            message: "route_evidence_limit_exceeds_maximum".to_owned(),
+        }),
+        value => Ok(value),
+    }
+}
+
+fn route_evidence_list_offset(cursor: Option<&str>) -> Result<usize> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    if cursor.trim().is_empty() {
+        return Err(GatewayError::BadRequest {
+            message: "route_evidence_cursor_invalid".to_owned(),
+        });
+    }
+    cursor
+        .parse::<usize>()
+        .map_err(|_| GatewayError::BadRequest {
+            message: "route_evidence_cursor_invalid".to_owned(),
+        })
+}
+
 fn audit_event_body(record: &AuditEventRecord) -> Value {
     json!({
         "kind": "audit_event",
@@ -16904,6 +17733,7 @@ fn audit_event_body(record: &AuditEventRecord) -> Value {
         "actor_kind": record.actor_kind.as_str(),
         "principal_id": &record.principal_id,
         "request_id": &record.request_id,
+        "trace_id": &record.trace_id,
         "redacted_diff": &record.redacted_diff,
         "occurred_at": record.occurred_at
     })
@@ -18438,6 +19268,7 @@ fn record_external_login_audit(
         actor_kind: ActorKind::User,
         principal_id: Some(user.user_id.clone()),
         request_id: new_prefixed_id("req"),
+        trace_id: new_prefixed_id("tr"),
         redacted_diff: json!({
             "login_provider_id": &provider.login_provider_id,
             "provider_kind": &provider.provider_kind,
@@ -19875,6 +20706,7 @@ fn usage_event_body(event: &UsageEventRecord) -> Value {
         "service_account_id": &event.service_account_id,
         "api_key_id": &event.api_key_id,
         "request_id": &event.request_id,
+        "trace_id": &event.trace_id,
         "protocol_family": event.protocol_family.as_str(),
         "route_decision_id": &event.route_decision_id,
         "model_alias_id": &event.model_alias_id,
@@ -19930,6 +20762,8 @@ struct DashboardRouteRollup {
     success_count: usize,
     error_count: usize,
     attempt_count: usize,
+    sticky_hit_count: usize,
+    sticky_miss_count: usize,
     latest_decision_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -19968,6 +20802,14 @@ fn dashboard_route_rollup(state: &AppState, scope: &DashboardScopeInput) -> Dash
         .iter()
         .filter(|attempt| attempt.status == RouteAttemptStatus::Failed)
         .count();
+    let sticky_hit_count = decisions
+        .iter()
+        .filter(|decision| decision.sticky_hit)
+        .count();
+    let sticky_miss_count = decisions
+        .iter()
+        .filter(|decision| decision.sticky_miss_reason.is_some())
+        .count();
     DashboardRouteRollup {
         request_count,
         blocked_count,
@@ -19975,6 +20817,8 @@ fn dashboard_route_rollup(state: &AppState, scope: &DashboardScopeInput) -> Dash
         success_count,
         error_count,
         attempt_count: attempts.len(),
+        sticky_hit_count,
+        sticky_miss_count,
         latest_decision_at,
     }
 }
@@ -20017,6 +20861,8 @@ fn dashboard_measures_body(
         "blocked_count": route_rollup.blocked_count,
         "no_route_count": route_rollup.no_route_count,
         "attempt_count": route_rollup.attempt_count,
+        "sticky_hit_count": route_rollup.sticky_hit_count,
+        "sticky_miss_count": route_rollup.sticky_miss_count,
         "input_tokens": usage_rollup.input_tokens_if_available(),
         "output_tokens": usage_rollup.output_tokens_if_available(),
         "reasoning_tokens": usage_rollup.reasoning_tokens_if_available(),
@@ -20481,21 +21327,26 @@ fn resource_id_from_path(path: &str) -> String {
 struct RuntimeRouteTarget {
     authorization_resource_id: String,
     upstream_model_id: String,
+    provider_endpoint: Option<ProviderEndpoint>,
+    upstream_credential_id: Option<String>,
     route_decision_id: Option<String>,
     selected_route: Option<SelectedRouteEvidence>,
     decision_request: Option<RouteDecisionRequest>,
 }
 
-fn runtime_route_target(
+async fn runtime_route_target(
     state: &AppState,
     actor: &AuthenticatedActor,
     replay_case: &GatewayReplayCase,
     requested_model: &str,
+    route_affinity_hash: Option<&str>,
 ) -> Result<RuntimeRouteTarget> {
-    let Some(loaded_catalog) = latest_catalog_for_actor(state, actor)? else {
+    let Some(loaded_catalog) = latest_catalog_for_actor(state, actor).await? else {
         return Ok(RuntimeRouteTarget {
             authorization_resource_id: requested_model.to_owned(),
             upstream_model_id: requested_model.to_owned(),
+            provider_endpoint: None,
+            upstream_credential_id: None,
             route_decision_id: None,
             selected_route: None,
             decision_request: None,
@@ -20517,65 +21368,128 @@ fn runtime_route_target(
             hot_state: state.store(),
             config_version: Some(loaded_catalog.version),
             now: chrono::Utc::now(),
+            route_affinity_hash,
         })?;
     match plan.outcome {
         RoutePlanOutcome::Selected(selection) => {
-            let selected_evidence = SelectedRouteEvidence {
-                model_alias_id: selection.model_alias_id.clone(),
-                route_policy_id: selection.route_policy_id.clone(),
-                routing_group_id: selection.routing_group_id.clone(),
-                model_target_id: selection.model_target_id.clone(),
-                provider_endpoint_id: selection.provider_endpoint.provider_endpoint_id.clone(),
-                upstream_credential_id: selection.upstream_credential_id.clone(),
-                filtered_summary: selection.filtered_summary.clone(),
-            };
-            let decision = RouteDecisionRecord::selected(
+            selected_runtime_route_target(
+                state,
                 actor,
-                decision_request.clone(),
-                selected_evidence.clone(),
-                chrono::Utc::now(),
-            );
-            let route_decision_id = decision.route_decision_id.clone();
-            state.store.record_route_decision(decision);
-            Ok(RuntimeRouteTarget {
-                authorization_resource_id: selection.model_alias_id,
-                upstream_model_id: selection.upstream_model_id,
-                route_decision_id: Some(route_decision_id),
-                selected_route: Some(selected_evidence),
-                decision_request: Some(decision_request),
-            })
+                decision_request,
+                *selection,
+                loaded_catalog.version,
+                route_affinity_hash,
+            )
+            .await
         }
         RoutePlanOutcome::ProviderGrantDenied => {
-            state
-                .store
-                .record_route_decision(RouteDecisionRecord::terminal(
+            record_route_decision_evidence(
+                state,
+                RouteDecisionRecord::terminal(
                     actor,
                     decision_request,
                     RouteDecisionStatus::Blocked,
                     "provider_grant_denied",
                     plan.filtered_summary,
                     chrono::Utc::now(),
-                ));
+                ),
+            )
+            .await?;
             Err(GatewayError::Authorization {
                 reason: "provider_grant_denied",
             })
         }
         RoutePlanOutcome::NoRoute => {
-            state
-                .store
-                .record_route_decision(RouteDecisionRecord::terminal(
+            record_route_decision_evidence(
+                state,
+                RouteDecisionRecord::terminal(
                     actor,
                     decision_request,
                     RouteDecisionStatus::NoRoute,
                     "no_eligible_model_target",
                     plan.filtered_summary,
                     chrono::Utc::now(),
-                ));
+                ),
+            )
+            .await?;
             Err(GatewayError::NoRoute {
                 reason: "no_eligible_model_target",
             })
         }
     }
+}
+
+async fn selected_runtime_route_target(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    decision_request: RouteDecisionRequest,
+    selection: RouteSelection,
+    config_version: i64,
+    route_affinity_hash: Option<&str>,
+) -> Result<RuntimeRouteTarget> {
+    let selected_evidence = SelectedRouteEvidence {
+        model_alias_id: selection.model_alias_id.clone(),
+        route_policy_id: selection.route_policy_id.clone(),
+        routing_group_id: selection.routing_group_id.clone(),
+        model_target_id: selection.model_target_id.clone(),
+        provider_endpoint_id: selection.provider_endpoint.provider_endpoint_id.clone(),
+        upstream_credential_id: selection.upstream_credential_id.clone(),
+        filtered_summary: selection.filtered_summary.clone(),
+        sticky_hit: selection.sticky_hit,
+        sticky_miss_reason: selection.sticky_miss_reason.clone(),
+    };
+    let decision = RouteDecisionRecord::selected(
+        actor,
+        decision_request.clone(),
+        selected_evidence.clone(),
+        chrono::Utc::now(),
+    );
+    let route_decision_id = decision.route_decision_id.clone();
+    record_route_decision_evidence(state, decision).await?;
+    record_sticky_route_mapping(
+        state,
+        actor,
+        &selection,
+        config_version,
+        route_affinity_hash,
+    );
+    Ok(RuntimeRouteTarget {
+        authorization_resource_id: selection.model_alias_id,
+        upstream_model_id: selection.upstream_model_id,
+        provider_endpoint: Some(selection.provider_endpoint),
+        upstream_credential_id: selection.upstream_credential_id,
+        route_decision_id: Some(route_decision_id),
+        selected_route: Some(selected_evidence),
+        decision_request: Some(decision_request),
+    })
+}
+
+fn record_sticky_route_mapping(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    selection: &RouteSelection,
+    config_version: i64,
+    route_affinity_hash: Option<&str>,
+) {
+    let Some(affinity_hash) = route_affinity_hash else {
+        return;
+    };
+    let Some(ttl_seconds) = selection.sticky_ttl_seconds else {
+        return;
+    };
+    let now = chrono::Utc::now();
+    state.store.set_sticky_route(StickyRouteRecord {
+        tenant_id: actor.tenant_id.clone(),
+        project_id: actor.project_id.clone(),
+        model_alias_id: selection.model_alias_id.clone(),
+        affinity_hash: affinity_hash.to_owned(),
+        routing_group_id: selection.routing_group_id.clone(),
+        model_target_id: selection.model_target_id.clone(),
+        provider_endpoint_id: selection.provider_endpoint.provider_endpoint_id.clone(),
+        config_version,
+        created_at: now,
+        expires_at: now + chrono::Duration::seconds(ttl_seconds),
+    });
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -20585,11 +21499,11 @@ struct LoadedCatalog {
     version: i64,
 }
 
-fn latest_catalog_for_actor(
+async fn latest_catalog_for_actor(
     state: &AppState,
     actor: &AuthenticatedActor,
 ) -> Result<Option<LoadedCatalog>> {
-    let Some(snapshot) = latest_snapshot_for_actor(state, actor)? else {
+    let Some(snapshot) = latest_snapshot_for_actor(state, actor).await? else {
         return Ok(None);
     };
     GatewayCatalogSnapshot::from_payload(&snapshot.document.payload).map(|catalog| {
@@ -20601,7 +21515,32 @@ fn latest_catalog_for_actor(
     })
 }
 
-fn latest_snapshot_for_actor(
+async fn latest_snapshot_for_actor(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+) -> Result<Option<crate::config::PublishedConfigSnapshot>> {
+    if let Some(store) = state.postgres_store.as_ref() {
+        let Some(metadata) = store
+            .latest_published_snapshot_for_tenant(&actor.tenant_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let snapshot = store
+            .config_snapshot_by_id(&metadata.snapshot_id)
+            .await?
+            .ok_or_else(|| GatewayError::Internal {
+                message: format!(
+                    "latest config snapshot {} is missing from PostgreSQL",
+                    metadata.snapshot_id
+                ),
+            })?;
+        return Ok(Some(snapshot));
+    }
+    latest_snapshot_for_actor_in_memory(state, actor)
+}
+
+fn latest_snapshot_for_actor_in_memory(
     state: &AppState,
     actor: &AuthenticatedActor,
 ) -> Result<Option<crate::config::PublishedConfigSnapshot>> {
@@ -20639,19 +21578,21 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        auth_session_csrf_token, authenticate_request, deliver_due_notifications,
+        auth_session_csrf_token, authenticate_request, build_app_state, deliver_due_notifications,
         deliver_due_notifications_with_transport, enforce_runtime_policy_preflight,
         export_payload_checksum, notification_signature, release_runtime_policy_reservations,
-        router, run_background_worker_tick_once, run_otel_exporter_once,
+        route_affinity_hash, router, run_background_worker_tick_once, run_otel_exporter_once,
         run_otel_exporter_once_with_transport, run_runtime_policy_reconciler_once,
         runtime_budget_reservation_key, runtime_quota_counter_key,
         runtime_quota_loss_allowance_key, runtime_route_target, validate_gateway_config, AppState,
         BackgroundWorkerMode, DependencyProbeMode, ExportObjectStorageHttpConfig, GatewayConfig,
         NotificationDeliveryTransport, OtelExporterTransport, SingleUserAuthConfig,
-        ADMIN_ROUTE_SIMULATION_LIST_PATH, CODEX_API_BASE_URL, CSRF_TOKEN_HEADER, PROJECT_ID_HEADER,
-        REQUEST_ID_HEADER, RUNTIME_BUDGET_LEASE_TTL_SECONDS, SESSION_TOKEN_PREFIX, SINGLE_USER_ID,
+        ADMIN_ROUTE_ATTEMPT_LIST_PATH, ADMIN_ROUTE_DECISION_LIST_PATH,
+        ADMIN_ROUTE_SIMULATION_LIST_PATH, CODEX_API_BASE_URL, CSRF_TOKEN_HEADER,
+        GATEWAY_SESSION_ID_HEADER, PROJECT_ID_HEADER, REQUEST_ID_HEADER,
+        RUNTIME_BUDGET_LEASE_TTL_SECONDS, SESSION_TOKEN_PREFIX, SINGLE_USER_ID,
         SINGLE_USER_ORGANIZATION_ID, SINGLE_USER_PROJECT_ID, SINGLE_USER_PROVIDER_ID,
-        SINGLE_USER_TENANT_ID,
+        SINGLE_USER_TENANT_ID, TRACEPARENT_HEADER, TRACE_ID_HEADER,
     };
     use crate::action::{ActionGrant, BuiltInRole};
     use crate::auth::{
@@ -20667,7 +21608,10 @@ mod tests {
     use crate::fixtures::{
         FoundationTestFixture, TEST_ORGANIZATION_ID, TEST_PROJECT_ID, TEST_TENANT_ID, TEST_USER_ID,
     };
-    use crate::hot_state::{EndpointDrainRecord, EndpointHealthRecord, EndpointHealthState};
+    use crate::hot_state::{
+        EndpointDrainRecord, EndpointHealthRecord, EndpointHealthState, RouteHotState,
+        StickyRouteRecord,
+    };
     use crate::replay::{foundation_route_replay_cases, GatewayReplayCase};
     use crate::route::foundation_routes;
     use crate::routing::{
@@ -20680,13 +21624,61 @@ mod tests {
         CreateExportJobRequest, CreateNotificationOutboxEventRequest,
         CreateNotificationSinkRequest, CreateSecretRefRequest, ExportRepository,
         ExternalIdentityRepository, InMemoryGatewayStore, NotificationOutboxRepository,
-        ProviderAdminRepository, RuntimePolicyRepository, SecretRefAdminRepository,
-        ServiceAccountAdminRepository, TenancyBootstrapRepository, TenancyRepository,
-        UsageAccountingRepository, ValidationDiagnosticRepository,
+        PostgresGatewayStore, ProviderAdminRepository, RuntimePolicyRepository,
+        SecretRefAdminRepository, ServiceAccountAdminRepository, TenancyBootstrapRepository,
+        TenancyRepository, UsageAccountingRepository, ValidationDiagnosticRepository,
     };
     use crate::ProtocolFamily;
 
     static ENV_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[tokio::test]
+    async fn app_state_can_attach_durable_route_evidence_without_replacing_memory_store() {
+        let store = InMemoryGatewayStore::default();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://gateway:gateway@127.0.0.1:5432/starweaver_gateway")
+            .unwrap_or_else(|error| panic!("lazy postgres pool should build: {error}"));
+        let state = AppState::new_with_postgres_store(
+            GatewayConfig::default(),
+            store.clone(),
+            PostgresGatewayStore::new(pool),
+        );
+
+        assert!(state.durable_route_evidence_enabled());
+        assert!(state.durable_auth_enabled());
+        assert!(state.store().route_decisions().is_empty());
+        assert!(store.route_decisions().is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_app_state_without_database_uses_memory_route_evidence() {
+        let state = build_app_state(GatewayConfig {
+            background_worker_mode: BackgroundWorkerMode::Disabled,
+            ..GatewayConfig::default()
+        })
+        .await
+        .unwrap_or_else(|error| panic!("memory app state should build: {error}"));
+
+        assert!(!state.durable_route_evidence_enabled());
+        assert!(state.store().route_decisions().is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_app_state_with_database_url_requires_connectable_postgres_for_route_evidence() {
+        let Err(error) = build_app_state(GatewayConfig {
+            database_url: Some("not-a-postgres-url".to_owned()),
+            background_worker_mode: BackgroundWorkerMode::Disabled,
+            ..GatewayConfig::default()
+        })
+        .await
+        else {
+            panic!("invalid PostgreSQL URL should fail startup");
+        };
+
+        assert!(error
+            .to_string()
+            .contains("failed to connect gateway PostgreSQL route evidence store"));
+    }
 
     struct EnvRestore {
         values: Vec<(&'static str, Option<std::ffi::OsString>)>,
@@ -21518,6 +22510,7 @@ mod tests {
             actor_id: TEST_USER_ID.to_owned(),
             actor_kind: ActorKind::User,
             request_id: "req_cross_tenant".to_owned(),
+            trace_id: "tr_cross_tenant".to_owned(),
             protocol_family: ProtocolFamily::OpenAiResponses,
             config_snapshot_id: None,
             config_version: None,
@@ -21529,6 +22522,8 @@ mod tests {
             provider_endpoint_id: None,
             upstream_credential_id: None,
             filtered_summary: Vec::new(),
+            sticky_hit: false,
+            sticky_miss_reason: None,
             status: RouteDecisionStatus::Blocked,
             reason: "cross_tenant_probe".to_owned(),
             occurred_at: chrono::Utc::now(),
@@ -21640,6 +22635,150 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_route_evidence_list_get_filter_and_scope() {
+        let (store, raw_session, endpoint_id) = gateway_store_with_route_evidence().await;
+
+        let decision_list_response = get_admin(
+            store.clone(),
+            &raw_session,
+            &format!("{ADMIN_ROUTE_DECISION_LIST_PATH}?protocol_family=openai_responses&limit=1"),
+        )
+        .await;
+        let decision_list_status = decision_list_response.status();
+        let decision_list_body = response_json(decision_list_response).await;
+        assert_eq!(
+            decision_list_status,
+            StatusCode::OK,
+            "{decision_list_body:?}"
+        );
+        assert_eq!(
+            decision_list_body["schema"],
+            "gateway.admin.route_decision_list.v1"
+        );
+        assert_eq!(decision_list_body["total_filtered_count"], 1);
+        assert_eq!(
+            decision_list_body["route_decisions"]
+                .as_array()
+                .map_or(0, Vec::len),
+            1
+        );
+        assert_eq!(
+            decision_list_body["route_decisions"][0]["tenant_id"],
+            TEST_TENANT_ID
+        );
+        assert_eq!(
+            decision_list_body["route_decisions"][0]["provider_endpoint_id"],
+            endpoint_id
+        );
+        assert!(decision_list_body["route_decisions"][0]["request_id"]
+            .as_str()
+            .is_some_and(|request_id| request_id.starts_with("req_")));
+        assert_ne!(
+            decision_list_body["route_decisions"][0]["route_decision_id"],
+            "rd_cross_tenant_dashboard_scope"
+        );
+        assert!(
+            decision_list_body["route_decisions"][0]["route_decision_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("rd_"))
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_route_evidence_gets_decision_with_attempts() {
+        let (store, raw_session, _endpoint_id) = gateway_store_with_route_evidence().await;
+        let route_decision_id = store
+            .route_decisions()
+            .into_iter()
+            .find(|decision| decision.tenant_id == TEST_TENANT_ID)
+            .map_or_else(
+                || panic!("tenant route decision should exist"),
+                |decision| decision.route_decision_id,
+            );
+
+        let decision_get_response = get_admin(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/route-decisions/{route_decision_id}"),
+        )
+        .await;
+        let decision_get_status = decision_get_response.status();
+        let decision_get_body = response_json(decision_get_response).await;
+        assert_eq!(decision_get_status, StatusCode::OK, "{decision_get_body:?}");
+        assert_eq!(
+            decision_get_body["schema"],
+            "gateway.admin.route_decision.v1"
+        );
+        assert_eq!(
+            decision_get_body["route_decision"]["route_decision_id"],
+            route_decision_id
+        );
+        assert_eq!(
+            decision_get_body["attempts"].as_array().map_or(0, Vec::len),
+            1
+        );
+
+        let attempt_list_response = get_admin(
+            store.clone(),
+            &raw_session,
+            &format!("{ADMIN_ROUTE_ATTEMPT_LIST_PATH}?route_decision_id={route_decision_id}"),
+        )
+        .await;
+        let attempt_list_status = attempt_list_response.status();
+        let attempt_list_body = response_json(attempt_list_response).await;
+        assert_eq!(attempt_list_status, StatusCode::OK, "{attempt_list_body:?}");
+        assert_eq!(
+            attempt_list_body["schema"],
+            "gateway.admin.route_attempt_list.v1"
+        );
+        assert_eq!(attempt_list_body["total_filtered_count"], 1);
+        assert_eq!(
+            attempt_list_body["route_attempts"][0]["tenant_id"],
+            TEST_TENANT_ID
+        );
+        assert_eq!(
+            attempt_list_body["route_attempts"][0]["route_decision_id"],
+            route_decision_id
+        );
+        let route_attempt_event_id = attempt_list_body["route_attempts"][0]
+            ["route_attempt_event_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("route attempt id should be present"))
+            .to_owned();
+
+        let attempt_get_response = get_admin(
+            store,
+            &raw_session,
+            &format!("/admin/v1/route-attempts/{route_attempt_event_id}"),
+        )
+        .await;
+        let attempt_get_status = attempt_get_response.status();
+        let attempt_get_body = response_json(attempt_get_response).await;
+        assert_eq!(attempt_get_status, StatusCode::OK, "{attempt_get_body:?}");
+        assert_eq!(attempt_get_body["schema"], "gateway.admin.route_attempt.v1");
+        assert_eq!(
+            attempt_get_body["route_attempt"]["route_attempt_event_id"],
+            route_attempt_event_id
+        );
+        assert_eq!(
+            attempt_get_body["route_attempt"]["route_decision_id"],
+            route_decision_id
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_route_evidence_rejects_api_key_access() {
+        let (store, _raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+
+        let response = get_admin(store, &raw_key, ADMIN_ROUTE_DECISION_LIST_PATH).await;
+        let status = response.status();
+        let body = response_json(response).await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body:?}");
+        assert_eq!(body["error"]["code"], "gateway.auth.authorization_denied");
+    }
+
+    #[tokio::test]
     async fn request_id_header_is_preserved_when_safe() {
         let response = match router(AppState::default())
             .oneshot(
@@ -21663,6 +22802,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trace_id_header_is_preserved_when_safe() {
+        let response = match router(AppState::default())
+            .oneshot(
+                Request::builder()
+                    .uri("/version")
+                    .header(TRACE_ID_HEADER, "tr_test")
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("request should build: {error}")),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => panic!("version request should complete: {error}"),
+        };
+
+        let header = response
+            .headers()
+            .get(TRACE_ID_HEADER)
+            .and_then(|value| value.to_str().ok());
+        assert_eq!(header, Some("tr_test"));
+    }
+
+    #[tokio::test]
+    async fn traceparent_trace_id_is_used_when_gateway_trace_header_is_missing() {
+        let response = match router(AppState::default())
+            .oneshot(
+                Request::builder()
+                    .uri("/version")
+                    .header(
+                        TRACEPARENT_HEADER,
+                        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+                    )
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("request should build: {error}")),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => panic!("version request should complete: {error}"),
+        };
+
+        let header = response
+            .headers()
+            .get(TRACE_ID_HEADER)
+            .and_then(|value| value.to_str().ok());
+        assert_eq!(header, Some("4bf92f3577b34da6a3ce929d0e0e4736"));
+    }
+
+    #[tokio::test]
     async fn error_envelope_includes_safe_request_id() {
         let response = match router(AppState::default())
             .oneshot(
@@ -21670,6 +22858,7 @@ mod tests {
                     .method("POST")
                     .uri("/v1/responses")
                     .header(REQUEST_ID_HEADER, "req_error_body")
+                    .header(TRACE_ID_HEADER, "tr_error_body")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(json!({"model": "ma_test"}).to_string()))
                     .unwrap_or_else(|error| panic!("request should build: {error}")),
@@ -21684,14 +22873,21 @@ mod tests {
             .get(REQUEST_ID_HEADER)
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
+        let trace_id_header = response
+            .headers()
+            .get(TRACE_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let status = response.status();
         let body = response_json(response).await;
 
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(request_id_header.as_deref(), Some("req_error_body"));
+        assert_eq!(trace_id_header.as_deref(), Some("tr_error_body"));
         assert_eq!(body["schema"], "gateway.error.v1");
         assert_eq!(body["error"]["code"], "gateway.auth.authentication_failed");
         assert_eq!(body["error"]["request_id"], "req_error_body");
+        assert_eq!(body["error"]["trace_id"], "tr_error_body");
     }
 
     #[tokio::test]
@@ -21726,6 +22922,9 @@ mod tests {
         assert!(request_id_header.starts_with("req_"));
         assert_ne!(request_id_header, "bad request id");
         assert_eq!(body["error"]["request_id"], request_id_header);
+        assert!(body["error"]["trace_id"]
+            .as_str()
+            .is_some_and(|trace_id| trace_id.starts_with("tr_")));
     }
 
     #[tokio::test]
@@ -21757,6 +22956,7 @@ mod tests {
                 Request::builder()
                     .uri("/slow")
                     .header(REQUEST_ID_HEADER, "req_timeout")
+                    .header(TRACE_ID_HEADER, "tr_timeout")
                     .body(Body::empty())
                     .unwrap_or_else(|error| panic!("request should build: {error}")),
             )
@@ -21770,19 +22970,26 @@ mod tests {
             .get(REQUEST_ID_HEADER)
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
+        let trace_id_header = response
+            .headers()
+            .get(TRACE_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let status = response.status();
         let body = response_json(response).await;
 
         assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
         assert_eq!(request_id_header.as_deref(), Some("req_timeout"));
+        assert_eq!(trace_id_header.as_deref(), Some("tr_timeout"));
         assert_eq!(body["schema"], "gateway.error.v1");
         assert_eq!(body["error"]["code"], "gateway.request.timeout");
         assert_eq!(body["error"]["retryable"], true);
         assert_eq!(body["error"]["request_id"], "req_timeout");
+        assert_eq!(body["error"]["trace_id"], "tr_timeout");
     }
 
-    #[test]
-    fn authenticate_request_preserves_request_id_and_records_last_used() {
+    #[tokio::test]
+    async fn authenticate_request_preserves_request_context_and_records_last_used() {
         let (store, raw_key) = gateway_store_with_runtime_access(true);
         let state = AppState::new(GatewayConfig::default(), store.clone());
         let mut headers = HeaderMap::new();
@@ -21790,21 +22997,23 @@ mod tests {
             .unwrap_or_else(|error| panic!("authorization header should build: {error}"));
         headers.insert(header::AUTHORIZATION, authorization);
         headers.insert(REQUEST_ID_HEADER, HeaderValue::from_static("req_auth"));
+        headers.insert(TRACE_ID_HEADER, HeaderValue::from_static("tr_auth"));
 
-        let actor = match authenticate_request(&state, &headers, chrono::Utc::now()) {
+        let actor = match authenticate_request(&state, &headers, chrono::Utc::now()).await {
             Ok(actor) => actor,
             Err(error) => panic!("request should authenticate: {error}"),
         };
 
         let last_used_updates = store.api_key_last_used_updates();
         assert_eq!(actor.request_id, "req_auth");
+        assert_eq!(actor.trace_id, "tr_auth");
         assert_eq!(last_used_updates.len(), 1);
         assert_eq!(last_used_updates[0].request_id, "req_auth");
         assert_eq!(last_used_updates[0].tenant_id, "ten_test");
     }
 
-    #[test]
-    fn authenticate_request_rejects_malformed_bearer_without_side_effects() {
+    #[tokio::test]
+    async fn authenticate_request_rejects_malformed_bearer_without_side_effects() {
         let (store, raw_key) = gateway_store_with_runtime_access(true);
         let state = AppState::new(GatewayConfig::default(), store.clone());
         let mut headers = HeaderMap::new();
@@ -21813,7 +23022,7 @@ mod tests {
         headers.insert(header::AUTHORIZATION, authorization);
         headers.insert(REQUEST_ID_HEADER, HeaderValue::from_static("req_bad_auth"));
 
-        let Err(error) = authenticate_request(&state, &headers, chrono::Utc::now()) else {
+        let Err(error) = authenticate_request(&state, &headers, chrono::Utc::now()).await else {
             panic!("malformed bearer should not authenticate");
         };
 
@@ -22132,6 +23341,7 @@ mod tests {
                     .method("POST")
                     .uri("/v1/responses")
                     .header(header::AUTHORIZATION, format!("Bearer {raw_key}"))
+                    .header(TRACE_ID_HEADER, "tr_ingress")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(json!({"model": "gpt-test"}).to_string()))
                     .unwrap_or_else(|error| panic!("request should build: {error}")),
@@ -22142,12 +23352,9 @@ mod tests {
             Err(error) => panic!("request should complete: {error}"),
         };
 
-        let response_request_id = response
-            .headers()
-            .get(REQUEST_ID_HEADER)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_else(|| panic!("response request id should be present"))
-            .to_owned();
+        let response_request_id = response_header_value(&response, REQUEST_ID_HEADER);
+        let response_trace_id = response_header_value(&response, TRACE_ID_HEADER);
+        assert_eq!(response_trace_id, "tr_ingress");
         let status = response.status();
         let body = response_json(response).await;
         let decisions = store.authorization_decisions();
@@ -22184,8 +23391,10 @@ mod tests {
         assert_eq!(last_used_updates.len(), 1);
         assert_eq!(last_used_updates[0].request_id, response_request_id);
         assert_eq!(route_decisions[0].request_id, response_request_id);
+        assert_eq!(route_decisions[0].trace_id, response_trace_id);
         assert_eq!(usage_events.len(), 1);
         assert_eq!(usage_events[0].request_id, response_request_id);
+        assert_eq!(usage_events[0].trace_id, response_trace_id);
         assert_eq!(
             usage_events[0].route_decision_id.as_deref(),
             Some(route_decisions[0].route_decision_id.as_str())
@@ -23259,14 +24468,21 @@ mod tests {
         assert_eq!(create_policy.status(), StatusCode::OK);
         let now = chrono::Utc::now();
         let state = AppState::new(GatewayConfig::default(), store.clone());
-        let actor = verify_api_key(&store, &raw_key, "req_budget_reservation_1".to_owned(), now)
-            .unwrap_or_else(|error| panic!("api key should verify: {error}"));
+        let actor = verify_api_key(
+            &store,
+            &raw_key,
+            "req_budget_reservation_1".to_owned(),
+            "tr_budget_reservation_1".to_owned(),
+            now,
+        )
+        .unwrap_or_else(|error| panic!("api key should verify: {error}"));
         let replay_cases = foundation_route_replay_cases();
         let replay_case = replay_cases
             .iter()
             .find(|case| case.protocol_family == ProtocolFamily::OpenAiResponses && !case.streaming)
             .unwrap_or_else(|| panic!("openai responses replay case should exist"));
-        let route_target = runtime_route_target(&state, &actor, replay_case, "gpt-test")
+        let route_target = runtime_route_target(&state, &actor, replay_case, "gpt-test", None)
+            .await
             .unwrap_or_else(|error| panic!("route target should resolve: {error}"));
         let selected = route_target
             .selected_route
@@ -23329,6 +24545,7 @@ mod tests {
             &store,
             &raw_key,
             "req_budget_lease_expiry_1".to_owned(),
+            "tr_budget_lease_expiry_1".to_owned(),
             now,
         )
         .unwrap_or_else(|error| panic!("api key should verify: {error}"));
@@ -23337,7 +24554,8 @@ mod tests {
             .iter()
             .find(|case| case.protocol_family == ProtocolFamily::OpenAiResponses && !case.streaming)
             .unwrap_or_else(|| panic!("openai responses replay case should exist"));
-        let route_target = runtime_route_target(&state, &actor, replay_case, "gpt-test")
+        let route_target = runtime_route_target(&state, &actor, replay_case, "gpt-test", None)
+            .await
             .unwrap_or_else(|error| panic!("route target should resolve: {error}"));
         let selected = route_target
             .selected_route
@@ -23431,14 +24649,21 @@ mod tests {
         assert_eq!(create_policy.status(), StatusCode::OK);
         let now = chrono::Utc::now();
         let state = AppState::new(GatewayConfig::default(), store.clone());
-        let actor = verify_api_key(&store, &raw_key, "req_quota_reservation_1".to_owned(), now)
-            .unwrap_or_else(|error| panic!("api key should verify: {error}"));
+        let actor = verify_api_key(
+            &store,
+            &raw_key,
+            "req_quota_reservation_1".to_owned(),
+            "tr_quota_reservation_1".to_owned(),
+            now,
+        )
+        .unwrap_or_else(|error| panic!("api key should verify: {error}"));
         let replay_cases = foundation_route_replay_cases();
         let replay_case = replay_cases
             .iter()
             .find(|case| case.protocol_family == ProtocolFamily::OpenAiResponses && !case.streaming)
             .unwrap_or_else(|| panic!("openai responses replay case should exist"));
-        let route_target = runtime_route_target(&state, &actor, replay_case, "gpt-test")
+        let route_target = runtime_route_target(&state, &actor, replay_case, "gpt-test", None)
+            .await
             .unwrap_or_else(|error| panic!("route target should resolve: {error}"));
         let selected = route_target
             .selected_route
@@ -23500,6 +24725,7 @@ mod tests {
             &store,
             &raw_key,
             "req_stream_quota_reservation_1".to_owned(),
+            "tr_stream_quota_reservation_1".to_owned(),
             now,
         )
         .unwrap_or_else(|error| panic!("api key should verify: {error}"));
@@ -23513,7 +24739,9 @@ mod tests {
             &actor,
             replay_case,
             protocol_replay_alias_name(ProtocolFamily::OpenAiChat),
+            None,
         )
+        .await
         .unwrap_or_else(|error| panic!("route target should resolve: {error}"));
         let selected = route_target
             .selected_route
@@ -24282,6 +25510,111 @@ mod tests {
         );
         assert!(store.authorization_decisions().is_empty());
         assert!(store.route_attempts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn model_ingress_uses_fresh_sticky_route_mapping_when_target_is_eligible() {
+        let (store, raw_key) = gateway_store_with_runtime_access(true);
+        publish_catalog_snapshot(&store, sticky_catalog_payload());
+        let now = chrono::Utc::now();
+        RouteHotState::set_sticky_route(
+            &store,
+            StickyRouteRecord {
+                tenant_id: TEST_TENANT_ID.to_owned(),
+                project_id: Some(TEST_PROJECT_ID.to_owned()),
+                model_alias_id: "ma_test".to_owned(),
+                affinity_hash: route_affinity_hash("session_a"),
+                routing_group_id: "rg_test".to_owned(),
+                model_target_id: "mt_openai_secondary".to_owned(),
+                provider_endpoint_id: "pep_openai_secondary".to_owned(),
+                config_version: 1,
+                created_at: now,
+                expires_at: now + Duration::seconds(60),
+            },
+        );
+
+        let response = post_responses_request_with_body_and_affinity(
+            store.clone(),
+            &raw_key,
+            json!({"model": "gpt-test"}),
+            Some("session_a"),
+        )
+        .await;
+
+        let status = response.status();
+        let body = response_json(response).await;
+        let route_decisions = store.route_decisions();
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        assert_eq!(body["body"]["model"], "gpt-4.1-nano");
+        assert_eq!(route_decisions.len(), 1);
+        assert_eq!(
+            route_decisions[0].model_target_id.as_deref(),
+            Some("mt_openai_secondary")
+        );
+        assert!(route_decisions[0].sticky_hit);
+        assert!(route_decisions[0].sticky_miss_reason.is_none());
+        assert_eq!(store.sticky_routes().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn model_ingress_reselects_when_sticky_target_is_no_longer_eligible() {
+        let (store, raw_key) = gateway_store_with_runtime_access(true);
+        publish_catalog_snapshot(&store, sticky_catalog_payload());
+        let now = chrono::Utc::now();
+        RouteHotState::set_sticky_route(
+            &store,
+            StickyRouteRecord {
+                tenant_id: TEST_TENANT_ID.to_owned(),
+                project_id: Some(TEST_PROJECT_ID.to_owned()),
+                model_alias_id: "ma_test".to_owned(),
+                affinity_hash: route_affinity_hash("session_b"),
+                routing_group_id: "rg_test".to_owned(),
+                model_target_id: "mt_openai_secondary".to_owned(),
+                provider_endpoint_id: "pep_openai_secondary".to_owned(),
+                config_version: 1,
+                created_at: now,
+                expires_at: now + Duration::seconds(60),
+            },
+        );
+        store.set_endpoint_health(EndpointHealthRecord {
+            tenant_id: TEST_TENANT_ID.to_owned(),
+            provider_endpoint_id: "pep_openai_secondary".to_owned(),
+            config_version: 1,
+            state: EndpointHealthState::Blocked,
+            observed_at: now,
+            expires_at: now + Duration::seconds(60),
+        });
+
+        let response = post_responses_request_with_body_and_affinity(
+            store.clone(),
+            &raw_key,
+            json!({"model": "gpt-test"}),
+            Some("session_b"),
+        )
+        .await;
+
+        let status = response.status();
+        let body = response_json(response).await;
+        let route_decisions = store.route_decisions();
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        assert_eq!(body["body"]["model"], "gpt-4.1-mini");
+        assert_eq!(route_decisions.len(), 1);
+        assert_eq!(
+            route_decisions[0].model_target_id.as_deref(),
+            Some("mt_openai")
+        );
+        assert!(!route_decisions[0].sticky_hit);
+        assert_eq!(
+            route_decisions[0].sticky_miss_reason.as_deref(),
+            Some("endpoint_health_blocked")
+        );
+        assert!(route_decisions[0]
+            .filtered_summary
+            .iter()
+            .any(|summary| summary.reason == RouteFilterReason::EndpointHealthBlocked));
+        let sticky_routes = store.sticky_routes();
+        assert_eq!(sticky_routes.len(), 1);
+        assert_eq!(sticky_routes[0].model_target_id, "mt_openai");
     }
 
     #[tokio::test]
@@ -29546,6 +30879,31 @@ mod tests {
         (store, raw_session, raw_key)
     }
 
+    async fn gateway_store_with_route_evidence() -> (InMemoryGatewayStore, String, String) {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        let graph = create_admin_graph_for_dashboards(store.clone(), &raw_session).await;
+        publish_catalog_snapshot(&store, catalog_payload_for_admin_graph(&graph));
+        let runtime_response =
+            post_responses_request(store.clone(), &raw_key, &graph.alias_name).await;
+        let runtime_status = runtime_response.status();
+        let runtime_body = response_json(runtime_response).await;
+        assert_eq!(runtime_status, StatusCode::OK, "{runtime_body:?}");
+        let api_key_id = recorded_api_key_id(&store);
+        record_cross_tenant_dashboard_probe(&store, &graph, &api_key_id);
+        store.record_route_attempt(RouteAttemptRecord {
+            route_attempt_event_id: "rae_cross_tenant_route_evidence".to_owned(),
+            route_decision_id: "rd_cross_tenant_dashboard_scope".to_owned(),
+            attempt_index: 0,
+            routing_group_id: graph.routing_group_id,
+            model_target_id: graph.target_id,
+            provider_endpoint_id: graph.endpoint_id.clone(),
+            status: RouteAttemptStatus::Failed,
+            started_at: chrono::Utc::now(),
+            ended_at: Some(chrono::Utc::now()),
+        });
+        (store, raw_session, graph.endpoint_id)
+    }
+
     struct AdminGraphFixture {
         endpoint_id: String,
         credential_id: String,
@@ -29619,6 +30977,7 @@ mod tests {
             actor_id: TEST_USER_ID.to_owned(),
             actor_kind: ActorKind::User,
             request_id: "req_cross_tenant_dashboard_scope".to_owned(),
+            trace_id: "tr_cross_tenant_dashboard_scope".to_owned(),
             protocol_family: ProtocolFamily::OpenAiResponses,
             config_snapshot_id: None,
             config_version: None,
@@ -29630,6 +30989,8 @@ mod tests {
             provider_endpoint_id: Some(graph.endpoint_id.clone()),
             upstream_credential_id: Some(graph.credential_id.clone()),
             filtered_summary: Vec::new(),
+            sticky_hit: false,
+            sticky_miss_reason: None,
             status: RouteDecisionStatus::Blocked,
             reason: "cross_tenant_probe".to_owned(),
             occurred_at: chrono::Utc::now(),
@@ -29647,6 +31008,7 @@ mod tests {
             service_account_id: None,
             api_key_id: None,
             request_id: "req_cross_tenant_usage".to_owned(),
+            trace_id: "tr_cross_tenant_usage".to_owned(),
             protocol_family: ProtocolFamily::OpenAiResponses,
             route_decision_id: None,
             model_alias_id: Some("ma_test".to_owned()),
@@ -29696,6 +31058,7 @@ mod tests {
             actor_id: service_account_id.to_owned(),
             actor_kind: ActorKind::ServiceAccount,
             request_id: "req_service_account_dashboard".to_owned(),
+            trace_id: "tr_service_account_dashboard".to_owned(),
             protocol_family: ProtocolFamily::OpenAiResponses,
             config_snapshot_id: None,
             config_version: Some(1),
@@ -29707,6 +31070,8 @@ mod tests {
             provider_endpoint_id: Some("pep_openai".to_owned()),
             upstream_credential_id: Some("upc_openai".to_owned()),
             filtered_summary: Vec::new(),
+            sticky_hit: false,
+            sticky_miss_reason: None,
             status: RouteDecisionStatus::Selected,
             reason: "selected".to_owned(),
             occurred_at: now,
@@ -29721,6 +31086,7 @@ mod tests {
             actor_id: service_account_id.to_owned(),
             actor_kind: ActorKind::ServiceAccount,
             request_id: "req_cross_tenant_service_account_dashboard".to_owned(),
+            trace_id: "tr_cross_tenant_service_account_dashboard".to_owned(),
             protocol_family: ProtocolFamily::OpenAiResponses,
             config_snapshot_id: None,
             config_version: Some(1),
@@ -29732,6 +31098,8 @@ mod tests {
             provider_endpoint_id: Some("pep_openai".to_owned()),
             upstream_credential_id: Some("upc_openai".to_owned()),
             filtered_summary: Vec::new(),
+            sticky_hit: false,
+            sticky_miss_reason: None,
             status: RouteDecisionStatus::Blocked,
             reason: "cross_tenant_probe".to_owned(),
             occurred_at: now,
@@ -30209,6 +31577,72 @@ mod tests {
         })
     }
 
+    fn sticky_catalog_payload() -> serde_json::Value {
+        let mut payload = catalog_payload();
+        payload["provider_endpoints"]
+            .as_array_mut()
+            .unwrap_or_else(|| panic!("provider_endpoints should be an array"))
+            .push(json!({
+                "provider_endpoint_id": "pep_openai_secondary",
+                "tenant_id": "ten_test",
+                "name": "OpenAI secondary",
+                "provider_kind": "openai",
+                "protocol_families": ["openai_responses"],
+                "upstream_base_url": "https://api-secondary.openai.example",
+                "status": "active"
+            }));
+        payload["upstream_credentials"]
+            .as_array_mut()
+            .unwrap_or_else(|| panic!("upstream_credentials should be an array"))
+            .push(json!({
+                "upstream_credential_id": "upc_openai_secondary",
+                "tenant_id": "ten_test",
+                "provider_endpoint_id": "pep_openai_secondary",
+                "credential_kind": "api_key",
+                "secret_ref_id": "sec_openai_secondary",
+                "status": "active"
+            }));
+        payload["model_targets"]
+            .as_array_mut()
+            .unwrap_or_else(|| panic!("model_targets should be an array"))
+            .push(json!({
+                "model_target_id": "mt_openai_secondary",
+                "tenant_id": "ten_test",
+                "provider_endpoint_id": "pep_openai_secondary",
+                "upstream_credential_id": "upc_openai_secondary",
+                "protocol_family": "openai_responses",
+                "upstream_model_id": "gpt-4.1-nano",
+                "status": "active",
+                "supports_streaming": true
+            }));
+        payload["routing_group_targets"]
+            .as_array_mut()
+            .unwrap_or_else(|| panic!("routing_group_targets should be an array"))
+            .push(json!({
+                "routing_group_target_id": "rgt_test_secondary",
+                "routing_group_id": "rg_test",
+                "model_target_id": "mt_openai_secondary",
+                "weight": 1,
+                "priority": 20,
+                "status": "active"
+            }));
+        payload["route_policies"][0]["sticky_ttl_seconds"] = json!(300);
+        payload["provider_grants"]
+            .as_array_mut()
+            .unwrap_or_else(|| panic!("provider_grants should be an array"))
+            .push(json!({
+                "provider_grant_id": "pg_test_secondary",
+                "tenant_id": "ten_test",
+                "organization_id": "org_test",
+                "project_id": "prj_test",
+                "principal_id": "usr_test",
+                "provider_endpoint_id": "pep_openai_secondary",
+                "model_target_id": "mt_openai_secondary",
+                "status": "active"
+            }));
+        payload
+    }
+
     fn protocol_replay_catalog_payload() -> serde_json::Value {
         let cases = foundation_route_replay_cases();
         json!({
@@ -30583,13 +32017,26 @@ mod tests {
         raw_key: &str,
         body: serde_json::Value,
     ) -> Response<Body> {
+        post_responses_request_with_body_and_affinity(store, raw_key, body, None).await
+    }
+
+    async fn post_responses_request_with_body_and_affinity(
+        store: InMemoryGatewayStore,
+        raw_key: &str,
+        body: serde_json::Value,
+        affinity_key: Option<&str>,
+    ) -> Response<Body> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header(header::AUTHORIZATION, format!("Bearer {raw_key}"))
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(affinity_key) = affinity_key {
+            builder = builder.header(GATEWAY_SESSION_ID_HEADER, affinity_key);
+        }
         match router(AppState::new(GatewayConfig::default(), store))
             .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/responses")
-                    .header(header::AUTHORIZATION, format!("Bearer {raw_key}"))
-                    .header(header::CONTENT_TYPE, "application/json")
+                builder
                     .body(Body::from(body.to_string()))
                     .unwrap_or_else(|error| panic!("request should build: {error}")),
             )
@@ -32273,6 +33720,15 @@ oFnGY0OFksX/ye0/XGpy2SFxYRwGU98HPYeBvAQQrVjdkzfy7BmXQQ==
             Ok(value) => value,
             Err(error) => panic!("response body should be JSON: {error}"),
         }
+    }
+
+    fn response_header_value(response: &Response<Body>, name: &'static str) -> String {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_else(|| panic!("{name} response header should be present"))
+            .to_owned()
     }
 
     fn assert_catalog_replay_route(case: &GatewayReplayCase, decision: &RouteDecisionRecord) {

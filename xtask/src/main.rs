@@ -1324,6 +1324,7 @@ fn record_gateway_restore_audit(store: &InMemoryGatewayStore, now: chrono::DateT
         actor_kind: ActorKind::User,
         principal_id: Some(HARNESS_PRINCIPAL_ID.to_owned()),
         request_id: "req_restore_rehearsal_audit".to_owned(),
+        trace_id: "tr_restore_rehearsal_audit".to_owned(),
         redacted_diff: json!({
             "schema": "gateway.restore_rehearsal.audit.v1",
             "secret_ref_id": "sec_***",
@@ -1344,6 +1345,7 @@ fn record_gateway_restore_usage(store: &InMemoryGatewayStore, now: chrono::DateT
         service_account_id: None,
         api_key_id: Some(HARNESS_API_KEY_ID.to_owned()),
         request_id: "req_restore_rehearsal_usage".to_owned(),
+        trace_id: "tr_restore_rehearsal_usage".to_owned(),
         protocol_family: ProtocolFamily::OpenAiResponses,
         route_decision_id: Some("rd_restore_rehearsal".to_owned()),
         model_alias_id: Some(HARNESS_MODEL_ALIAS_ID.to_owned()),
@@ -1677,6 +1679,7 @@ fn gateway_harness_actor(iteration: usize) -> AuthenticatedActor {
         api_key_allowed_actions: Vec::new(),
         api_key_allowed_resources: Vec::new(),
         request_id: format!("req_harness_{iteration}"),
+        trace_id: format!("tr_harness_{iteration}"),
     }
 }
 

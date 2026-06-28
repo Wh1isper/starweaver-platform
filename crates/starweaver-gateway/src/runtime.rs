@@ -1,11 +1,13 @@
 //! Runtime ingress foundation with deterministic fake provider responses.
 
 use chrono::{DateTime, Utc};
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use url::Url;
 
 use crate::action::{AuthorizationDecision, AuthorizationEngine, AuthorizationEvidenceSink};
-use crate::domain::AuthenticatedActor;
+use crate::domain::{AuthenticatedActor, ProviderEndpoint};
 use crate::error::{GatewayError, Result};
 use crate::replay::{classify_ingress, GatewayReplayCase};
 use crate::route::{authorize_route_with_evidence, foundation_routes, RouteMetadata};
@@ -51,6 +53,65 @@ pub struct FakeProviderReplayEvidence {
     pub policy_snapshot_id: Option<String>,
     /// Decision timestamp recorded in authorization evidence.
     pub occurred_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ProviderAdapterTarget {
+    pub(crate) protocol_family: ProtocolFamily,
+    pub(crate) provider_endpoint: ProviderEndpoint,
+    pub(crate) upstream_model_id: String,
+    pub(crate) upstream_credential: Option<ProviderAdapterCredential>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ProviderAdapterCredential {
+    pub(crate) upstream_credential_id: String,
+    pub(crate) credential_kind: String,
+    pub(crate) secret_value: SecretString,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ProviderAdapterRequest {
+    pub(crate) protocol_family: ProtocolFamily,
+    pub(crate) method: &'static str,
+    pub(crate) url: String,
+    pub(crate) headers: Vec<ProviderAdapterHeader>,
+    pub(crate) body: Value,
+    pub(crate) safe_metadata: ProviderAdapterRequestMetadata,
+}
+
+impl ProviderAdapterRequest {
+    pub(crate) fn into_safe_metadata(self) -> ProviderAdapterRequestMetadata {
+        let _ = (
+            self.protocol_family,
+            self.method,
+            self.url.as_str(),
+            self.headers
+                .iter()
+                .map(|header| header.name.len() + header.value.expose_secret().len())
+                .sum::<usize>(),
+            &self.body,
+        );
+        self.safe_metadata
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ProviderAdapterHeader {
+    pub(crate) name: &'static str,
+    pub(crate) value: SecretString,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct ProviderAdapterRequestMetadata {
+    pub(crate) protocol_family: ProtocolFamily,
+    pub(crate) provider_endpoint_id: String,
+    pub(crate) provider_kind: String,
+    pub(crate) upstream_model_id: String,
+    pub(crate) upstream_credential_id: Option<String>,
+    pub(crate) credential_kind: Option<String>,
+    pub(crate) url_origin: String,
+    pub(crate) url_path: String,
 }
 
 /// Deterministic fake-provider outcome used by replay and harness tests.
@@ -123,6 +184,47 @@ pub struct FakeProviderAuthorization {
     pub authorization: AuthorizationDecision,
     /// Whether the request is expected to stream.
     pub streaming: bool,
+}
+
+pub(crate) fn build_provider_adapter_request(
+    target: &ProviderAdapterTarget,
+    body: &Value,
+) -> Result<ProviderAdapterRequest> {
+    let mut upstream_body = body.clone();
+    rewrite_provider_model(
+        &mut upstream_body,
+        target.protocol_family,
+        &target.upstream_model_id,
+    );
+    let url = provider_request_url(
+        &target.provider_endpoint.upstream_base_url,
+        target.protocol_family,
+        &target.upstream_model_id,
+    )?;
+    let safe_metadata = ProviderAdapterRequestMetadata {
+        protocol_family: target.protocol_family,
+        provider_endpoint_id: target.provider_endpoint.provider_endpoint_id.clone(),
+        provider_kind: target.provider_endpoint.provider_kind.clone(),
+        upstream_model_id: target.upstream_model_id.clone(),
+        upstream_credential_id: target
+            .upstream_credential
+            .as_ref()
+            .map(|credential| credential.upstream_credential_id.clone()),
+        credential_kind: target
+            .upstream_credential
+            .as_ref()
+            .map(|credential| credential.credential_kind.clone()),
+        url_origin: url_origin(&url),
+        url_path: url.path().to_owned(),
+    };
+    Ok(ProviderAdapterRequest {
+        protocol_family: target.protocol_family,
+        method: "POST",
+        url: url.to_string(),
+        headers: provider_adapter_headers(target),
+        body: upstream_body,
+        safe_metadata,
+    })
 }
 
 /// Runs a deterministic fake-provider request through route authorization.
@@ -297,6 +399,113 @@ fn fake_provider_error_body(outcome: FakeProviderReplayOutcome, streaming: bool)
     })
 }
 
+fn provider_adapter_headers(target: &ProviderAdapterTarget) -> Vec<ProviderAdapterHeader> {
+    let Some(credential) = target.upstream_credential.as_ref() else {
+        return Vec::new();
+    };
+    match credential.credential_kind.as_str() {
+        "api_key" | "bearer_token" | "upstream_api_key" | "codex_oauth" => {
+            vec![ProviderAdapterHeader {
+                name: "authorization",
+                value: SecretString::from(format!(
+                    "Bearer {}",
+                    credential.secret_value.expose_secret()
+                )),
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn provider_request_url(
+    upstream_base_url: &str,
+    protocol_family: ProtocolFamily,
+    upstream_model_id: &str,
+) -> Result<Url> {
+    let base = Url::parse(upstream_base_url).map_err(|error| GatewayError::BadRequest {
+        message: format!("invalid upstream_base_url: {error}"),
+    })?;
+    let path = provider_request_path(protocol_family, upstream_model_id);
+    provider_base_dir(base)
+        .join(&path)
+        .map_err(|error| GatewayError::BadRequest {
+            message: format!("invalid provider request path: {error}"),
+        })
+}
+
+fn provider_base_dir(mut base: Url) -> Url {
+    if !base.path().ends_with('/') {
+        let path = format!("{}/", base.path());
+        base.set_path(&path);
+    }
+    base
+}
+
+fn provider_request_path(protocol_family: ProtocolFamily, upstream_model_id: &str) -> String {
+    match protocol_family {
+        ProtocolFamily::OpenAiResponses => "responses".to_owned(),
+        ProtocolFamily::OpenAiChat => "chat/completions".to_owned(),
+        ProtocolFamily::AnthropicMessages => "messages".to_owned(),
+        ProtocolFamily::GeminiGenerateContent => {
+            format!(
+                "models/{}:generateContent",
+                percent_encode_path_segment(upstream_model_id)
+            )
+        }
+        ProtocolFamily::BedrockConverse => "model/invoke".to_owned(),
+        ProtocolFamily::ProviderNative => "native/invoke".to_owned(),
+    }
+}
+
+fn rewrite_provider_model(
+    body: &mut Value,
+    protocol_family: ProtocolFamily,
+    upstream_model_id: &str,
+) {
+    match protocol_family {
+        ProtocolFamily::OpenAiResponses
+        | ProtocolFamily::OpenAiChat
+        | ProtocolFamily::AnthropicMessages
+        | ProtocolFamily::ProviderNative => {
+            if let Some(object) = body.as_object_mut() {
+                object.insert("model".to_owned(), json!(upstream_model_id));
+            }
+        }
+        ProtocolFamily::GeminiGenerateContent | ProtocolFamily::BedrockConverse => {}
+    }
+}
+
+fn percent_encode_path_segment(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(hex_digit(byte >> 4)));
+            encoded.push(char::from(hex_digit(byte & 0x0f)));
+        }
+    }
+    encoded
+}
+
+const fn hex_digit(value: u8) -> u8 {
+    match value {
+        0..=9 => b'0' + value,
+        _ => b'A' + (value - 10),
+    }
+}
+
+fn url_origin(url: &Url) -> String {
+    let Some(host) = url.host_str() else {
+        return url.scheme().to_owned();
+    };
+    url.port().map_or_else(
+        || format!("{}://{}", url.scheme(), host),
+        |port| format!("{}://{}:{}", url.scheme(), host, port),
+    )
+}
+
 fn route_for_replay(
     replay_case: &GatewayReplayCase,
     protocol_family: ProtocolFamily,
@@ -417,16 +626,20 @@ fn fake_usage() -> Value {
 
 #[cfg(test)]
 mod tests {
+    use secrecy::{ExposeSecret, SecretString};
     use serde_json::json;
 
     use crate::action::{ActionGrant, FoundationAuthorizationEngine};
-    use crate::domain::{ActorKind, AuthenticatedActor, CredentialKind};
+    use crate::domain::{
+        ActorKind, AuthenticatedActor, CredentialKind, ProviderEndpoint, ResourceStatus,
+    };
     use crate::replay::foundation_route_replay_cases;
     use crate::route::foundation_routes;
     use crate::runtime::{
-        run_fake_provider_replay, run_fake_provider_replay_for_target_with_outcome,
-        FakeProviderReplayEvidence, FakeProviderReplayOutcome, FakeProviderReplayOutcomeRequest,
-        FakeProviderReplayTarget,
+        build_provider_adapter_request, run_fake_provider_replay,
+        run_fake_provider_replay_for_target_with_outcome, FakeProviderReplayEvidence,
+        FakeProviderReplayOutcome, FakeProviderReplayOutcomeRequest, FakeProviderReplayTarget,
+        ProviderAdapterCredential, ProviderAdapterTarget,
     };
     use crate::storage::InMemoryGatewayStore;
     use crate::ProtocolFamily;
@@ -446,6 +659,7 @@ mod tests {
             api_key_allowed_actions: Vec::new(),
             api_key_allowed_resources: Vec::new(),
             request_id: "req_test".to_owned(),
+            trace_id: "tr_test".to_owned(),
         }
     }
 
@@ -574,6 +788,81 @@ mod tests {
         }
     }
 
+    #[test]
+    fn provider_adapter_request_builds_openai_responses_boundary() {
+        let request = match build_provider_adapter_request(
+            &ProviderAdapterTarget {
+                protocol_family: ProtocolFamily::OpenAiResponses,
+                provider_endpoint: provider_endpoint("https://api.openai.example/v1"),
+                upstream_model_id: "gpt-4.1-mini".to_owned(),
+                upstream_credential: Some(ProviderAdapterCredential {
+                    upstream_credential_id: "upc_openai".to_owned(),
+                    credential_kind: "api_key".to_owned(),
+                    secret_value: SecretString::from("sk-test-secret"),
+                }),
+            },
+            &json!({
+                "model": "alias-chat",
+                "input": "hello"
+            }),
+        ) {
+            Ok(request) => request,
+            Err(error) => panic!("provider request should build: {error}"),
+        };
+
+        assert_eq!(request.protocol_family, ProtocolFamily::OpenAiResponses);
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.url, "https://api.openai.example/v1/responses");
+        assert_eq!(request.body["model"], "gpt-4.1-mini");
+        assert_eq!(request.headers[0].name, "authorization");
+        assert_eq!(
+            request.headers[0].value.expose_secret(),
+            "Bearer sk-test-secret"
+        );
+        assert_eq!(
+            request.safe_metadata.url_origin,
+            "https://api.openai.example"
+        );
+        assert_eq!(request.safe_metadata.url_path, "/v1/responses");
+        assert_eq!(
+            request.safe_metadata.upstream_credential_id.as_deref(),
+            Some("upc_openai")
+        );
+        assert!(!format!("{request:?}").contains("sk-test-secret"));
+        assert!(!serde_json::to_string(&request.safe_metadata)
+            .unwrap_or_else(|error| panic!("metadata should serialize: {error}"))
+            .contains("sk-test-secret"));
+    }
+
+    #[test]
+    fn provider_adapter_request_preserves_gateway_mount_paths() {
+        let request = match build_provider_adapter_request(
+            &ProviderAdapterTarget {
+                protocol_family: ProtocolFamily::OpenAiChat,
+                provider_endpoint: provider_endpoint("https://proxy.example/gateway/openai/v1"),
+                upstream_model_id: "gpt-4.1-mini".to_owned(),
+                upstream_credential: None,
+            },
+            &json!({
+                "model": "alias-chat",
+                "messages": []
+            }),
+        ) {
+            Ok(request) => request,
+            Err(error) => panic!("provider request should build: {error}"),
+        };
+
+        assert_eq!(
+            request.url,
+            "https://proxy.example/gateway/openai/v1/chat/completions"
+        );
+        assert_eq!(
+            request.safe_metadata.url_path,
+            "/gateway/openai/v1/chat/completions"
+        );
+        assert!(request.headers.is_empty());
+    }
+
     fn assert_provider_shape(protocol_family: ProtocolFamily, body: &serde_json::Value) {
         match protocol_family {
             ProtocolFamily::OpenAiResponses => {
@@ -594,6 +883,18 @@ mod tests {
             ProtocolFamily::ProviderNative => {
                 assert_eq!(body["provider_native"], true);
             }
+        }
+    }
+
+    fn provider_endpoint(upstream_base_url: &str) -> ProviderEndpoint {
+        ProviderEndpoint {
+            provider_endpoint_id: "pe_openai".to_owned(),
+            tenant_id: "tenant_test".to_owned(),
+            name: "OpenAI".to_owned(),
+            provider_kind: "openai".to_owned(),
+            protocol_families: vec![ProtocolFamily::OpenAiResponses, ProtocolFamily::OpenAiChat],
+            upstream_base_url: upstream_base_url.to_owned(),
+            status: ResourceStatus::Active,
         }
     }
 }

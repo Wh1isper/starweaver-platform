@@ -53,6 +53,10 @@ Completed foundation slices:
 - Gateway request-id middleware now preserves safe client request ids, replaces
   unsafe request ids, and injects the effective id into structured error
   envelopes as well as response headers.
+- Gateway trace-id middleware now preserves safe gateway trace ids, derives
+  trace ids from W3C `traceparent` when present, generates trace ids when
+  absent, and carries the effective trace id into error envelopes, actor
+  context, route decisions, usage events, and audit evidence.
 - Gateway request handling now enforces a configurable inbound timeout through
   the shared middleware chain and returns the stable gateway error envelope with
   the effective request id.
@@ -79,6 +83,43 @@ Completed foundation slices:
   catalog, provider grant closure, hot-state health filters, and route planner
   used by runtime ingress. Simulation responses explain selected, blocked, and
   no-route outcomes and explicitly report that no upstream call was made.
+- Route decision and route attempt evidence now have strong-auth admin read
+  APIs with tenant-bound filtering, cursor pagination, detail reads, route
+  debug authorization, API-key denial, OpenAPI coverage, and parent-decision
+  scope checks for attempt evidence.
+- PostgreSQL route evidence foundations now include additive migration coverage
+  for trace and sticky-route fields, release checksum coverage, and durable
+  adapter methods for inserting and listing route decisions and attempts by
+  tenant.
+- Gateway route evidence runtime paths now use an explicit AppState durable
+  bridge: runtime route decisions, runtime policy blocks, and provider attempt
+  evidence continue to be observable in the in-memory foundation store while
+  optionally writing to PostgreSQL, and admin route evidence APIs read from the
+  durable adapter when it is attached.
+- Gateway startup now builds app state through an explicit startup path that
+  validates configuration, bootstraps local single-user state, connects to
+  PostgreSQL when `STARWEAVER_GATEWAY_DATABASE_URL` is configured, runs embedded
+  migrations, and attaches the durable route-evidence bridge before the router
+  and background workers are exposed.
+- Gateway HTTP authentication now uses the attached PostgreSQL store for API
+  key candidate lookup, session-token lookup, project-membership checks, and
+  API-key last-used updates when durable storage is configured, while preserving
+  the deterministic in-memory resolver for local replay and foundation tests.
+- Runtime route simulation and model ingress now load the latest tenant-scoped
+  published config snapshot document from PostgreSQL when durable storage is
+  attached, so catalog routing and runtime Cedar policy evaluation no longer
+  depend only on the in-memory config snapshot store.
+- Runtime ingress now constructs a redaction-safe provider adapter request
+  boundary from the selected catalog route, provider endpoint, upstream model
+  id, and optional runtime credential material. The current execution path
+  remains deterministic fake-provider replay, but the provider-facing URL,
+  model rewrite, authorization header shape, and safe metadata contract are now
+  covered before enabling live provider transport.
+- Sticky routing now uses Redis-compatible hot-state mappings keyed by tenant,
+  project, model alias, and a hashed affinity header. Runtime routing reuses a
+  fresh sticky target when it is still eligible, records sticky hit or miss
+  evidence on route decisions, rewrites mappings after successful selections,
+  and reports sticky hit and miss counts in built-in dashboard rollups.
 - Provider grants support organization and project scopes, allow and deny
   effects, closure modes, descendant traversal over alias, route policy,
   routing group, model target, provider endpoint, and pricing SKU resources,
@@ -608,7 +649,7 @@ Work items:
 Acceptance evidence:
 
 - `cargo test --workspace --all-targets --all-features --locked` passes.
-- Handler tests cover health, readiness, request id propagation, and error
+- Handler tests cover health, readiness, request context propagation, and error
   envelope shape.
 - Docs explain how to run the gateway locally with fake dependencies.
 

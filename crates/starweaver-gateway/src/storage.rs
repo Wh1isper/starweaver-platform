@@ -12,7 +12,7 @@ use sqlx::PgPool;
 use sqlx::Row;
 
 use crate::action::{ActionGrant, AuthorizationDecisionRecord, AuthorizationEvidenceSink};
-use crate::config::PublishedConfigSnapshot;
+use crate::config::{ConfigSnapshotDocument, PublishedConfigSnapshot};
 use crate::domain::{
     new_prefixed_id, ApiKeyRecord, ApiKeyStatus, AuditEventRecord, AuthSessionRecord,
     AuthSessionStatus, BudgetPolicyRecord, CodexOAuthConnectionRecord, CodexOAuthConnectionStatus,
@@ -35,9 +35,15 @@ use crate::domain::{
 use crate::error::{GatewayError, Result};
 use crate::hot_state::{
     EndpointDrainRecord, EndpointHealthRecord, EndpointHealthState, RouteHotState,
+    StickyRouteRecord,
 };
-use crate::routing::{RouteAttemptRecord, RouteDecisionRecord, RouteEvidenceSink};
+use crate::routing::{
+    RouteAttemptRecord, RouteAttemptStatus, RouteDecisionRecord, RouteDecisionStatus,
+    RouteEvidenceSink, RouteFilterSummary,
+};
 use crate::ProtocolFamily;
+
+type StickyRouteKey = (String, Option<String>, String, String);
 
 const API_KEY_FAILED_AUTH_WINDOW_SECONDS: i64 = 60;
 const API_KEY_FAILED_AUTH_MAX_ATTEMPTS: usize = 8;
@@ -1799,6 +1805,7 @@ pub struct InMemoryGatewayStore {
     route_attempts: Arc<RwLock<Vec<RouteAttemptRecord>>>,
     endpoint_health: Arc<RwLock<HashMap<(String, String), EndpointHealthRecord>>>,
     endpoint_drains: Arc<RwLock<HashMap<(String, String), EndpointDrainRecord>>>,
+    sticky_routes: Arc<RwLock<HashMap<StickyRouteKey, StickyRouteRecord>>>,
     audit_events: Arc<RwLock<Vec<AuditEventRecord>>>,
     idempotency_records: Arc<RwLock<HashMap<(String, String), IdempotencyRecord>>>,
     provider_endpoints: Arc<RwLock<HashMap<String, ProviderEndpointRecord>>>,
@@ -2152,6 +2159,12 @@ impl InMemoryGatewayStore {
             ),
             record,
         );
+    }
+
+    /// Returns sticky route mappings for tests and local diagnostics.
+    #[must_use]
+    pub fn sticky_routes(&self) -> Vec<StickyRouteRecord> {
+        read_lock(&self.sticky_routes).values().cloned().collect()
     }
 
     /// Returns immutable config snapshot history.
@@ -5788,6 +5801,46 @@ impl RouteHotState for InMemoryGatewayStore {
             .get(&(tenant_id.to_owned(), provider_endpoint_id.to_owned()))
             .is_some_and(|record| record.is_fresh_for(config_version, now))
     }
+
+    fn sticky_route(
+        &self,
+        tenant_id: &str,
+        project_id: Option<&str>,
+        model_alias_id: &str,
+        affinity_hash: &str,
+        config_version: Option<i64>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<StickyRouteRecord> {
+        let sticky_routes = match self.sticky_routes.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        sticky_routes
+            .get(&(
+                tenant_id.to_owned(),
+                project_id.map(ToOwned::to_owned),
+                model_alias_id.to_owned(),
+                affinity_hash.to_owned(),
+            ))
+            .filter(|record| record.is_fresh_for(config_version, now))
+            .cloned()
+    }
+
+    fn set_sticky_route(&self, record: StickyRouteRecord) {
+        let mut sticky_routes = match self.sticky_routes.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        sticky_routes.insert(
+            (
+                record.tenant_id.clone(),
+                record.project_id.clone(),
+                record.model_alias_id.clone(),
+                record.affinity_hash.clone(),
+            ),
+            record,
+        );
+    }
 }
 
 fn validate_optional_organization_scope(
@@ -8666,6 +8719,71 @@ impl PostgresGatewayStore {
         row.map_or(Ok(None), |row| config_snapshot_from_row(&row).map(Some))
     }
 
+    /// Loads the latest published config snapshot metadata for one tenant.
+    pub async fn latest_published_snapshot_for_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<ConfigSnapshot>> {
+        let row = sqlx::query(
+            r"
+            SELECT
+                config_snapshot_id,
+                tenant_id,
+                version,
+                checksum,
+                status,
+                compiled_at
+            FROM gateway_config_snapshots
+            WHERE tenant_id = $1
+              AND status = 'published'
+            ORDER BY version DESC
+            LIMIT 1
+            ",
+        )
+        .bind(tenant_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| GatewayError::Internal {
+            message: format!("failed to load tenant config snapshot: {error}"),
+        })?;
+
+        row.map_or(Ok(None), |row| config_snapshot_from_row(&row).map(Some))
+    }
+
+    /// Loads a published config snapshot document by id.
+    pub async fn config_snapshot_by_id(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<Option<PublishedConfigSnapshot>> {
+        let row = sqlx::query(
+            r"
+            SELECT
+                config_snapshot_id,
+                tenant_id,
+                version,
+                checksum,
+                status,
+                compiled_at,
+                snapshot_document,
+                created_by,
+                published_at
+            FROM gateway_config_snapshots
+            WHERE config_snapshot_id = $1
+            LIMIT 1
+            ",
+        )
+        .bind(snapshot_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| GatewayError::Internal {
+            message: format!("failed to load config snapshot document: {error}"),
+        })?;
+
+        row.map_or(Ok(None), |row| {
+            published_config_snapshot_from_row(&row).map(Some)
+        })
+    }
+
     /// Inserts a published config snapshot.
     pub async fn insert_config_snapshot(&self, snapshot: &PublishedConfigSnapshot) -> Result<()> {
         let mut transaction = self
@@ -8769,6 +8887,216 @@ impl PostgresGatewayStore {
             message: format!("failed to insert authorization decision: {error}"),
         })?;
         Ok(())
+    }
+
+    /// Records durable route decision evidence.
+    pub async fn insert_route_decision(&self, record: &RouteDecisionRecord) -> Result<()> {
+        sqlx::query(
+            r"
+            INSERT INTO gateway_route_decisions (
+                route_decision_id,
+                tenant_id,
+                organization_id,
+                project_id,
+                principal_id,
+                api_key_id,
+                actor_id,
+                actor_kind,
+                request_id,
+                trace_id,
+                protocol_family,
+                config_snapshot_id,
+                config_version,
+                model_alias_id,
+                alias_name,
+                route_policy_id,
+                routing_group_id,
+                model_target_id,
+                provider_endpoint_id,
+                upstream_credential_id,
+                filtered_summary,
+                sticky_hit,
+                sticky_miss_reason,
+                decision_status,
+                reason,
+                occurred_at
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8,
+                $9, $10, $11, $12, $13, $14, $15, $16,
+                $17, $18, $19, $20, $21, $22, $23, $24,
+                $25, $26
+            )
+            ON CONFLICT (route_decision_id) DO NOTHING
+            ",
+        )
+        .bind(&record.route_decision_id)
+        .bind(&record.tenant_id)
+        .bind(&record.organization_id)
+        .bind(&record.project_id)
+        .bind(&record.principal_id)
+        .bind(&record.api_key_id)
+        .bind(&record.actor_id)
+        .bind(record.actor_kind.as_str())
+        .bind(&record.request_id)
+        .bind(&record.trace_id)
+        .bind(record.protocol_family.as_str())
+        .bind(&record.config_snapshot_id)
+        .bind(record.config_version)
+        .bind(&record.model_alias_id)
+        .bind(&record.alias_name)
+        .bind(&record.route_policy_id)
+        .bind(&record.routing_group_id)
+        .bind(&record.model_target_id)
+        .bind(&record.provider_endpoint_id)
+        .bind(&record.upstream_credential_id)
+        .bind(
+            serde_json::to_value(&record.filtered_summary).map_err(|error| {
+                GatewayError::Internal {
+                    message: format!("failed to encode route filter summary: {error}"),
+                }
+            })?,
+        )
+        .bind(record.sticky_hit)
+        .bind(&record.sticky_miss_reason)
+        .bind(record.status.as_str())
+        .bind(&record.reason)
+        .bind(record.occurred_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| GatewayError::Internal {
+            message: format!("failed to insert route decision: {error}"),
+        })?;
+        Ok(())
+    }
+
+    /// Records durable route attempt evidence.
+    pub async fn insert_route_attempt(&self, record: &RouteAttemptRecord) -> Result<()> {
+        sqlx::query(
+            r"
+            INSERT INTO gateway_route_attempt_events (
+                route_attempt_event_id,
+                route_decision_id,
+                attempt_index,
+                routing_group_id,
+                model_target_id,
+                provider_endpoint_id,
+                status,
+                started_at,
+                ended_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (route_attempt_event_id) DO NOTHING
+            ",
+        )
+        .bind(&record.route_attempt_event_id)
+        .bind(&record.route_decision_id)
+        .bind(
+            i32::try_from(record.attempt_index).map_err(|error| GatewayError::Internal {
+                message: format!("invalid route attempt index: {error}"),
+            })?,
+        )
+        .bind(&record.routing_group_id)
+        .bind(&record.model_target_id)
+        .bind(&record.provider_endpoint_id)
+        .bind(record.status.as_str())
+        .bind(record.started_at)
+        .bind(record.ended_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| GatewayError::Internal {
+            message: format!("failed to insert route attempt: {error}"),
+        })?;
+        Ok(())
+    }
+
+    /// Lists route decisions for one tenant.
+    pub async fn route_decisions_for_tenant(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+    ) -> Result<Vec<RouteDecisionRecord>> {
+        let rows = sqlx::query(
+            r"
+            SELECT
+                route_decision_id,
+                tenant_id,
+                organization_id,
+                project_id,
+                principal_id,
+                api_key_id,
+                actor_id,
+                actor_kind,
+                request_id,
+                trace_id,
+                protocol_family,
+                config_snapshot_id,
+                config_version,
+                model_alias_id,
+                alias_name,
+                route_policy_id,
+                routing_group_id,
+                model_target_id,
+                provider_endpoint_id,
+                upstream_credential_id,
+                filtered_summary,
+                sticky_hit,
+                sticky_miss_reason,
+                decision_status,
+                reason,
+                occurred_at
+            FROM gateway_route_decisions
+            WHERE tenant_id = $1
+            ORDER BY occurred_at DESC, route_decision_id DESC
+            LIMIT $2
+            ",
+        )
+        .bind(tenant_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| GatewayError::Internal {
+            message: format!("failed to list route decisions: {error}"),
+        })?;
+
+        rows.iter().map(route_decision_record_from_row).collect()
+    }
+
+    /// Lists route attempts for one tenant by joining parent decisions.
+    pub async fn route_attempts_for_tenant(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+    ) -> Result<Vec<RouteAttemptRecord>> {
+        let rows = sqlx::query(
+            r"
+            SELECT
+                attempt.route_attempt_event_id,
+                attempt.route_decision_id,
+                attempt.attempt_index,
+                attempt.routing_group_id,
+                attempt.model_target_id,
+                attempt.provider_endpoint_id,
+                attempt.status,
+                attempt.started_at,
+                attempt.ended_at
+            FROM gateway_route_attempt_events attempt
+            INNER JOIN gateway_route_decisions decision
+                ON decision.route_decision_id = attempt.route_decision_id
+            WHERE decision.tenant_id = $1
+            ORDER BY attempt.started_at DESC, attempt.route_attempt_event_id DESC
+            LIMIT $2
+            ",
+        )
+        .bind(tenant_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| GatewayError::Internal {
+            message: format!("failed to list route attempts: {error}"),
+        })?;
+
+        rows.iter().map(route_attempt_record_from_row).collect()
     }
 }
 
@@ -8993,6 +9321,35 @@ fn config_snapshot_from_row(row: &sqlx::postgres::PgRow) -> Result<ConfigSnapsho
     })
 }
 
+fn published_config_snapshot_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<PublishedConfigSnapshot> {
+    let metadata = config_snapshot_from_row(row)?;
+    if metadata.status != ConfigSnapshotStatus::Published {
+        return Err(GatewayError::Internal {
+            message: format!("config snapshot {} is not published", metadata.snapshot_id),
+        });
+    }
+    let document = serde_json::from_value::<ConfigSnapshotDocument>(row.get("snapshot_document"))
+        .map_err(|error| GatewayError::Internal {
+        message: format!("failed to decode config snapshot document: {error}"),
+    })?;
+    let published_at = row
+        .get::<Option<chrono::DateTime<chrono::Utc>>, _>("published_at")
+        .ok_or_else(|| GatewayError::Internal {
+            message: format!(
+                "published config snapshot {} is missing published_at",
+                metadata.snapshot_id
+            ),
+        })?;
+    Ok(PublishedConfigSnapshot {
+        metadata,
+        document,
+        created_by: row.get("created_by"),
+        published_at,
+    })
+}
+
 fn project_membership_from_row(row: &sqlx::postgres::PgRow) -> Result<ProjectMembershipRecord> {
     Ok(ProjectMembershipRecord {
         project_member_id: row.get("project_member_id"),
@@ -9003,6 +9360,55 @@ fn project_membership_from_row(row: &sqlx::postgres::PgRow) -> Result<ProjectMem
         organization_member_id: row.get("organization_member_id"),
         status: parse_membership_status(row.get("status"))?,
         resource_version: row.get("resource_version"),
+    })
+}
+
+fn route_decision_record_from_row(row: &sqlx::postgres::PgRow) -> Result<RouteDecisionRecord> {
+    Ok(RouteDecisionRecord {
+        route_decision_id: row.get("route_decision_id"),
+        tenant_id: row.get("tenant_id"),
+        organization_id: row.get("organization_id"),
+        project_id: row.get("project_id"),
+        principal_id: row.get("principal_id"),
+        api_key_id: row.get("api_key_id"),
+        actor_id: row.get("actor_id"),
+        actor_kind: parse_actor_kind(row.get("actor_kind"))?,
+        request_id: row.get("request_id"),
+        trace_id: row.get("trace_id"),
+        protocol_family: parse_protocol_family(row.get("protocol_family"))?,
+        config_snapshot_id: row.get("config_snapshot_id"),
+        config_version: row.get("config_version"),
+        model_alias_id: row.get("model_alias_id"),
+        alias_name: row.get("alias_name"),
+        route_policy_id: row.get("route_policy_id"),
+        routing_group_id: row.get("routing_group_id"),
+        model_target_id: row.get("model_target_id"),
+        provider_endpoint_id: row.get("provider_endpoint_id"),
+        upstream_credential_id: row.get("upstream_credential_id"),
+        filtered_summary: route_filter_summary_vec(row.get("filtered_summary"))?,
+        sticky_hit: row.get("sticky_hit"),
+        sticky_miss_reason: row.get("sticky_miss_reason"),
+        status: parse_route_decision_status(row.get("decision_status"))?,
+        reason: row.get("reason"),
+        occurred_at: row.get("occurred_at"),
+    })
+}
+
+fn route_attempt_record_from_row(row: &sqlx::postgres::PgRow) -> Result<RouteAttemptRecord> {
+    Ok(RouteAttemptRecord {
+        route_attempt_event_id: row.get("route_attempt_event_id"),
+        route_decision_id: row.get("route_decision_id"),
+        attempt_index: u32::try_from(row.get::<i32, _>("attempt_index")).map_err(|error| {
+            GatewayError::Internal {
+                message: format!("invalid route attempt index: {error}"),
+            }
+        })?,
+        routing_group_id: row.get("routing_group_id"),
+        model_target_id: row.get("model_target_id"),
+        provider_endpoint_id: row.get("provider_endpoint_id"),
+        status: parse_route_attempt_status(row.get("status"))?,
+        started_at: row.get("started_at"),
+        ended_at: row.get("ended_at"),
     })
 }
 
@@ -9030,6 +9436,35 @@ fn json_string_vec(value: &Value, field: &str) -> Result<Vec<String>> {
         .collect()
 }
 
+fn route_filter_summary_vec(value: Value) -> Result<Vec<RouteFilterSummary>> {
+    serde_json::from_value(value).map_err(|error| GatewayError::Internal {
+        message: format!("failed to decode route filter summary: {error}"),
+    })
+}
+
+fn parse_actor_kind(value: &str) -> Result<crate::domain::ActorKind> {
+    match value {
+        "user" => Ok(crate::domain::ActorKind::User),
+        "service_account" => Ok(crate::domain::ActorKind::ServiceAccount),
+        "api_key" => Ok(crate::domain::ActorKind::ApiKey),
+        "internal_service" => Ok(crate::domain::ActorKind::InternalService),
+        "system" => Ok(crate::domain::ActorKind::System),
+        _ => Err(GatewayError::Internal {
+            message: format!("unknown actor kind: {value}"),
+        }),
+    }
+}
+
+fn parse_protocol_family(value: &str) -> Result<ProtocolFamily> {
+    ProtocolFamily::all()
+        .iter()
+        .copied()
+        .find(|family| family.as_str() == value)
+        .ok_or_else(|| GatewayError::Internal {
+            message: format!("unknown protocol family: {value}"),
+        })
+}
+
 fn parse_api_key_status(value: &str) -> Result<ApiKeyStatus> {
     match value {
         "active" => Ok(ApiKeyStatus::Active),
@@ -9039,6 +9474,32 @@ fn parse_api_key_status(value: &str) -> Result<ApiKeyStatus> {
         "deleted" => Ok(ApiKeyStatus::Deleted),
         _ => Err(GatewayError::Internal {
             message: format!("unknown api key status: {value}"),
+        }),
+    }
+}
+
+fn parse_route_decision_status(value: &str) -> Result<RouteDecisionStatus> {
+    match value {
+        "started" => Ok(RouteDecisionStatus::Started),
+        "selected" => Ok(RouteDecisionStatus::Selected),
+        "blocked" => Ok(RouteDecisionStatus::Blocked),
+        "no_route" => Ok(RouteDecisionStatus::NoRoute),
+        "completed" => Ok(RouteDecisionStatus::Completed),
+        "failed" => Ok(RouteDecisionStatus::Failed),
+        _ => Err(GatewayError::Internal {
+            message: format!("unknown route decision status: {value}"),
+        }),
+    }
+}
+
+fn parse_route_attempt_status(value: &str) -> Result<RouteAttemptStatus> {
+    match value {
+        "started" => Ok(RouteAttemptStatus::Started),
+        "completed" => Ok(RouteAttemptStatus::Completed),
+        "failed" => Ok(RouteAttemptStatus::Failed),
+        "client_disconnected" => Ok(RouteAttemptStatus::ClientDisconnected),
+        _ => Err(GatewayError::Internal {
+            message: format!("unknown route attempt status: {value}"),
         }),
     }
 }
@@ -9096,6 +9557,8 @@ mod tests {
     use crate::storage::{InMemoryGatewayStore, TenancyBootstrapRepository, TenancyRepository};
 
     const CORE_SCHEMA: &str = include_str!("../migrations/20260625000001_core_schema.sql");
+    const ROUTE_EVIDENCE_FIELDS_MIGRATION: &str =
+        include_str!("../migrations/20260628000001_route_evidence_fields.sql");
 
     #[test]
     fn in_memory_bootstrap_default_project_is_idempotent() {
@@ -9274,6 +9737,36 @@ mod tests {
         assert!(CORE_SCHEMA.contains("last_known_good_snapshot_id TEXT NOT NULL"));
         assert!(CORE_SCHEMA.contains("validation_id LIKE 'vdiag_%'"));
         assert!(CORE_SCHEMA.contains("'dead_lettered'"));
+    }
+
+    #[test]
+    fn route_evidence_migration_adds_runtime_evidence_fields() {
+        for token in [
+            "ADD COLUMN IF NOT EXISTS trace_id TEXT NOT NULL",
+            "ADD COLUMN IF NOT EXISTS sticky_hit BOOLEAN NOT NULL DEFAULT FALSE",
+            "ADD COLUMN IF NOT EXISTS sticky_miss_reason TEXT",
+            "gateway_route_decisions_trace_idx",
+        ] {
+            assert!(
+                ROUTE_EVIDENCE_FIELDS_MIGRATION.contains(token),
+                "missing route evidence migration token {token}"
+            );
+        }
+    }
+
+    #[test]
+    fn core_schema_stores_config_snapshot_documents_for_runtime_replay() {
+        for token in [
+            "snapshot_document JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "published_at TIMESTAMPTZ",
+            "created_by TEXT NOT NULL",
+            "UNIQUE (tenant_id, version)",
+        ] {
+            assert!(
+                CORE_SCHEMA.contains(token),
+                "missing config snapshot schema token {token}"
+            );
+        }
     }
 
     #[test]

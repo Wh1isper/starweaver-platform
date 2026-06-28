@@ -651,6 +651,214 @@
         "x-starweaver-protocol-family": null
       }
     },
+    "/admin/v1/route-decisions": {
+      "get": {
+        "operationId": "gateway_get_admin_v1_route_decisions_gateway_route_debug_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /admin/v1/route-decisions",
+        "parameters": [],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "gateway.route.debug.read",
+        "x-starweaver-resource-kind": "RouteDecision",
+        "x-starweaver-scope-params": [
+          "tenant_id"
+        ],
+        "x-starweaver-allow-api-key": false,
+        "x-starweaver-strong-auth-required": true,
+        "x-starweaver-audit-event-type": "gateway.route_decision.read",
+        "x-starweaver-protocol-family": null
+      }
+    },
+    "/admin/v1/route-decisions/{route_decision_id}": {
+      "get": {
+        "operationId": "gateway_get_admin_v1_route_decisions_route_decision_id_gateway_route_debug_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /admin/v1/route-decisions/{route_decision_id}",
+        "parameters": [
+          {
+            "name": "route_decision_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "gateway.route.debug.read",
+        "x-starweaver-resource-kind": "RouteDecision",
+        "x-starweaver-scope-params": [
+          "tenant_id",
+          "route_decision_id"
+        ],
+        "x-starweaver-allow-api-key": false,
+        "x-starweaver-strong-auth-required": true,
+        "x-starweaver-audit-event-type": "gateway.route_decision.read",
+        "x-starweaver-protocol-family": null
+      }
+    },
+    "/admin/v1/route-attempts": {
+      "get": {
+        "operationId": "gateway_get_admin_v1_route_attempts_gateway_route_debug_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /admin/v1/route-attempts",
+        "parameters": [],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "gateway.route.debug.read",
+        "x-starweaver-resource-kind": "RouteDecision",
+        "x-starweaver-scope-params": [
+          "tenant_id"
+        ],
+        "x-starweaver-allow-api-key": false,
+        "x-starweaver-strong-auth-required": true,
+        "x-starweaver-audit-event-type": "gateway.route_attempt.read",
+        "x-starweaver-protocol-family": null
+      }
+    },
+    "/admin/v1/route-attempts/{route_attempt_event_id}": {
+      "get": {
+        "operationId": "gateway_get_admin_v1_route_attempts_route_attempt_event_id_gateway_route_debug_read",
+        "tags": [
+          "gateway-admin"
+        ],
+        "summary": "GET /admin/v1/route-attempts/{route_attempt_event_id}",
+        "parameters": [
+          {
+            "name": "route_attempt_event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": null,
+        "responses": {
+          "200": {
+            "description": "Request accepted by the service contract.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured service error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-starweaver-action-id": "gateway.route.debug.read",
+        "x-starweaver-resource-kind": "RouteDecision",
+        "x-starweaver-scope-params": [
+          "tenant_id",
+          "route_attempt_event_id"
+        ],
+        "x-starweaver-allow-api-key": false,
+        "x-starweaver-strong-auth-required": true,
+        "x-starweaver-audit-event-type": "gateway.route_attempt.read",
+        "x-starweaver-protocol-family": null
+      }
+    },
     "/admin/v1/audit/events": {
       "get": {
         "operationId": "gateway_get_admin_v1_audit_events_gateway_audit_read",
