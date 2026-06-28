@@ -12,10 +12,41 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::ExitCode,
+    thread,
+    time::{Duration, Instant},
+};
+
+use secrecy::{ExposeSecret, SecretString};
+use serde_json::json;
+use starweaver_gateway::{
+    action::{ActionGrant, FoundationAuthorizationEngine},
+    config::{
+        publish_config_snapshot, PublishConfigSnapshotRequest, PublishedConfigSnapshot,
+        ResourceVersion,
+    },
+    domain::{
+        ActorKind, AuditEventRecord, AuthenticatedActor, CredentialKind, SecretRefRecord,
+        UsageEventRecord,
+    },
+    replay::{foundation_route_replay_cases, GatewayReplayCase},
+    route::foundation_routes,
+    runtime::run_fake_provider_replay,
+    storage::{
+        BootstrapDefaultProjectRequest, ConfigSnapshotStore, CreateSecretRefRequest,
+        InMemoryGatewayStore, SecretRefAdminRepository, TenancyBootstrapRepository,
+        UsageAccountingRepository,
+    },
+    ProtocolFamily,
 };
 
 const PAGES_PROJECT_NAME: &str = "starweaver-platform-docs";
 const SITE_URL: &str = "https://starweaver-platform-docs.pages.dev";
+const HARNESS_TENANT_ID: &str = "ten_harness";
+const HARNESS_ORGANIZATION_ID: &str = "org_harness";
+const HARNESS_PROJECT_ID: &str = "prj_harness";
+const HARNESS_PRINCIPAL_ID: &str = "usr_harness";
+const HARNESS_API_KEY_ID: &str = "ak_harness";
+const HARNESS_MODEL_ALIAS_ID: &str = "ma_harness";
 
 fn main() -> ExitCode {
     match run() {
@@ -35,12 +66,15 @@ fn run() -> Result<(), String> {
         "check-docs-examples" => check_docs_examples(&rest),
         "check-repository-scripts" => check_repository_scripts(&rest),
         "finalize-docs-site" => finalize_docs_site(&rest),
+        "gateway-load-harness" => gateway_load_harness(&rest),
+        "gateway-soak-harness" => gateway_soak_harness(&rest),
+        "gateway-restore-rehearsal" => gateway_restore_rehearsal(&rest),
         _ => Err(usage()),
     }
 }
 
 fn usage() -> String {
-    "usage: cargo run -p xtask -- <check-docs-examples|check-repository-scripts|finalize-docs-site>"
+    "usage: cargo run -p xtask -- <check-docs-examples|check-repository-scripts|finalize-docs-site|gateway-load-harness|gateway-soak-harness|gateway-restore-rehearsal>"
         .to_string()
 }
 
@@ -188,6 +222,9 @@ fn validate_gateway_compose_support(root: &Path) -> Result<(), String> {
         "compose-down",
         "compose-migrate",
         "compose-smoke",
+        "gateway-load-harness",
+        "gateway-soak-harness",
+        "gateway-restore-rehearsal",
     ] {
         if !makefile.contains(required) {
             return Err(format!(
@@ -219,6 +256,675 @@ fn validate_mermaid_docs_support(root: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LoadHarnessOptions {
+    iterations: usize,
+    concurrency: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SoakHarnessOptions {
+    duration_seconds: u64,
+    concurrency: usize,
+    interval_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct GatewayHarnessSummary {
+    iterations: usize,
+    requests: usize,
+    allowed: usize,
+    denied: usize,
+    streaming: usize,
+    authorization_decisions: usize,
+}
+
+#[derive(Clone, Debug)]
+struct GatewayRestoreBackup {
+    config_snapshots: Vec<PublishedConfigSnapshot>,
+    secret_refs: Vec<GatewaySecretRefBackup>,
+    audit_events: Vec<AuditEventRecord>,
+    usage_events: Vec<UsageEventRecord>,
+}
+
+#[derive(Clone, Debug)]
+struct GatewaySecretRefBackup {
+    record: SecretRefRecord,
+    secret_value: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct GatewayLedgerTotals {
+    bucket_count: usize,
+    request_count: i64,
+    success_count: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    estimated_cost_micros: i64,
+}
+
+impl GatewayHarnessSummary {
+    const fn merge(&mut self, other: Self) {
+        self.iterations += other.iterations;
+        self.requests += other.requests;
+        self.allowed += other.allowed;
+        self.denied += other.denied;
+        self.streaming += other.streaming;
+        self.authorization_decisions += other.authorization_decisions;
+    }
+}
+
+fn gateway_load_harness(args: &[String]) -> Result<(), String> {
+    let options = parse_load_harness_options(args)?;
+    let started = Instant::now();
+    let summary = run_gateway_harness_load(options)?;
+    print_gateway_harness_summary("load", summary, started.elapsed());
+    Ok(())
+}
+
+fn gateway_soak_harness(args: &[String]) -> Result<(), String> {
+    let options = parse_soak_harness_options(args)?;
+    let started = Instant::now();
+    let summary = run_gateway_harness_soak(options)?;
+    print_gateway_harness_summary("soak", summary, started.elapsed());
+    Ok(())
+}
+
+fn gateway_restore_rehearsal(args: &[String]) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err("gateway-restore-rehearsal takes no arguments".to_string());
+    }
+
+    let source = InMemoryGatewayStore::default();
+    let now = chrono::Utc::now();
+    seed_gateway_restore_source(&source, now)?;
+    let backup = capture_gateway_restore_backup(&source)?;
+    let restored = InMemoryGatewayStore::default();
+    restore_gateway_backup(&restored, &backup);
+    verify_gateway_restore(&source, &restored, &backup)?;
+    println!(
+        "gateway restore rehearsal completed: config_snapshots={} secret_refs={} audit_events={} usage_events={} ledger_buckets={}",
+        backup.config_snapshots.len(),
+        backup.secret_refs.len(),
+        backup.audit_events.len(),
+        backup.usage_events.len(),
+        restored.ledger_buckets_for_tenant(HARNESS_TENANT_ID).len()
+    );
+    Ok(())
+}
+
+fn parse_load_harness_options(args: &[String]) -> Result<LoadHarnessOptions, String> {
+    let mut options = LoadHarnessOptions {
+        iterations: 36,
+        concurrency: 4,
+    };
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--iterations" => {
+                options.iterations = parse_next_usize(args, &mut index, "--iterations")?;
+            }
+            "--concurrency" => {
+                options.concurrency = parse_next_usize(args, &mut index, "--concurrency")?;
+            }
+            "--help" | "-h" => return Err(load_harness_usage()),
+            other => return Err(format!("unknown gateway-load-harness argument: {other}")),
+        }
+        index += 1;
+    }
+    if options.iterations == 0 {
+        return Err("gateway-load-harness requires --iterations greater than zero".to_string());
+    }
+    if options.concurrency == 0 {
+        return Err("gateway-load-harness requires --concurrency greater than zero".to_string());
+    }
+    Ok(options)
+}
+
+fn parse_soak_harness_options(args: &[String]) -> Result<SoakHarnessOptions, String> {
+    let mut options = SoakHarnessOptions {
+        duration_seconds: 1,
+        concurrency: 2,
+        interval_ms: 25,
+    };
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--duration-seconds" => {
+                options.duration_seconds = parse_next_u64(args, &mut index, "--duration-seconds")?;
+            }
+            "--concurrency" => {
+                options.concurrency = parse_next_usize(args, &mut index, "--concurrency")?;
+            }
+            "--interval-ms" => {
+                options.interval_ms = parse_next_u64(args, &mut index, "--interval-ms")?;
+            }
+            "--help" | "-h" => return Err(soak_harness_usage()),
+            other => return Err(format!("unknown gateway-soak-harness argument: {other}")),
+        }
+        index += 1;
+    }
+    if options.duration_seconds == 0 {
+        return Err(
+            "gateway-soak-harness requires --duration-seconds greater than zero".to_string(),
+        );
+    }
+    if options.concurrency == 0 {
+        return Err("gateway-soak-harness requires --concurrency greater than zero".to_string());
+    }
+    Ok(options)
+}
+
+fn parse_next_usize(args: &[String], index: &mut usize, flag: &str) -> Result<usize, String> {
+    *index += 1;
+    let Some(value) = args.get(*index) else {
+        return Err(format!("{flag} requires a value"));
+    };
+    value
+        .parse::<usize>()
+        .map_err(|error| format!("{flag} must be a positive integer: {error}"))
+}
+
+fn parse_next_u64(args: &[String], index: &mut usize, flag: &str) -> Result<u64, String> {
+    *index += 1;
+    let Some(value) = args.get(*index) else {
+        return Err(format!("{flag} requires a value"));
+    };
+    value
+        .parse::<u64>()
+        .map_err(|error| format!("{flag} must be a positive integer: {error}"))
+}
+
+fn load_harness_usage() -> String {
+    "usage: cargo run -p xtask -- gateway-load-harness [--iterations N] [--concurrency N]"
+        .to_string()
+}
+
+fn soak_harness_usage() -> String {
+    "usage: cargo run -p xtask -- gateway-soak-harness [--duration-seconds N] [--concurrency N] [--interval-ms N]"
+        .to_string()
+}
+
+fn seed_gateway_restore_source(
+    store: &InMemoryGatewayStore,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
+    seed_gateway_restore_tenancy(store, now)?;
+    let secret_ref = seed_gateway_restore_secret(store, now)?;
+    seed_gateway_restore_config_snapshot(store, &secret_ref, now)?;
+    record_gateway_restore_audit(store, now);
+    record_gateway_restore_usage(store, now);
+    Ok(())
+}
+
+fn seed_gateway_restore_tenancy(
+    store: &InMemoryGatewayStore,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
+    store
+        .bootstrap_default_project(
+            BootstrapDefaultProjectRequest {
+                tenant_id: HARNESS_TENANT_ID.to_owned(),
+                tenant_display_name: "Harness Tenant".to_owned(),
+                organization_id: HARNESS_ORGANIZATION_ID.to_owned(),
+                organization_display_name: "Harness Organization".to_owned(),
+                project_id: HARNESS_PROJECT_ID.to_owned(),
+                project_display_name: "Harness Project".to_owned(),
+                user_id: HARNESS_PRINCIPAL_ID.to_owned(),
+                user_display_name: "Harness User".to_owned(),
+                user_primary_email: Some("harness@example.com".to_owned()),
+                organization_member_id: "om_harness".to_owned(),
+                project_member_id: "pm_harness".to_owned(),
+                created_by: HARNESS_PRINCIPAL_ID.to_owned(),
+            },
+            now,
+        )
+        .map_err(|error| format!("restore rehearsal tenancy seed failed: {error}"))
+        .map(|_| ())
+}
+
+fn seed_gateway_restore_secret(
+    store: &InMemoryGatewayStore,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<SecretRefRecord, String> {
+    store
+        .create_secret_ref(
+            CreateSecretRefRequest {
+                tenant_id: HARNESS_TENANT_ID.to_owned(),
+                organization_id: Some(HARNESS_ORGANIZATION_ID.to_owned()),
+                project_id: Some(HARNESS_PROJECT_ID.to_owned()),
+                purpose: "restore rehearsal webhook signing".to_owned(),
+                backend_kind: "memory".to_owned(),
+                secret_value: SecretString::from("restore-rehearsal-secret-value".to_owned()),
+                created_by: HARNESS_PRINCIPAL_ID.to_owned(),
+            },
+            now,
+        )
+        .map_err(|error| format!("restore rehearsal secret seed failed: {error}"))
+}
+
+fn seed_gateway_restore_config_snapshot(
+    store: &InMemoryGatewayStore,
+    secret_ref: &SecretRefRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
+    publish_config_snapshot(
+        store,
+        PublishConfigSnapshotRequest {
+            tenant_id: HARNESS_TENANT_ID.to_owned(),
+            resource_versions: vec![ResourceVersion {
+                resource_kind: "SecretRef".to_owned(),
+                resource_id: secret_ref.secret_ref_id.clone(),
+                version: secret_ref.resource_version,
+            }],
+            payload: json!({
+                "secret_refs": [{
+                    "id": secret_ref.secret_ref_id,
+                    "purpose": "restore rehearsal webhook signing"
+                }],
+                "model_aliases": [{
+                    "id": HARNESS_MODEL_ALIAS_ID,
+                    "name": "restore-harness"
+                }]
+            }),
+            created_by: HARNESS_PRINCIPAL_ID.to_owned(),
+        },
+        now,
+    )
+    .map_err(|error| format!("restore rehearsal config snapshot seed failed: {error}"))
+    .map(|_| ())
+}
+
+fn record_gateway_restore_audit(store: &InMemoryGatewayStore, now: chrono::DateTime<chrono::Utc>) {
+    store.record_audit_event(AuditEventRecord {
+        audit_event_id: "aud_restore_rehearsal".to_owned(),
+        event_type: "gateway.restore_rehearsal.seed".to_owned(),
+        tenant_id: HARNESS_TENANT_ID.to_owned(),
+        organization_id: Some(HARNESS_ORGANIZATION_ID.to_owned()),
+        project_id: Some(HARNESS_PROJECT_ID.to_owned()),
+        scope_kind: "project".to_owned(),
+        scope_id: HARNESS_PROJECT_ID.to_owned(),
+        resource_kind: "ConfigSnapshot".to_owned(),
+        resource_id: HARNESS_MODEL_ALIAS_ID.to_owned(),
+        before_version: None,
+        after_version: Some(1),
+        actor_id: HARNESS_PRINCIPAL_ID.to_owned(),
+        actor_kind: ActorKind::User,
+        principal_id: Some(HARNESS_PRINCIPAL_ID.to_owned()),
+        request_id: "req_restore_rehearsal_audit".to_owned(),
+        redacted_diff: json!({
+            "schema": "gateway.restore_rehearsal.audit.v1",
+            "secret_ref_id": "sec_***",
+            "raw_secret_included": false
+        }),
+        occurred_at: now,
+    });
+}
+
+fn record_gateway_restore_usage(store: &InMemoryGatewayStore, now: chrono::DateTime<chrono::Utc>) {
+    store.record_usage_event(UsageEventRecord {
+        usage_event_id: "use_restore_rehearsal".to_owned(),
+        tenant_id: HARNESS_TENANT_ID.to_owned(),
+        organization_id: Some(HARNESS_ORGANIZATION_ID.to_owned()),
+        project_id: Some(HARNESS_PROJECT_ID.to_owned()),
+        principal_id: Some(HARNESS_PRINCIPAL_ID.to_owned()),
+        project_member_id: Some("pm_harness".to_owned()),
+        service_account_id: None,
+        api_key_id: Some(HARNESS_API_KEY_ID.to_owned()),
+        request_id: "req_restore_rehearsal_usage".to_owned(),
+        protocol_family: ProtocolFamily::OpenAiResponses,
+        route_decision_id: Some("rd_restore_rehearsal".to_owned()),
+        model_alias_id: Some(HARNESS_MODEL_ALIAS_ID.to_owned()),
+        model_target_id: Some("mt_restore_rehearsal".to_owned()),
+        route_policy_id: Some("rp_restore_rehearsal".to_owned()),
+        routing_group_id: Some("rg_restore_rehearsal".to_owned()),
+        provider_endpoint_id: Some("pep_restore_rehearsal".to_owned()),
+        upstream_credential_id: Some("upc_restore_rehearsal".to_owned()),
+        usage_confidence: "exact".to_owned(),
+        latency_ms: Some(42),
+        time_to_first_token_ms: Some(10),
+        status: "success".to_owned(),
+        usage_payload: json!({
+            "input_tokens": 12,
+            "output_tokens": 24,
+            "total_tokens": 36,
+            "reasoning_tokens": 0,
+            "image_input_units": 0,
+            "image_output_units": 0,
+            "audio_input_units": 0,
+            "audio_output_units": 0,
+            "request_units": 0
+        }),
+        cost_payload: json!({
+            "currency": "USD",
+            "unit": "micro_usd",
+            "total_cost": 1234,
+            "pricing_version": "restore-rehearsal"
+        }),
+        occurred_at: now,
+    });
+}
+
+fn capture_gateway_restore_backup(
+    store: &InMemoryGatewayStore,
+) -> Result<GatewayRestoreBackup, String> {
+    let mut secret_refs = Vec::new();
+    for record in store.secret_refs_for_tenant(HARNESS_TENANT_ID) {
+        let secret_value = store
+            .secret_value(&record.secret_ref_id)
+            .ok_or_else(|| {
+                format!(
+                    "restore rehearsal secret {} has no backend value",
+                    record.secret_ref_id
+                )
+            })?
+            .expose_secret()
+            .to_owned();
+        secret_refs.push(GatewaySecretRefBackup {
+            record,
+            secret_value,
+        });
+    }
+    Ok(GatewayRestoreBackup {
+        config_snapshots: store.config_snapshots(),
+        secret_refs,
+        audit_events: store.audit_events_for_tenant(HARNESS_TENANT_ID),
+        usage_events: store.usage_events_for_tenant(HARNESS_TENANT_ID),
+    })
+}
+
+fn restore_gateway_backup(store: &InMemoryGatewayStore, backup: &GatewayRestoreBackup) {
+    for snapshot in &backup.config_snapshots {
+        store.insert_config_snapshot(snapshot.clone());
+    }
+    for secret_ref in &backup.secret_refs {
+        store.restore_secret_ref(
+            secret_ref.record.clone(),
+            SecretString::from(secret_ref.secret_value.clone()),
+        );
+    }
+    for audit_event in &backup.audit_events {
+        store.record_audit_event(audit_event.clone());
+    }
+    for usage_event in &backup.usage_events {
+        store.record_usage_event(usage_event.clone());
+        store.record_usage_event(usage_event.clone());
+    }
+}
+
+fn verify_gateway_restore(
+    source: &InMemoryGatewayStore,
+    restored: &InMemoryGatewayStore,
+    backup: &GatewayRestoreBackup,
+) -> Result<(), String> {
+    if source.latest_published_snapshot_for_tenant(HARNESS_TENANT_ID)
+        != restored.latest_published_snapshot_for_tenant(HARNESS_TENANT_ID)
+    {
+        return Err("restore rehearsal latest config snapshot mismatch".to_owned());
+    }
+    if source.config_snapshots() != restored.config_snapshots() {
+        return Err("restore rehearsal config snapshot history mismatch".to_owned());
+    }
+    for secret_ref in &backup.secret_refs {
+        let restored_record = restored
+            .secret_ref(&secret_ref.record.secret_ref_id)
+            .ok_or_else(|| {
+                format!(
+                    "restore rehearsal missing secret ref {}",
+                    secret_ref.record.secret_ref_id
+                )
+            })?;
+        if restored_record != secret_ref.record {
+            return Err(format!(
+                "restore rehearsal secret ref {} metadata mismatch",
+                secret_ref.record.secret_ref_id
+            ));
+        }
+        let restored_value = restored
+            .secret_value(&secret_ref.record.secret_ref_id)
+            .ok_or_else(|| {
+                format!(
+                    "restore rehearsal missing secret value {}",
+                    secret_ref.record.secret_ref_id
+                )
+            })?;
+        if restored_value.expose_secret() != secret_ref.secret_value {
+            return Err(format!(
+                "restore rehearsal secret value {} mismatch",
+                secret_ref.record.secret_ref_id
+            ));
+        }
+    }
+    if source.audit_events_for_tenant(HARNESS_TENANT_ID)
+        != restored.audit_events_for_tenant(HARNESS_TENANT_ID)
+    {
+        return Err("restore rehearsal audit evidence mismatch".to_owned());
+    }
+    if source.usage_events_for_tenant(HARNESS_TENANT_ID)
+        != restored.usage_events_for_tenant(HARNESS_TENANT_ID)
+    {
+        return Err("restore rehearsal usage evidence mismatch".to_owned());
+    }
+    if ledger_totals(source) != ledger_totals(restored) {
+        return Err("restore rehearsal ledger aggregate mismatch".to_owned());
+    }
+    let audit_text = serde_json::to_string(&restored.audit_events_for_tenant(HARNESS_TENANT_ID))
+        .map_err(|error| format!("restore rehearsal audit serialization failed: {error}"))?;
+    if audit_text.contains("restore-rehearsal-secret-value") {
+        return Err("restore rehearsal leaked raw secret into audit evidence".to_owned());
+    }
+    Ok(())
+}
+
+fn ledger_totals(store: &InMemoryGatewayStore) -> GatewayLedgerTotals {
+    let buckets = store.ledger_buckets_for_tenant(HARNESS_TENANT_ID);
+    GatewayLedgerTotals {
+        bucket_count: buckets.len(),
+        request_count: buckets.iter().map(|bucket| bucket.request_count).sum(),
+        success_count: buckets.iter().map(|bucket| bucket.success_count).sum(),
+        input_tokens: buckets.iter().map(|bucket| bucket.input_tokens).sum(),
+        output_tokens: buckets.iter().map(|bucket| bucket.output_tokens).sum(),
+        estimated_cost_micros: buckets
+            .iter()
+            .map(|bucket| bucket.estimated_cost_micros)
+            .sum(),
+    }
+}
+
+fn run_gateway_harness_load(options: LoadHarnessOptions) -> Result<GatewayHarnessSummary, String> {
+    let workers = options.concurrency.min(options.iterations);
+    let chunk = options.iterations.div_ceil(workers);
+    let worker_results = thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for worker_index in 0..workers {
+            let start = worker_index * chunk;
+            let end = options.iterations.min(start + chunk);
+            if start >= end {
+                continue;
+            }
+            handles.push(scope.spawn(move || run_gateway_harness_iterations(end - start)));
+        }
+        handles
+            .into_iter()
+            .map(std::thread::ScopedJoinHandle::join)
+            .collect::<Vec<_>>()
+    });
+    merge_worker_results(worker_results)
+}
+
+fn run_gateway_harness_soak(options: SoakHarnessOptions) -> Result<GatewayHarnessSummary, String> {
+    let deadline = Instant::now() + Duration::from_secs(options.duration_seconds);
+    let interval = Duration::from_millis(options.interval_ms);
+    let worker_results = thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(options.concurrency);
+        for _ in 0..options.concurrency {
+            handles.push(scope.spawn(move || {
+                let mut summary = GatewayHarnessSummary::default();
+                while Instant::now() < deadline {
+                    summary.merge(run_gateway_harness_iterations(1)?);
+                    if !interval.is_zero() {
+                        thread::sleep(interval);
+                    }
+                }
+                Ok(summary)
+            }));
+        }
+        handles
+            .into_iter()
+            .map(std::thread::ScopedJoinHandle::join)
+            .collect::<Vec<_>>()
+    });
+    merge_worker_results(worker_results)
+}
+
+fn merge_worker_results(
+    worker_results: Vec<std::thread::Result<Result<GatewayHarnessSummary, String>>>,
+) -> Result<GatewayHarnessSummary, String> {
+    let mut summary = GatewayHarnessSummary::default();
+    for result in worker_results {
+        let worker_summary =
+            result.map_err(|_| "gateway harness worker panicked".to_string())??;
+        summary.merge(worker_summary);
+    }
+    Ok(summary)
+}
+
+fn run_gateway_harness_iterations(iterations: usize) -> Result<GatewayHarnessSummary, String> {
+    let mut summary = GatewayHarnessSummary::default();
+    for iteration in 0..iterations {
+        for replay_case in foundation_route_replay_cases() {
+            run_gateway_harness_case(iteration, replay_case, &mut summary)?;
+        }
+        summary.iterations += 1;
+    }
+    Ok(summary)
+}
+
+fn run_gateway_harness_case(
+    iteration: usize,
+    replay_case: &GatewayReplayCase,
+    summary: &mut GatewayHarnessSummary,
+) -> Result<(), String> {
+    let store = InMemoryGatewayStore::default();
+    let response = run_fake_provider_replay(
+        replay_case,
+        &gateway_harness_engine(replay_case)?,
+        &store,
+        gateway_harness_actor(iteration),
+        HARNESS_MODEL_ALIAS_ID,
+        &json!({
+            "model": HARNESS_MODEL_ALIAS_ID,
+            "input": "fake provider harness request"
+        }),
+        chrono::Utc::now(),
+    )
+    .map_err(|error| format!("fake-provider replay {} failed: {error}", replay_case.name))?;
+
+    let authorization_decisions = store.authorization_decisions();
+    if authorization_decisions.len() != 1 {
+        return Err(format!(
+            "fake-provider replay {} recorded {} authorization decisions, expected 1",
+            replay_case.name,
+            authorization_decisions.len()
+        ));
+    }
+    if response.protocol_family != replay_case.protocol_family {
+        return Err(format!(
+            "fake-provider replay {} returned protocol {}, expected {}",
+            replay_case.name,
+            response.protocol_family.as_str(),
+            replay_case.protocol_family.as_str()
+        ));
+    }
+    if response.streaming != replay_case.streaming {
+        return Err(format!(
+            "fake-provider replay {} streaming mismatch",
+            replay_case.name
+        ));
+    }
+    if replay_case.requires_native_grant && response.authorization.allowed {
+        return Err(format!(
+            "fake-provider replay {} unexpectedly allowed provider-native access",
+            replay_case.name
+        ));
+    }
+    if !replay_case.requires_native_grant && !response.authorization.allowed {
+        return Err(format!(
+            "fake-provider replay {} unexpectedly denied access: {}",
+            replay_case.name, response.authorization.reason
+        ));
+    }
+
+    summary.requests += 1;
+    summary.authorization_decisions += authorization_decisions.len();
+    if response.authorization.allowed {
+        summary.allowed += 1;
+    } else {
+        summary.denied += 1;
+    }
+    if response.streaming {
+        summary.streaming += 1;
+    }
+    Ok(())
+}
+
+fn gateway_harness_engine(
+    replay_case: &GatewayReplayCase,
+) -> Result<FoundationAuthorizationEngine, String> {
+    let route = foundation_routes()
+        .iter()
+        .find(|route| {
+            route.protocol_family == Some(replay_case.protocol_family)
+                && route.action == replay_case.action
+        })
+        .ok_or_else(|| format!("replay case {} has no route metadata", replay_case.name))?;
+    Ok(FoundationAuthorizationEngine::new(vec![
+        ActionGrant::project(
+            HARNESS_TENANT_ID,
+            HARNESS_ORGANIZATION_ID,
+            HARNESS_PROJECT_ID,
+            HARNESS_PRINCIPAL_ID,
+            replay_case.action,
+            route.resource(HARNESS_MODEL_ALIAS_ID),
+        ),
+    ]))
+}
+
+fn gateway_harness_actor(iteration: usize) -> AuthenticatedActor {
+    AuthenticatedActor {
+        actor_id: HARNESS_API_KEY_ID.to_owned(),
+        actor_kind: ActorKind::ApiKey,
+        tenant_id: HARNESS_TENANT_ID.to_owned(),
+        organization_id: Some(HARNESS_ORGANIZATION_ID.to_owned()),
+        project_id: Some(HARNESS_PROJECT_ID.to_owned()),
+        principal_id: Some(HARNESS_PRINCIPAL_ID.to_owned()),
+        api_key_id: Some(HARNESS_API_KEY_ID.to_owned()),
+        credential_kind: CredentialKind::ApiKey,
+        auth_strength: 50,
+        expires_at: None,
+        api_key_allowed_actions: Vec::new(),
+        api_key_allowed_resources: Vec::new(),
+        request_id: format!("req_harness_{iteration}"),
+    }
+}
+
+fn print_gateway_harness_summary(
+    harness_kind: &str,
+    summary: GatewayHarnessSummary,
+    elapsed: Duration,
+) {
+    println!(
+        "gateway fake-provider {harness_kind} harness completed: iterations={} requests={} allowed={} denied={} streaming={} authorization_decisions={} elapsed_ms={}",
+        summary.iterations,
+        summary.requests,
+        summary.allowed,
+        summary.denied,
+        summary.streaming,
+        summary.authorization_decisions,
+        elapsed.as_millis()
+    );
 }
 
 fn finalize_docs_site(args: &[String]) -> Result<(), String> {

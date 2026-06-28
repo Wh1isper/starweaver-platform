@@ -1314,6 +1314,31 @@ pub struct BudgetPolicyRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Runtime budget reservation lease evidence.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RuntimeBudgetLeaseRecord {
+    /// Stable runtime lease id.
+    pub lease_id: String,
+    /// Owning tenant.
+    pub tenant_id: TenantId,
+    /// Budget policy that owns the lease.
+    pub budget_policy_id: String,
+    /// Runtime hot-state counter key.
+    pub counter_key: String,
+    /// Gateway request id that acquired the lease.
+    pub request_id: RequestId,
+    /// Reserved counter amount.
+    pub amount: i64,
+    /// Lease lifecycle status: `reserved`, `released`, or `expired`.
+    pub status: String,
+    /// Automatic lease expiry.
+    pub expires_at: DateTime<Utc>,
+    /// Creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Last update timestamp.
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Durable quota policy admin resource.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct QuotaPolicyRecord {

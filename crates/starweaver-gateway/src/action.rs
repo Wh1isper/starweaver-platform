@@ -596,6 +596,11 @@ gateway_actions!(
         "NotificationSink"
     ),
     (
+        NotificationOutboxWrite,
+        "gateway.notification_outbox.write",
+        "NotificationOutboxEvent"
+    ),
+    (
         ObservabilityExportRead,
         "gateway.observability_export.read",
         "OpenTelemetryExportConfig"
@@ -713,6 +718,8 @@ const GATEWAY_OPERATOR_ACTIONS: &[GatewayAction] = &[
     GatewayAction::ProviderHealthOverride,
     GatewayAction::RouteDebugRead,
     GatewayAction::RouteSimulationRun,
+    GatewayAction::NotificationRead,
+    GatewayAction::NotificationOutboxWrite,
     GatewayAction::MaintenanceWindowRead,
     GatewayAction::MaintenanceWindowWrite,
     GatewayAction::EmergencyDisable,

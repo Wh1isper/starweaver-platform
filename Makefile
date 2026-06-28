@@ -4,6 +4,11 @@ GATEWAY_DOCKER_PLATFORM ?= linux/amd64
 DOCKER_COMPOSE ?= docker compose
 GATEWAY_COMPOSE_PROJECT ?= starweaver-platform
 GATEWAY_SMOKE_PORT ?= 18080
+GATEWAY_LOAD_ITERATIONS ?= 36
+GATEWAY_LOAD_CONCURRENCY ?= 4
+GATEWAY_SOAK_SECONDS ?= 1
+GATEWAY_SOAK_CONCURRENCY ?= 2
+GATEWAY_SOAK_INTERVAL_MS ?= 25
 
 .PHONY: help
 help: ## Show available commands
@@ -87,6 +92,26 @@ compose-smoke: ## Build and run the gateway compose stack, then probe /readyz
 	$(DOCKER_COMPOSE) -p $(GATEWAY_COMPOSE_PROJECT)-smoke logs gateway gateway-migrate; \
 	exit 1
 
+.PHONY: gateway-load-harness
+gateway-load-harness: ## Run deterministic fake-provider load harness
+	@$(XTASK) gateway-load-harness \
+		--iterations $(GATEWAY_LOAD_ITERATIONS) \
+		--concurrency $(GATEWAY_LOAD_CONCURRENCY)
+
+.PHONY: gateway-soak-harness
+gateway-soak-harness: ## Run deterministic fake-provider soak harness
+	@$(XTASK) gateway-soak-harness \
+		--duration-seconds $(GATEWAY_SOAK_SECONDS) \
+		--concurrency $(GATEWAY_SOAK_CONCURRENCY) \
+		--interval-ms $(GATEWAY_SOAK_INTERVAL_MS)
+
+.PHONY: gateway-restore-rehearsal
+gateway-restore-rehearsal: ## Run deterministic gateway backup and restore rehearsal
+	@$(XTASK) gateway-restore-rehearsal
+
+.PHONY: gateway-harness-check
+gateway-harness-check: gateway-load-harness gateway-soak-harness gateway-restore-rehearsal ## Run gateway fake-provider and restore harnesses
+
 .PHONY: docs-check
 docs-check: ## Validate documentation structure
 	@echo "Checking docs"
@@ -109,4 +134,4 @@ lint: docs-check ## Run pre-commit hooks and docs checks across the repository
 	@pre-commit run -a
 
 .PHONY: ci
-ci: fmt-check check test scripts-check docs-check docs-build ## Run the same core checks as CI
+ci: fmt-check check test scripts-check gateway-harness-check docs-check docs-build ## Run the same core checks as CI

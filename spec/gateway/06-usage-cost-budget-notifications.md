@@ -567,6 +567,16 @@ Some operators prefer pull-based export. The gateway should support:
 
 Export files must follow the same redaction policy as webhooks.
 
+V1 export job creation accepts `storage_backend: inline_manifest` or
+`storage_backend: object_storage`. `inline_manifest` is the local/default backend
+used for small self-hosted deployments and tests. `object_storage` is an explicit
+operator choice; when no object storage writer is configured, the gateway records
+a failed export job and a redacted failure manifest instead of returning a false
+success. Failure manifests include the storage backend, connection state, retryable
+failure reason, filtered record count, checksum evidence, and no exported rows.
+Manifest reads must enforce `expires_at`; expired manifests are not returned even
+though the export job metadata remains auditable.
+
 ## Budget Reset
 
 Budget reset is an audited admin action. It does not delete usage events.

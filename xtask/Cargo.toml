@@ -11,3 +11,7 @@ publish = false
 workspace = true
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+secrecy = "0.10"
+serde_json = "1"
+starweaver-gateway = { path = "../crates/starweaver-gateway" }

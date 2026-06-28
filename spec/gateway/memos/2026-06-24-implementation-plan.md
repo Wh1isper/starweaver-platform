@@ -127,16 +127,18 @@ Completed foundation slices:
   supported periods, limit kinds, cost-only currency, positive hard and soft
   thresholds, soft-limit ordering, overage mode, conservative consistency mode,
   duplicate policy shape, and safe audit diffs. Runtime preflight,
-  reservations, and terminal budget evaluation are handled incrementally in the
-  usage/ledger and policy enforcement slices.
+  reservations, terminal ledger-backed finalization, and deduplicated redacted
+  budget threshold notifications are handled incrementally in the usage/ledger
+  and policy enforcement slices.
 - Quota policy admin API exposes dry-run validation, idempotent create, list,
   get, and status update routes for rate, token, concurrency, stream-duration,
   and request-body counters. Validation checks tenant-owned scopes, protocol
   family scopes, counter/window/increment-source compatibility, hot-state loss
   behavior, positive limits, fail-limited fallback bounds, duplicate policy
-  shape, and safe audit diffs. Runtime request-rate and request-body preflight
-  execution is implemented; token, concurrency, stream-duration, and terminal
-  quota reconciliation remain in later enforcement slices.
+  shape, and safe audit diffs. Runtime request-rate, request-body, concurrency
+  reservation, terminal token-actual, stream-duration, policy-defined hot-state
+  loss behavior, durable repair for usage-derived counters, and budget lease
+  TTL reconciliation are implemented.
 - OpenTelemetry export config admin API exposes dry-run validation,
   idempotent create, list, get, full config update, and disable routes behind
   observability export actions. Validation checks HTTPS collector endpoints,
@@ -202,10 +204,26 @@ Completed foundation slices:
   hard budget policies now acquire Redis-compatible in-flight reservations and
   release them after terminal usage, so overlapping preflights cannot exceed the
   hard request cap before the durable ledger catches up.
-- Runtime quota enforcement now acquires and releases `concurrent_request`
-  reservations over the Redis-compatible policy counter boundary, and terminal
-  usage events increment `token_actual_rate` counters so later preflights can
-  block once actual token usage reaches the configured quota window limit.
+- Runtime quota enforcement now acquires and releases `concurrent_request` and
+  `concurrent_stream` reservations over the Redis-compatible policy counter
+  boundary. Terminal usage events increment `token_actual_rate` counters, and
+  terminal streaming requests increment `stream_duration` counters so later
+  preflights can block once actual token usage or stream duration reaches the
+  configured quota window limit.
+- Runtime policy reconciliation now repairs usage-derived quota hot counters
+  from durable usage events for `token_actual_rate` and `stream_duration`, only
+  increasing counters when durable evidence proves hot state is stale. Each
+  enforcement-impacting repair writes redacted audit evidence without raw
+  hot-state keys.
+- Runtime request-budget reservations now record short-lived lease evidence.
+  Runtime policy reconciliation expires stale budget leases after their TTL,
+  decrements the in-flight reservation counter idempotently, and writes redacted
+  system audit evidence so strict budget scopes can recover from crashed or
+  abandoned preflights without treating the lease counter as durable usage.
+- Built-in realtime overview now surfaces budget conservative-mode operator
+  evidence for hard-blocking budget policies when runtime policy hot state is
+  unavailable, including affected scope metadata, fail-closed fallback, and
+  runtime budget lease counts.
 - Notification outbox foundations now persist redacted outbox events and
   delivery attempt evidence. Runtime budget and quota policy blocks enqueue
   subscribed budget or quota events without including request bodies, provider
@@ -213,7 +231,10 @@ Completed foundation slices:
   sinks delivered and records retryable failures for delivery backends that are
   not connected, without blocking model requests. Retryable delivery failures
   now use a bounded retry budget and move to `dead_lettered` after the final
-  attempt so due-event polling no longer reselects exhausted events.
+  attempt so due-event polling no longer reselects exhausted events. Delivery
+  polling now has explicit coverage for bounded batch limits and created-order
+  delivery so one worker pass cannot drain more events than its configured
+  batch size.
 - Usage and audit export job foundations now expose strong-auth admin APIs for
   creating export jobs, listing jobs with cursor pagination, reading job
   metadata, and reading manifests. The in-memory object writer boundary emits
@@ -222,10 +243,14 @@ Completed foundation slices:
   and secret material out of export payloads.
 - Emergency operation foundations now expose strong-auth admin APIs for
   disabling upstream credentials, disabling provider endpoints, draining
-  routing groups, freezing config mutations, and listing or reading emergency
-  operation evidence. Each operation requires a reason, expiry, idempotency key,
-  audit event, and operator-alert evidence; config freeze blocks non-emergency
-  admin mutations while still allowing emergency operations and config rollback.
+  routing groups, freezing config mutations, rolling back config snapshots,
+  forcing budget blocks, and listing or reading emergency operation evidence.
+  Each operation requires a reason, expiry, idempotency key, audit event, and
+  operator-alert evidence; config freeze blocks non-emergency admin mutations
+  while still allowing emergency operations and config rollback.
+- Operations docs now include incident runbooks for upstream credential leaks,
+  provider outages, runaway spend, failed migrations, OpenTelemetry exporter
+  outages, and Redis-compatible hot-state outages.
 - Gateway deployment packaging now includes a Linux `amd64` Docker image,
   local Makefile image build target, pull-request image smoke build, scheduled
   `main` nightly GCR publication, and release-tag or GitHub-release GCR
@@ -235,15 +260,22 @@ Completed foundation slices:
   missing Redis-compatible URL, in-memory secret backend, disabled telemetry,
   missing published-snapshot requirement, or an invalid body limit. `/readyz`
   now reports profile validity and dependency readiness details.
+- Fake-provider load and soak harnesses now run through `xtask` and Makefile
+  targets. The default CI-sized harnesses exercise every foundation protocol
+  replay case, including streaming behavior and provider-native denial, through
+  the shared authorization path without live provider secrets or external
+  services.
+- Backup and restore operations docs now cover PostgreSQL, object storage,
+  secret refs, config snapshots, audit evidence, usage evidence, release
+  metadata, restore ordering, and verification gates. A deterministic
+  `gateway-restore-rehearsal` target restores config snapshots, secret refs plus
+  backend values, audit events, usage events, and rebuilt ledger aggregates into
+  a fresh in-memory store and runs in `make ci`.
 
 Next implementation focus:
 
-- Extend runtime policy enforcement beyond preflight with terminal budget
-  finalization, reservation release, concurrency counters, and conservative
-  hot-state loss behavior.
-- Extend notification and export workers with webhook signing, bounded retry
-  budgets, dead-letter handling, signing secret rotation, export manifests,
-  object storage hooks, and emergency runbooks.
+- Continue hardening real backend integrations for notifications, exports,
+  object storage, and OpenTelemetry collectors.
 - Keep auth and authorization layering explicit until the agent platform has a
   second concrete service owner, then split shared modules only where both
   services use the same contract.
@@ -596,6 +628,28 @@ features.
 
 Work items:
 
+- Implemented foundation:
+  - usage events are recorded as immutable durable evidence and folded into
+    event, minute, hour, day, and month ledger buckets;
+  - runtime request budget preflight and reservation release block overlapping
+    hard request budgets without double-reserving;
+  - terminal usage finalization updates token-actual quota counters from
+    provider usage payloads;
+  - streaming runtime preflight acquires concurrent-stream reservations and
+    terminal streaming finalization records stream-duration quota counters;
+  - runtime policy reconciliation repairs usage-derived quota counters from
+    durable usage events and records redacted audit evidence;
+  - runtime budget reservations record TTL-bound lease evidence, and runtime
+    policy reconciliation expires stale request-budget leases with redacted audit
+    evidence;
+  - realtime overview reports budget conservative-mode state, fail-closed
+    fallback, affected scopes, and runtime lease counts for operator triage;
+  - terminal budget finalization evaluates the just-written durable ledger,
+    detects soft, hard, and custom threshold crossings, and enqueues deduplicated
+    redacted budget notification events;
+  - runtime policy hot-state loss is explicit: hard request-budget reservations
+    fail closed, quota policies honor `fail_closed`, `fail_open`, and
+    `fail_limited` with bounded local allowance evidence.
 - Implement usage event writes with idempotency and immutable attribution:
   tenant, organization, project, project member, principal, API key, service
   account, model alias, model target, route policy, routing group, provider

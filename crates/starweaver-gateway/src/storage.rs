@@ -25,9 +25,10 @@ use crate::domain::{
     OrganizationRecord, OtelExportConfigRecord, OtelExporterHealthRecord, OtelHeaderRef,
     OtelResourceAttribute, PricingSkuRecord, ProjectMembershipRecord, ProjectRecord,
     ProviderEndpointRecord, ProviderGrantRecord, QuotaPolicyRecord, ResourceStatus,
-    RoutePolicyRecord, RoutingGroupRecord, RoutingGroupTargetRecord, SecretRefRecord,
-    SecretRefStatus, ServiceAccountRecord, TenancySeed, TenantRecord, UpstreamCredentialRecord,
-    UpstreamCredentialStatus, UsageEventRecord, UserRecord, ValidationDiagnosticRecord,
+    RoutePolicyRecord, RoutingGroupRecord, RoutingGroupTargetRecord, RuntimeBudgetLeaseRecord,
+    SecretRefRecord, SecretRefStatus, ServiceAccountRecord, TenancySeed, TenantRecord,
+    UpstreamCredentialRecord, UpstreamCredentialStatus, UsageEventRecord, UserRecord,
+    ValidationDiagnosticRecord,
 };
 use crate::error::{GatewayError, Result};
 use crate::hot_state::{
@@ -266,6 +267,9 @@ pub trait UsageAccountingRepository: Send + Sync {
 
 /// Runtime policy hot-state repository boundary.
 pub trait RuntimePolicyRepository: Send + Sync {
+    /// Returns whether runtime policy hot state is currently available.
+    fn runtime_policy_hot_state_available(&self) -> bool;
+
     /// Atomically increments one quota counter and returns the post-increment decision.
     fn increment_runtime_quota_counter(
         &self,
@@ -279,6 +283,40 @@ pub trait RuntimePolicyRepository: Send + Sync {
 
     /// Adjusts one hot-state policy counter and returns the post-adjustment value.
     fn adjust_runtime_policy_counter(&self, key: String, delta: i64) -> i64;
+
+    /// Atomically consumes a local fail-limited allowance when hot state is unavailable.
+    fn increment_runtime_policy_loss_allowance_counter(
+        &self,
+        key: String,
+        increment: i64,
+        limit: i64,
+    ) -> RuntimeQuotaCounterDecision;
+
+    /// Adjusts a fail-limited allowance counter and returns the post-adjustment value.
+    fn adjust_runtime_policy_loss_allowance_counter(&self, key: String, delta: i64) -> i64;
+
+    /// Returns the current fail-limited allowance counter value.
+    fn runtime_policy_loss_allowance_counter(&self, key: &str) -> i64;
+
+    /// Records a runtime budget reservation lease.
+    fn record_runtime_budget_lease(&self, record: RuntimeBudgetLeaseRecord);
+
+    /// Marks a runtime budget reservation lease as released.
+    fn release_runtime_budget_lease(
+        &self,
+        lease_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<RuntimeBudgetLeaseRecord>;
+
+    /// Expires reserved runtime budget leases for one tenant.
+    fn expire_runtime_budget_leases(
+        &self,
+        tenant_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<RuntimeBudgetLeaseRecord>;
+
+    /// Lists runtime budget leases for one tenant.
+    fn runtime_budget_leases_for_tenant(&self, tenant_id: &str) -> Vec<RuntimeBudgetLeaseRecord>;
 }
 
 /// Runtime quota counter decision.
@@ -350,6 +388,19 @@ pub trait NotificationOutboxRepository: Send + Sync {
         request: CreateNotificationOutboxEventRequest,
         now: chrono::DateTime<chrono::Utc>,
     ) -> NotificationOutboxEventRecord;
+
+    /// Loads one notification outbox event.
+    fn notification_outbox_event(
+        &self,
+        notification_outbox_event_id: &str,
+    ) -> Option<NotificationOutboxEventRecord>;
+
+    /// Reschedules a dead-lettered outbox event for another delivery cycle.
+    fn replay_dead_lettered_notification_outbox_event(
+        &self,
+        notification_outbox_event_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<NotificationOutboxEventRecord>;
 
     /// Lists notification subscriptions in one tenant.
     fn notification_subscriptions_for_tenant(
@@ -1288,6 +1339,8 @@ pub struct CreateExportJobRequest {
 /// Request to complete an export job with one manifest.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompleteExportJobRequest {
+    /// Terminal export job status.
+    pub status: String,
     /// Object-storage reference.
     pub object_ref: String,
     /// Number of records in the export payload.
@@ -1588,6 +1641,9 @@ pub struct InMemoryGatewayStore {
     usage_events: Arc<RwLock<Vec<UsageEventRecord>>>,
     ledger_buckets: Arc<RwLock<HashMap<String, LedgerBucketRecord>>>,
     runtime_quota_counters: Arc<RwLock<HashMap<String, i64>>>,
+    runtime_policy_hot_state_unavailable: Arc<RwLock<bool>>,
+    runtime_policy_loss_allowances: Arc<RwLock<HashMap<String, i64>>>,
+    runtime_budget_leases: Arc<RwLock<HashMap<String, RuntimeBudgetLeaseRecord>>>,
     authz_decisions: Arc<RwLock<Vec<AuthorizationDecisionRecord>>>,
     action_grants: Arc<RwLock<Vec<ActionGrant>>>,
     route_decisions: Arc<RwLock<Vec<RouteDecisionRecord>>>,
@@ -1622,6 +1678,11 @@ pub struct InMemoryGatewayStore {
 }
 
 impl InMemoryGatewayStore {
+    /// Sets runtime policy hot-state availability for tests and local fault injection.
+    pub fn set_runtime_policy_hot_state_available(&self, available: bool) {
+        *write_lock(&self.runtime_policy_hot_state_unavailable) = !available;
+    }
+
     /// Inserts an API key record into the prefix index.
     pub fn insert_api_key(&self, record: ApiKeyRecord) {
         let mut api_keys = match self.api_keys.write() {
@@ -1898,6 +1959,13 @@ impl InMemoryGatewayStore {
     /// Records an immutable audit event.
     pub fn record_audit_event(&self, record: AuditEventRecord) {
         write_lock(&self.audit_events).push(record);
+    }
+
+    /// Restores one secret reference with its backend value for backup rehearsal.
+    pub fn restore_secret_ref(&self, record: SecretRefRecord, secret_value: SecretString) {
+        let secret_ref_id = record.secret_ref_id.clone();
+        write_lock(&self.secret_refs).insert(secret_ref_id.clone(), record);
+        write_lock(&self.secret_values).insert(secret_ref_id, secret_value);
     }
 
     /// Returns a stored idempotent response, or rejects conflicting replays.
@@ -2504,6 +2572,10 @@ impl UsageAccountingRepository for InMemoryGatewayStore {
 }
 
 impl RuntimePolicyRepository for InMemoryGatewayStore {
+    fn runtime_policy_hot_state_available(&self) -> bool {
+        !*read_lock(&self.runtime_policy_hot_state_unavailable)
+    }
+
     fn increment_runtime_quota_counter(
         &self,
         key: String,
@@ -2544,6 +2616,105 @@ impl RuntimePolicyRepository for InMemoryGatewayStore {
             counters.insert(key, next);
         }
         next
+    }
+
+    fn increment_runtime_policy_loss_allowance_counter(
+        &self,
+        key: String,
+        increment: i64,
+        limit: i64,
+    ) -> RuntimeQuotaCounterDecision {
+        let mut counters = write_lock(&self.runtime_policy_loss_allowances);
+        let current = {
+            let current = counters.entry(key).or_insert(0);
+            *current = current.saturating_add(increment);
+            *current
+        };
+        drop(counters);
+        RuntimeQuotaCounterDecision {
+            current,
+            allowed: current <= limit,
+        }
+    }
+
+    fn adjust_runtime_policy_loss_allowance_counter(&self, key: String, delta: i64) -> i64 {
+        let mut counters = write_lock(&self.runtime_policy_loss_allowances);
+        let next = counters
+            .get(&key)
+            .copied()
+            .unwrap_or_default()
+            .saturating_add(delta)
+            .max(0);
+        if next == 0 {
+            counters.remove(&key);
+        } else {
+            counters.insert(key, next);
+        }
+        next
+    }
+
+    fn runtime_policy_loss_allowance_counter(&self, key: &str) -> i64 {
+        read_lock(&self.runtime_policy_loss_allowances)
+            .get(key)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn record_runtime_budget_lease(&self, record: RuntimeBudgetLeaseRecord) {
+        write_lock(&self.runtime_budget_leases).insert(record.lease_id.clone(), record);
+    }
+
+    fn release_runtime_budget_lease(
+        &self,
+        lease_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<RuntimeBudgetLeaseRecord> {
+        let mut leases = write_lock(&self.runtime_budget_leases);
+        let released = leases.get_mut(lease_id).and_then(|lease| {
+            if lease.status != "reserved" {
+                return None;
+            }
+            "released".clone_into(&mut lease.status);
+            lease.updated_at = now;
+            Some(lease.clone())
+        });
+        drop(leases);
+        released
+    }
+
+    fn expire_runtime_budget_leases(
+        &self,
+        tenant_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<RuntimeBudgetLeaseRecord> {
+        let mut expired = Vec::new();
+        let mut leases = write_lock(&self.runtime_budget_leases);
+        for lease in leases.values_mut() {
+            if lease.tenant_id == tenant_id && lease.status == "reserved" && lease.expires_at <= now
+            {
+                "expired".clone_into(&mut lease.status);
+                lease.updated_at = now;
+                expired.push(lease.clone());
+            }
+        }
+        drop(leases);
+        expired.sort_by(|left, right| left.lease_id.cmp(&right.lease_id));
+        expired
+    }
+
+    fn runtime_budget_leases_for_tenant(&self, tenant_id: &str) -> Vec<RuntimeBudgetLeaseRecord> {
+        let mut leases = read_lock(&self.runtime_budget_leases)
+            .values()
+            .filter(|record| record.tenant_id == tenant_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        leases.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| left.lease_id.cmp(&right.lease_id))
+        });
+        leases
     }
 }
 
@@ -2598,6 +2769,11 @@ impl ExportRepository for InMemoryGatewayStore {
         request: CompleteExportJobRequest,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(ExportJobRecord, ExportManifestRecord)> {
+        if !matches!(request.status.as_str(), "completed" | "failed") {
+            return Err(GatewayError::BadRequest {
+                message: "export_job_status_invalid".to_owned(),
+            });
+        }
         if request.record_count < 0 || request.byte_count < 0 {
             return Err(GatewayError::BadRequest {
                 message: "export_manifest_counts_invalid".to_owned(),
@@ -2609,7 +2785,7 @@ impl ExportRepository for InMemoryGatewayStore {
                 resource: format!("export job {export_job_id}"),
             });
         };
-        "completed".clone_into(&mut job.status);
+        request.status.clone_into(&mut job.status);
         job.resource_version = job.resource_version.saturating_add(1);
         job.updated_at = now;
         job.completed_at = Some(now);
@@ -2762,6 +2938,43 @@ impl NotificationOutboxRepository for InMemoryGatewayStore {
         };
         events.insert(record.notification_outbox_event_id.clone(), record.clone());
         record
+    }
+
+    fn notification_outbox_event(
+        &self,
+        notification_outbox_event_id: &str,
+    ) -> Option<NotificationOutboxEventRecord> {
+        read_lock(&self.notification_outbox_events)
+            .get(notification_outbox_event_id)
+            .cloned()
+    }
+
+    fn replay_dead_lettered_notification_outbox_event(
+        &self,
+        notification_outbox_event_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<NotificationOutboxEventRecord> {
+        let record = {
+            let mut events = write_lock(&self.notification_outbox_events);
+            let Some(event) = events.get_mut(notification_outbox_event_id) else {
+                return Err(GatewayError::NotFound {
+                    resource: format!("notification outbox event {notification_outbox_event_id}"),
+                });
+            };
+            if event.status != "dead_lettered" {
+                return Err(GatewayError::BadRequest {
+                    message: "notification_replay_requires_dead_lettered_event".to_owned(),
+                });
+            }
+            "pending".clone_into(&mut event.status);
+            event.attempt_count = 0;
+            event.next_attempt_at = Some(now);
+            event.updated_at = now;
+            let record = event.clone();
+            drop(events);
+            record
+        };
+        Ok(record)
     }
 
     fn notification_subscriptions_for_tenant(

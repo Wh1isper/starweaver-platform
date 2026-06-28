@@ -999,6 +999,36 @@ const FOUNDATION_ROUTES: &[RouteMetadata] = &[
         audit_event_type: "gateway.emergency.freeze",
     },
     RouteMetadata {
+        method: Method::POST,
+        path_pattern: concat!(
+            "/admin/v1/emergency/config/snapshots/",
+            "{source_snapshot_id}",
+            "/rollback"
+        ),
+        protocol_family: None,
+        action: GatewayAction::ConfigRollback,
+        resource_kind: "ConfigSnapshot",
+        scope_params: &["tenant_id", "source_snapshot_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.emergency.rollback",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: concat!(
+            "/admin/v1/emergency/budget-policies/",
+            "{budget_policy_id}",
+            "/force-block"
+        ),
+        protocol_family: None,
+        action: GatewayAction::EmergencyDisable,
+        resource_kind: "EmergencyOperation",
+        scope_params: &["tenant_id", "budget_policy_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.emergency.force_budget_block",
+    },
+    RouteMetadata {
         method: Method::GET,
         path_pattern: "/admin/v1/observability/otel-export/configs",
         protocol_family: None,
@@ -1217,6 +1247,21 @@ const FOUNDATION_ROUTES: &[RouteMetadata] = &[
         allow_api_key: false,
         strong_auth_required: true,
         audit_event_type: "gateway.notification_subscription.update",
+    },
+    RouteMetadata {
+        method: Method::POST,
+        path_pattern: concat!(
+            "/admin/v1/notification/outbox/",
+            "{notification_outbox_event_id}",
+            "/replay"
+        ),
+        protocol_family: None,
+        action: GatewayAction::NotificationOutboxWrite,
+        resource_kind: "NotificationOutboxEvent",
+        scope_params: &["tenant_id", "notification_outbox_event_id"],
+        allow_api_key: false,
+        strong_auth_required: true,
+        audit_event_type: "gateway.notification_outbox.replay",
     },
     RouteMetadata {
         method: Method::GET,

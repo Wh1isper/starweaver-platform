@@ -328,6 +328,7 @@ Evidence and operations actions:
 | `gateway.export.create`                  | export job                                |
 | `gateway.notification.read`              | `NotificationSink` or delivery            |
 | `gateway.notification.write`             | `NotificationSink`                        |
+| `gateway.notification_outbox.write`      | `NotificationOutboxEvent`                 |
 | `gateway.observability_export.read`      | `OpenTelemetryExportConfig`               |
 | `gateway.observability_export.write`     | `OpenTelemetryExportConfig`               |
 | `gateway.health.read`                    | runtime health resource                   |
@@ -375,7 +376,8 @@ REST endpoints require action checks before accessing storage.
 | `/admin/v1/quota-policies/*`                                                           | `gateway.quota_policy.read`, `gateway.quota_policy.write`                                                              |
 | `/admin/v1/admission-policies/*`                                                       | `gateway.admission_policy.read`, `gateway.admission_policy.write`                                                      |
 | `/admin/v1/redaction-policies/*`                                                       | `gateway.redaction_policy.read`, `gateway.redaction_policy.write`                                                      |
-| `/admin/v1/notification-sinks/*`                                                       | `gateway.notification.read`, `gateway.notification.write`                                                              |
+| `/admin/v1/notification/sinks/*`                                                       | `gateway.notification.read`, `gateway.notification.write`                                                              |
+| `/admin/v1/notification/outbox/*`                                                      | `gateway.notification_outbox.write` for dead-letter replay                                                             |
 | `/admin/v1/usage/summary`, `/admin/v1/usage/timeseries`, `/admin/v1/usage/breakdown/*` | `gateway.usage.summary.read` scoped by tenant/org/project/key                                                          |
 | `/admin/v1/usage/events`                                                               | `gateway.usage.event.read` scoped by tenant/org/project/key                                                            |
 | `/admin/v1/usage/exports/*`                                                            | `gateway.export.read`, `gateway.export.create`                                                                         |

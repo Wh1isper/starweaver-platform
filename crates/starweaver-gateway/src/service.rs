@@ -41,13 +41,13 @@ use crate::domain::{
     ConfigWorkerReloadRecord, DirectoryStatus, EmergencyOperationRecord, ExportJobRecord,
     ExportManifestRecord, ExternalIdentityRecord, LedgerBucketRecord, LoginProviderRecord,
     MembershipStatus, ModelAliasRecord, ModelTargetRecord, NotificationDeliveryAttemptRecord,
-    NotificationSinkRecord, NotificationSubscriptionRecord, OrganizationInvitationRecord,
-    OrganizationMembershipRecord, OrganizationRecord, OtelExportConfigRecord,
-    OtelExporterHealthRecord, OtelHeaderRef, OtelResourceAttribute, PricingSkuRecord,
-    ProjectMembershipRecord, ProjectRecord, ProviderEndpointRecord, ProviderGrantRecord,
-    QuotaPolicyRecord, ResourceStatus, RoutePolicyRecord, RoutingGroupRecord,
-    RoutingGroupTargetRecord, SecretRefRecord, SecretRefStatus, ServiceAccountRecord,
-    UpstreamCredentialRecord, UpstreamCredentialStatus, UsageEventRecord,
+    NotificationOutboxEventRecord, NotificationSinkRecord, NotificationSubscriptionRecord,
+    OrganizationInvitationRecord, OrganizationMembershipRecord, OrganizationRecord,
+    OtelExportConfigRecord, OtelExporterHealthRecord, OtelHeaderRef, OtelResourceAttribute,
+    PricingSkuRecord, ProjectMembershipRecord, ProjectRecord, ProviderEndpointRecord,
+    ProviderGrantRecord, QuotaPolicyRecord, ResourceStatus, RoutePolicyRecord, RoutingGroupRecord,
+    RoutingGroupTargetRecord, RuntimeBudgetLeaseRecord, SecretRefRecord, SecretRefStatus,
+    ServiceAccountRecord, UpstreamCredentialRecord, UpstreamCredentialStatus, UsageEventRecord,
     ValidationDiagnosticRecord,
 };
 use crate::error::{GatewayError, Result};
@@ -118,6 +118,16 @@ const ADMIN_EMERGENCY_DRAIN_ROUTING_GROUP_PATH: &str = concat!(
     "/drain"
 );
 const ADMIN_EMERGENCY_FREEZE_CONFIG_PATH: &str = "/admin/v1/emergency/config/freeze";
+const ADMIN_EMERGENCY_ROLLBACK_CONFIG_SNAPSHOT_PATH: &str = concat!(
+    "/admin/v1/emergency/config/snapshots/",
+    "{source_snapshot_id}",
+    "/rollback"
+);
+const ADMIN_EMERGENCY_FORCE_BUDGET_BLOCK_PATH: &str = concat!(
+    "/admin/v1/emergency/budget-policies/",
+    "{budget_policy_id}",
+    "/force-block"
+);
 const ADMIN_PROJECT_GET_PATH: &str = concat!("/admin/v1/projects/", "{project_id}");
 const ADMIN_ORGANIZATION_GET_PATH: &str = concat!("/admin/v1/organizations/", "{organization_id}");
 const ADMIN_USER_GET_PATH: &str = concat!("/admin/v1/users/", "{user_id}");
@@ -208,6 +218,11 @@ const ADMIN_NOTIFICATION_SUBSCRIPTION_GET_PATH: &str = concat!(
     "{notification_sink_id}",
     "/subscriptions/",
     "{notification_subscription_id}"
+);
+const ADMIN_NOTIFICATION_OUTBOX_REPLAY_PATH: &str = concat!(
+    "/admin/v1/notification/outbox/",
+    "{notification_outbox_event_id}",
+    "/replay"
 );
 const ADMIN_LOGIN_PROVIDER_GET_PATH: &str =
     concat!("/admin/v1/identity-providers/", "{login_provider_id}");
@@ -305,6 +320,7 @@ const SINGLE_USER_PROJECT_MEMBER_ID: &str = "pm_single_user";
 const SINGLE_USER_SESSION_TTL_SECONDS: i64 = 12 * 60 * 60;
 const NOTIFICATION_DELIVERY_MAX_ATTEMPTS: i32 = 3;
 const NOTIFICATION_DELIVERY_RETRY_DELAY_SECONDS: i64 = 60;
+const RUNTIME_BUDGET_LEASE_TTL_SECONDS: i64 = 300;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Gateway service configuration.
@@ -854,6 +870,14 @@ fn emergency_admin_routes() -> Router<AppState> {
             ADMIN_EMERGENCY_FREEZE_CONFIG_PATH,
             post(emergency_freeze_config),
         )
+        .route(
+            ADMIN_EMERGENCY_ROLLBACK_CONFIG_SNAPSHOT_PATH,
+            post(emergency_rollback_config_snapshot),
+        )
+        .route(
+            ADMIN_EMERGENCY_FORCE_BUDGET_BLOCK_PATH,
+            post(emergency_force_budget_block),
+        )
 }
 
 fn auth_routes() -> Router<AppState> {
@@ -1069,6 +1093,10 @@ fn notification_admin_routes() -> Router<AppState> {
         .route(
             ADMIN_NOTIFICATION_SUBSCRIPTION_GET_PATH,
             get(get_notification_subscription).patch(update_notification_subscription),
+        )
+        .route(
+            ADMIN_NOTIFICATION_OUTBOX_REPLAY_PATH,
+            post(replay_notification_outbox_event),
         )
 }
 
@@ -1554,6 +1582,8 @@ struct AdminUpdateQuotaPolicyRequest {
 struct AdminCreateExportJobRequest {
     idempotency_key: String,
     export_kind: String,
+    #[serde(default = "default_export_storage_backend")]
+    storage_backend: String,
     #[serde(default)]
     scope_kind: Option<String>,
     #[serde(default)]
@@ -1653,6 +1683,33 @@ pub struct OtelExporterRunSummary {
     pub dropped_metric_count: i64,
 }
 
+/// Summary returned by one deterministic runtime-policy reconciliation tick.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimePolicyReconciliationSummary {
+    /// Tenant processed by this tick.
+    pub tenant_id: String,
+    /// Worker role or instance id.
+    pub worker_id: String,
+    /// Whether the runtime-policy hot-state backend was available.
+    pub hot_state_available: bool,
+    /// Number of active preflight-enforced budget policies considered.
+    pub considered_budget_policy_count: usize,
+    /// Number of runtime budget leases that expired during this tick.
+    pub expired_budget_lease_count: usize,
+    /// Total reserved amount released by expired budget leases.
+    pub expired_budget_lease_total: i64,
+    /// Number of active quota policies considered.
+    pub considered_quota_policy_count: usize,
+    /// Number of quota policies whose counters can be repaired from durable usage.
+    pub repairable_quota_policy_count: usize,
+    /// Number of hot counters repaired.
+    pub repaired_counter_count: usize,
+    /// Number of audit events written for enforcement-impacting repairs.
+    pub audit_event_count: usize,
+    /// Total positive delta applied to repaired counters.
+    pub repaired_delta_total: i64,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct AdminCreateNotificationSinkRequest {
     idempotency_key: String,
@@ -1690,6 +1747,12 @@ struct AdminUpdateNotificationSubscriptionRequest {
     expected_version: i64,
     status: ResourceStatus,
     reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AdminReplayNotificationOutboxEventRequest {
+    idempotency_key: String,
+    reason: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2387,6 +2450,7 @@ async fn create_export_job(
     let now = chrono::Utc::now();
     validate_idempotency_key(&request.idempotency_key)?;
     validate_export_kind(&request.export_kind)?;
+    let storage_backend = validate_export_storage_backend(&request.storage_backend)?;
     let scope = usage_scope_from_query(
         &state,
         &actor,
@@ -2414,7 +2478,7 @@ async fn create_export_job(
     let offset = export_list_offset(request.cursor.as_deref())?;
     let retention_days = export_retention_days(request.retention_days)?;
     let export_page = build_export_page(&state, &request.export_kind, &scope, limit, offset)?;
-    let query_document = export_query_document(&request, &scope, limit);
+    let query_document = export_query_document(&request, &scope, limit, storage_backend);
     let job = state.store.create_export_job(
         CreateExportJobRequest {
             tenant_id: actor.tenant_id.clone(),
@@ -2426,24 +2490,25 @@ async fn create_export_job(
         },
         now,
     )?;
-    let object_ref = export_object_ref(&job);
-    let payload_document = export_payload_document(&job, &scope, &request, &export_page, limit);
-    let payload_bytes =
-        serde_json::to_vec(&payload_document).map_err(|error| GatewayError::Internal {
-            message: format!("failed to encode export payload: {error}"),
-        })?;
-    let checksum = export_payload_checksum(&payload_bytes);
     let expires_at = now + chrono::Duration::days(retention_days);
-    let manifest_document =
-        export_manifest_document(&job, &scope, &export_page, &object_ref, &checksum);
+    let export_result = build_export_result(
+        &state,
+        &job,
+        &scope,
+        &request,
+        &export_page,
+        limit,
+        storage_backend,
+    )?;
     let (job, manifest) = state.store.complete_export_job(
         &job.export_job_id,
         CompleteExportJobRequest {
-            object_ref,
-            record_count: i64::try_from(export_page.rows.len()).unwrap_or(i64::MAX),
-            byte_count: i64::try_from(payload_bytes.len()).unwrap_or(i64::MAX),
-            checksum,
-            manifest_document,
+            status: export_result.status.to_owned(),
+            object_ref: export_result.object_ref,
+            record_count: export_result.record_count,
+            byte_count: export_result.byte_count,
+            checksum: export_result.checksum,
+            manifest_document: export_result.manifest_document,
             expires_at,
         },
         now,
@@ -2517,7 +2582,7 @@ async fn get_export_job_manifest(
         now,
     )?;
     let job = export_job_for_actor(&state, &actor, &export_job_id)?;
-    let manifest = export_manifest_for_job(&state, &job)?;
+    let manifest = export_manifest_for_job(&state, &job, now)?;
     Ok(Json(json!({
         "schema": "gateway.admin.export_manifest.v1",
         "resource": export_manifest_resource_body(&manifest)
@@ -2910,6 +2975,183 @@ async fn emergency_freeze_config(
     Ok(Json(response))
 }
 
+async fn emergency_rollback_config_snapshot(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(source_snapshot_id): Path<String>,
+    Json(request): Json<AdminEmergencyOperationRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    validate_emergency_operation_request(&request, now)?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::POST,
+        ADMIN_EMERGENCY_ROLLBACK_CONFIG_SNAPSHOT_PATH,
+        &source_snapshot_id,
+        now,
+    )?;
+    let scope_key = emergency_idempotency_scope_key(
+        "rollback_config_snapshot",
+        &source_snapshot_id,
+        &request.idempotency_key,
+    );
+    let request_hash = emergency_request_hash(&source_snapshot_id, &request)?;
+    if let Some(response) =
+        state
+            .store
+            .idempotency_response(&actor.tenant_id, &scope_key, &request_hash, now)?
+    {
+        return Ok(Json(response_with_replay_flag(response, true)));
+    }
+
+    let before_version = state
+        .store
+        .latest_published_snapshot_for_tenant(&actor.tenant_id)
+        .map(|snapshot| snapshot.version);
+    let snapshot = rollback_config_snapshot_document(
+        &state.store,
+        actor.tenant_id.clone(),
+        &source_snapshot_id,
+        actor_principal_or_actor_id(&actor),
+        now,
+    )?;
+    let operation = create_emergency_operation_record(
+        &state,
+        &actor,
+        EmergencyOperationInput {
+            operation_kind: "rollback_config_snapshot",
+            target_resource_kind: "ConfigSnapshot",
+            target_resource_id: source_snapshot_id.clone(),
+            organization_id: None,
+            project_id: None,
+            reason: request.reason.clone(),
+            expires_at: request.expires_at,
+        },
+        now,
+    )?;
+    let affected_resource = json!({
+        "kind": "config_snapshot",
+        "id": &snapshot.metadata.snapshot_id,
+        "snapshot_id": &snapshot.metadata.snapshot_id,
+        "tenant_id": &snapshot.metadata.tenant_id,
+        "version": snapshot.metadata.version,
+        "checksum": &snapshot.metadata.checksum,
+        "status": &snapshot.metadata.status,
+        "rollback_of": &snapshot.document.rollback_of,
+        "published_at": snapshot.published_at
+    });
+    let audit_event_id = record_emergency_operation_audit(
+        &state,
+        &actor,
+        &operation,
+        before_version,
+        Some(snapshot.metadata.version),
+        &json!({
+            "rollback_of": source_snapshot_id,
+            "created_snapshot_id": &snapshot.metadata.snapshot_id,
+            "created_snapshot_version": snapshot.metadata.version
+        }),
+        now,
+    );
+    let response =
+        emergency_operation_mutation_response(&operation, &affected_resource, &audit_event_id);
+    record_idempotent_admin_response(
+        &state,
+        actor.tenant_id,
+        scope_key,
+        request_hash,
+        &response,
+        now,
+    );
+    Ok(Json(response))
+}
+
+async fn emergency_force_budget_block(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(budget_policy_id): Path<String>,
+    Json(request): Json<AdminEmergencyOperationRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    validate_emergency_operation_request(&request, now)?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::POST,
+        ADMIN_EMERGENCY_FORCE_BUDGET_BLOCK_PATH,
+        &budget_policy_id,
+        now,
+    )?;
+    let scope_key = emergency_idempotency_scope_key(
+        "force_budget_block",
+        &budget_policy_id,
+        &request.idempotency_key,
+    );
+    let request_hash = emergency_request_hash(&budget_policy_id, &request)?;
+    if let Some(response) =
+        state
+            .store
+            .idempotency_response(&actor.tenant_id, &scope_key, &request_hash, now)?
+    {
+        return Ok(Json(response_with_replay_flag(response, true)));
+    }
+
+    let policy = budget_policy_for_actor(&state, &actor, &budget_policy_id)?;
+    let expected_version = required_emergency_expected_version(&request)?;
+    ensure_emergency_expected_version(expected_version, policy.resource_version)?;
+    let operation = create_emergency_operation_record(
+        &state,
+        &actor,
+        EmergencyOperationInput {
+            operation_kind: "force_budget_block",
+            target_resource_kind: "BudgetPolicy",
+            target_resource_id: policy.budget_policy_id.clone(),
+            organization_id: policy.organization_id.clone(),
+            project_id: policy.project_id.clone(),
+            reason: request.reason.clone(),
+            expires_at: request.expires_at,
+        },
+        now,
+    )?;
+    let affected_resource = json!({
+        "kind": "budget_policy_force_block",
+        "id": &policy.budget_policy_id,
+        "tenant_id": &policy.tenant_id,
+        "status": "forced_block",
+        "expires_at": request.expires_at,
+        "budget_policy": budget_policy_resource_body(&policy)
+    });
+    let audit_event_id = record_emergency_operation_audit(
+        &state,
+        &actor,
+        &operation,
+        Some(policy.resource_version),
+        Some(policy.resource_version),
+        &json!({
+            "force_block": true,
+            "policy_scope": {
+                "kind": &policy.scope_kind,
+                "id": &policy.scope_id
+            },
+            "policy_limit_kind": &policy.limit_kind,
+            "policy_overage_mode": &policy.overage_mode
+        }),
+        now,
+    );
+    let response =
+        emergency_operation_mutation_response(&operation, &affected_resource, &audit_event_id);
+    record_idempotent_admin_response(
+        &state,
+        actor.tenant_id,
+        scope_key,
+        request_hash,
+        &response,
+        now,
+    );
+    Ok(Json(response))
+}
+
 async fn validate_config_snapshot(
     State(state): State<AppState>,
     Extension(actor): Extension<AuthenticatedActor>,
@@ -3108,12 +3350,7 @@ async fn get_realtime_overview(
     let worker_summary = realtime_worker_summary(&state, &actor.tenant_id, config_version);
     let otel_exporter_summary = realtime_otel_exporter_summary(&state, &actor.tenant_id);
     let validation_summary = validation_diagnostics_summary(&state, &actor.tenant_id);
-    let budget_policy_count = state
-        .store
-        .budget_policies_for_tenant(&actor.tenant_id)
-        .into_iter()
-        .filter(|policy| policy.status != ResourceStatus::Deleted)
-        .count();
+    let budget_summary = realtime_budget_summary(&state, &actor.tenant_id);
     let quota_policy_count = state
         .store
         .quota_policies_for_tenant(&actor.tenant_id)
@@ -3147,11 +3384,7 @@ async fn get_realtime_overview(
         "providers": provider_summary,
         "routes": route_summary,
         "validation": validation_summary,
-        "budgets": {
-            "configured_policy_count": budget_policy_count,
-            "hot_state_status": "unavailable",
-            "source": "policy_config_only"
-        },
+        "budgets": budget_summary,
         "quotas": {
             "configured_policy_count": quota_policy_count,
             "hot_state_status": "unavailable",
@@ -7260,6 +7493,72 @@ async fn update_notification_subscription(
     })))
 }
 
+async fn replay_notification_outbox_event(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(notification_outbox_event_id): Path<String>,
+    Json(request): Json<AdminReplayNotificationOutboxEventRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    validate_idempotency_key(&request.idempotency_key)?;
+    validate_required_reason(&request.reason)?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::POST,
+        ADMIN_NOTIFICATION_OUTBOX_REPLAY_PATH,
+        &notification_outbox_event_id,
+        now,
+    )?;
+    let before =
+        notification_outbox_event_for_actor(&state, &actor, &notification_outbox_event_id)?;
+    let request_hash = stable_request_hash(&request)?;
+    let scope_key = idempotency_scope_key(
+        &format!("notification_outbox:replay:{notification_outbox_event_id}"),
+        &request.idempotency_key,
+    );
+    if let Some(response) =
+        state
+            .store
+            .idempotency_response(&actor.tenant_id, &scope_key, &request_hash, now)?
+    {
+        return Ok(Json(response_with_replay_flag(response, true)));
+    }
+    let replayed = state
+        .store
+        .replay_dead_lettered_notification_outbox_event(&notification_outbox_event_id, now)?;
+    let audit_event_id = record_admin_resource_audit(
+        &state,
+        &actor,
+        AdminResourceAuditInput {
+            event_type: "gateway.notification_outbox.replay",
+            scope_kind: "tenant",
+            scope_id: actor.tenant_id.clone(),
+            resource_kind: "NotificationOutboxEvent",
+            resource_id: replayed.notification_outbox_event_id.clone(),
+            before_version: None,
+            after_version: None,
+            redacted_diff: notification_outbox_replay_diff(&before, &replayed, &request.reason),
+            occurred_at: now,
+        },
+    );
+    let response = json!({
+        "schema": "gateway.admin.notification_outbox_replay.v1",
+        "resource": notification_outbox_event_resource_body(&replayed),
+        "audit_event_id": audit_event_id,
+        "idempotency_replayed": false
+    });
+    record_idempotent_admin_response(
+        &state,
+        actor.tenant_id,
+        scope_key,
+        request_hash,
+        &response,
+        now,
+    );
+    Ok(Json(response))
+}
+
 async fn list_login_providers(
     State(state): State<AppState>,
     Extension(actor): Extension<AuthenticatedActor>,
@@ -9185,6 +9484,7 @@ async fn model_ingress(
                 replay_case,
                 route_decision_id,
                 selected,
+                requested_model: &requested_model,
                 response: &response,
                 started_at: attempt_started_at,
                 ended_at: attempt_ended_at,
@@ -9199,6 +9499,7 @@ struct TerminalUsageInput<'a> {
     replay_case: &'a GatewayReplayCase,
     route_decision_id: &'a str,
     selected: &'a SelectedRouteEvidence,
+    requested_model: &'a str,
     response: &'a RuntimeIngressResponse,
     started_at: chrono::DateTime<chrono::Utc>,
     ended_at: chrono::DateTime<chrono::Utc>,
@@ -9212,6 +9513,7 @@ struct RuntimePolicyPreflight {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RuntimeBudgetReservation {
+    lease_id: String,
     counter_key: String,
     amount: i64,
 }
@@ -9220,6 +9522,13 @@ struct RuntimeBudgetReservation {
 struct RuntimeQuotaReservation {
     counter_key: String,
     amount: i64,
+    counter_backend: RuntimePolicyCounterBackend,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimePolicyCounterBackend {
+    HotState,
+    LossAllowance,
 }
 
 fn record_terminal_usage_event(
@@ -9229,7 +9538,6 @@ fn record_terminal_usage_event(
 ) {
     let (usage_payload, usage_confidence) =
         normalized_usage_payload(input.response.protocol_family, &input.response.body);
-    finalize_runtime_policy_terminal(state, actor, input, &usage_payload);
     let latency_ms = input
         .ended_at
         .signed_duration_since(input.started_at)
@@ -9247,6 +9555,7 @@ fn record_terminal_usage_event(
         });
     let service_account_id =
         matches!(actor.actor_kind, ActorKind::ServiceAccount).then(|| actor.actor_id.clone());
+    let cost_payload = unpriced_cost_payload();
     state.store.record_usage_event(UsageEventRecord {
         usage_event_id: new_prefixed_id("use"),
         tenant_id: actor.tenant_id.clone(),
@@ -9269,20 +9578,49 @@ fn record_terminal_usage_event(
         latency_ms: Some(latency_ms),
         time_to_first_token_ms: input.replay_case.streaming.then_some(latency_ms),
         status: "success".to_owned(),
-        usage_payload,
-        cost_payload: json!({
-            "currency": "USD",
-            "unit": "micro_usd",
-            "total_cost": 0,
-            "confidence": "unpriced",
-            "pricing_version": "unpriced",
-            "diagnostics": ["pricing_resolution_not_connected"]
-        }),
+        usage_payload: usage_payload.clone(),
+        cost_payload: cost_payload.clone(),
         occurred_at: input.ended_at,
     });
+    finalize_runtime_policy_terminal(state, actor, input, &usage_payload, &cost_payload);
+}
+
+fn unpriced_cost_payload() -> Value {
+    json!({
+        "currency": "USD",
+        "unit": "micro_usd",
+        "total_cost": 0,
+        "confidence": "unpriced",
+        "pricing_version": "unpriced",
+        "diagnostics": ["pricing_resolution_not_connected"]
+    })
 }
 
 fn finalize_runtime_policy_terminal(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    input: &TerminalUsageInput<'_>,
+    usage_payload: &Value,
+    cost_payload: &Value,
+) {
+    finalize_runtime_quota_terminal(state, actor, input, usage_payload);
+    finalize_runtime_budget_terminal(state, actor, input, usage_payload, cost_payload);
+}
+
+fn finalize_runtime_quota_terminal(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    input: &TerminalUsageInput<'_>,
+    usage_payload: &Value,
+) {
+    if !state.store.runtime_policy_hot_state_available() {
+        return;
+    }
+    finalize_runtime_token_actual_quota_terminal(state, actor, input, usage_payload);
+    finalize_runtime_stream_duration_quota_terminal(state, actor, input);
+}
+
+fn finalize_runtime_token_actual_quota_terminal(
     state: &AppState,
     actor: &AuthenticatedActor,
     input: &TerminalUsageInput<'_>,
@@ -9309,6 +9647,242 @@ fn finalize_runtime_policy_terminal(
         state
             .store
             .adjust_runtime_policy_counter(key, terminal_tokens);
+    }
+}
+
+fn finalize_runtime_stream_duration_quota_terminal(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    input: &TerminalUsageInput<'_>,
+) {
+    if !input.replay_case.streaming {
+        return;
+    }
+    let stream_seconds = runtime_stream_duration_seconds(input);
+    for policy in state.store.quota_policies_for_tenant(&actor.tenant_id) {
+        if policy.status != ResourceStatus::Active
+            || policy.counter_kind != "stream_duration"
+            || policy.increment_source != "stream_start"
+            || !runtime_quota_policy_matches_request(
+                &policy,
+                actor,
+                input.replay_case,
+                Some(input.selected),
+            )
+        {
+            continue;
+        }
+        let key = runtime_quota_counter_key(&policy, input.ended_at);
+        state
+            .store
+            .adjust_runtime_policy_counter(key, stream_seconds);
+    }
+}
+
+fn runtime_stream_duration_seconds(input: &TerminalUsageInput<'_>) -> i64 {
+    input
+        .ended_at
+        .signed_duration_since(input.started_at)
+        .num_seconds()
+        .max(1)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RuntimeBudgetThreshold {
+    event_kind: &'static str,
+    threshold_kind: &'static str,
+    reason: &'static str,
+    value: i64,
+}
+
+fn finalize_runtime_budget_terminal(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    input: &TerminalUsageInput<'_>,
+    usage_payload: &Value,
+    cost_payload: &Value,
+) {
+    let ledger_buckets = state.store.ledger_buckets_for_tenant(&actor.tenant_id);
+    for policy in state.store.budget_policies_for_tenant(&actor.tenant_id) {
+        if policy.status != ResourceStatus::Active
+            || !runtime_budget_policy_matches_request(&policy, actor, Some(input.selected))
+        {
+            continue;
+        }
+        let event_value = runtime_budget_terminal_value(&policy, usage_payload, cost_payload);
+        if event_value <= 0 {
+            continue;
+        }
+        let current = ledger_buckets
+            .iter()
+            .filter(|bucket| runtime_budget_bucket_matches(&policy, bucket, input.ended_at))
+            .map(|bucket| runtime_budget_bucket_value(&policy, bucket))
+            .sum::<i64>();
+        let previous = current.saturating_sub(event_value);
+        for threshold in runtime_budget_terminal_thresholds(&policy) {
+            if previous < threshold.value && current >= threshold.value {
+                enqueue_runtime_budget_threshold_event(
+                    state, actor, input, &policy, threshold, previous, current,
+                );
+            }
+        }
+    }
+}
+
+fn runtime_budget_terminal_value(
+    policy: &BudgetPolicyRecord,
+    usage_payload: &Value,
+    cost_payload: &Value,
+) -> i64 {
+    match policy.limit_kind.as_str() {
+        "requests" => 1,
+        "tokens" => terminal_usage_token_count(usage_payload),
+        "cost" => cost_payload
+            .get("total_cost")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+        _ => 0,
+    }
+}
+
+fn runtime_budget_terminal_thresholds(policy: &BudgetPolicyRecord) -> Vec<RuntimeBudgetThreshold> {
+    let mut thresholds = Vec::new();
+    if let Some(soft_limit) = policy.soft_limit {
+        thresholds.push(RuntimeBudgetThreshold {
+            event_kind: "gateway.budget.soft_limit_reached",
+            threshold_kind: "soft_limit",
+            reason: "soft_limit_reached",
+            value: soft_limit,
+        });
+    }
+    if let Some(hard_limit) = policy.hard_limit {
+        thresholds.push(RuntimeBudgetThreshold {
+            event_kind: "gateway.budget.hard_limit_reached",
+            threshold_kind: "hard_limit",
+            reason: "hard_limit_reached",
+            value: hard_limit,
+        });
+    }
+    thresholds.extend(
+        policy
+            .thresholds
+            .iter()
+            .map(|value| RuntimeBudgetThreshold {
+                event_kind: "gateway.budget.threshold_reached",
+                threshold_kind: "threshold",
+                reason: "threshold_reached",
+                value: *value,
+            }),
+    );
+    thresholds.sort_by(|left, right| {
+        left.value
+            .cmp(&right.value)
+            .then_with(|| left.threshold_kind.cmp(right.threshold_kind))
+    });
+    thresholds.dedup();
+    thresholds
+}
+
+fn enqueue_runtime_budget_threshold_event(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    input: &TerminalUsageInput<'_>,
+    policy: &BudgetPolicyRecord,
+    threshold: RuntimeBudgetThreshold,
+    previous_value: i64,
+    current_value: i64,
+) {
+    let payload = json!({
+        "schema": "gateway.notification.runtime_budget_threshold.v1",
+        "event_type": threshold.event_kind,
+        "event_family": "budget",
+        "tenant_id": &actor.tenant_id,
+        "organization_id": &actor.organization_id,
+        "project_id": &actor.project_id,
+        "scope": {
+            "kind": &policy.scope_kind,
+            "id": &policy.scope_id
+        },
+        "request": {
+            "request_id": &actor.request_id,
+            "protocol_family": input.replay_case.protocol_family.as_str(),
+            "requested_model": input.requested_model
+        },
+        "actor": {
+            "actor_kind": actor.actor_kind.as_str(),
+            "actor_id": &actor.actor_id
+        },
+        "route": {
+            "model_alias_id": &input.selected.model_alias_id,
+            "model_target_id": &input.selected.model_target_id,
+            "routing_group_id": &input.selected.routing_group_id,
+            "provider_endpoint_id": &input.selected.provider_endpoint_id,
+            "upstream_credential_id": &input.selected.upstream_credential_id
+        },
+        "policy": {
+            "budget_policy_id": &policy.budget_policy_id,
+            "limit_kind": &policy.limit_kind,
+            "period": &policy.period,
+            "threshold_kind": threshold.threshold_kind,
+            "threshold_value": threshold.value,
+            "previous_value": previous_value,
+            "current_value": current_value,
+            "reason": threshold.reason
+        },
+        "redaction": {
+            "request_body_included": false,
+            "provider_body_included": false,
+            "secret_material_included": false
+        },
+        "occurred_at": input.ended_at
+    });
+    for subscription in state
+        .store
+        .notification_subscriptions_for_tenant(&actor.tenant_id)
+        .into_iter()
+        .filter(|subscription| {
+            subscription.status == ResourceStatus::Active
+                && subscription.event_family == "budget"
+                && notification_subscription_filter_matches(
+                    &subscription.filter_document,
+                    threshold.event_kind,
+                    &policy.scope_kind,
+                    &policy.scope_id,
+                )
+        })
+    {
+        let Some(sink) = state
+            .store
+            .notification_sink(&subscription.notification_sink_id)
+        else {
+            continue;
+        };
+        if sink.status != ResourceStatus::Active {
+            continue;
+        }
+        state.store.append_notification_outbox_event(
+            CreateNotificationOutboxEventRequest {
+                tenant_id: actor.tenant_id.clone(),
+                organization_id: actor.organization_id.clone(),
+                project_id: actor.project_id.clone(),
+                notification_subscription_id: Some(
+                    subscription.notification_subscription_id.clone(),
+                ),
+                notification_sink_id: Some(sink.notification_sink_id.clone()),
+                event_kind: threshold.event_kind.to_owned(),
+                dedupe_key: format!(
+                    "runtime-budget-threshold:{}:{}:{}:{}:{}",
+                    policy.budget_policy_id,
+                    runtime_budget_reservation_period_key(policy, input.ended_at),
+                    threshold.threshold_kind,
+                    threshold.value,
+                    subscription.notification_subscription_id
+                ),
+                payload_document: payload.clone(),
+                next_attempt_at: Some(input.ended_at),
+            },
+            input.ended_at,
+        );
     }
 }
 
@@ -9370,17 +9944,35 @@ fn release_runtime_budget_reservations(
     reservations: &[RuntimeBudgetReservation],
 ) {
     for reservation in reservations {
-        state
+        if state
             .store
-            .adjust_runtime_policy_counter(reservation.counter_key.clone(), -reservation.amount);
+            .release_runtime_budget_lease(&reservation.lease_id, chrono::Utc::now())
+            .is_some()
+        {
+            state.store.adjust_runtime_policy_counter(
+                reservation.counter_key.clone(),
+                -reservation.amount,
+            );
+        }
     }
 }
 
 fn release_runtime_quota_reservations(state: &AppState, reservations: &[RuntimeQuotaReservation]) {
     for reservation in reservations {
-        state
-            .store
-            .adjust_runtime_policy_counter(reservation.counter_key.clone(), -reservation.amount);
+        match reservation.counter_backend {
+            RuntimePolicyCounterBackend::HotState => {
+                state.store.adjust_runtime_policy_counter(
+                    reservation.counter_key.clone(),
+                    -reservation.amount,
+                );
+            }
+            RuntimePolicyCounterBackend::LossAllowance => {
+                state.store.adjust_runtime_policy_loss_allowance_counter(
+                    reservation.counter_key.clone(),
+                    -reservation.amount,
+                );
+            }
+        }
     }
 }
 
@@ -9390,6 +9982,11 @@ fn enforce_runtime_budget_preflight(
     selected: Option<&SelectedRouteEvidence>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<RuntimeBudgetReservation>> {
+    if active_force_budget_block_policy(state, actor, selected, now).is_some() {
+        return Err(GatewayError::BudgetExceeded {
+            reason: "emergency_force_budget_block",
+        });
+    }
     let ledger_buckets = state.store.ledger_buckets_for_tenant(&actor.tenant_id);
     let mut reservations = Vec::new();
     for policy in state.store.budget_policies_for_tenant(&actor.tenant_id) {
@@ -9418,11 +10015,37 @@ fn enforce_runtime_budget_preflight(
             });
         }
         if policy.limit_kind == "requests" {
-            let reservation = reserve_runtime_request_budget(state, &policy, current, limit, now)?;
+            let reservation =
+                reserve_runtime_request_budget(state, actor, &policy, current, limit, now)?;
             reservations.push(reservation);
         }
     }
     Ok(reservations)
+}
+
+fn active_force_budget_block_policy(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    selected: Option<&SelectedRouteEvidence>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<BudgetPolicyRecord> {
+    state
+        .store
+        .emergency_operations_for_tenant(&actor.tenant_id)
+        .into_iter()
+        .filter(|operation| {
+            operation.operation_kind == "force_budget_block"
+                && operation.target_resource_kind == "BudgetPolicy"
+                && operation.status == "applied"
+                && operation.expires_at > now
+        })
+        .find_map(|operation| {
+            let policy = state.store.budget_policy(&operation.target_resource_id)?;
+            (policy.tenant_id == actor.tenant_id
+                && policy.status != ResourceStatus::Deleted
+                && runtime_budget_policy_matches_request(&policy, actor, selected))
+            .then_some(policy)
+        })
 }
 
 fn runtime_budget_policy_is_preflight_enforced(policy: &BudgetPolicyRecord) -> bool {
@@ -9433,12 +10056,19 @@ fn runtime_budget_policy_is_preflight_enforced(policy: &BudgetPolicyRecord) -> b
 
 fn reserve_runtime_request_budget(
     state: &AppState,
+    actor: &AuthenticatedActor,
     policy: &BudgetPolicyRecord,
     current_ledger_value: i64,
     limit: i64,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<RuntimeBudgetReservation> {
+    if !state.store.runtime_policy_hot_state_available() {
+        return Err(GatewayError::BudgetExceeded {
+            reason: "budget_hot_state_unavailable",
+        });
+    }
     let counter_key = runtime_budget_reservation_key(policy, now);
+    let lease_id = new_prefixed_id("bls");
     let reserved_after_increment = state
         .store
         .adjust_runtime_policy_counter(counter_key.clone(), 1);
@@ -9448,7 +10078,22 @@ fn reserve_runtime_request_budget(
             reason: "hard_limit_reserved",
         });
     }
+    state
+        .store
+        .record_runtime_budget_lease(RuntimeBudgetLeaseRecord {
+            lease_id: lease_id.clone(),
+            tenant_id: policy.tenant_id.clone(),
+            budget_policy_id: policy.budget_policy_id.clone(),
+            counter_key: counter_key.clone(),
+            request_id: actor.request_id.clone(),
+            amount: 1,
+            status: "reserved".to_owned(),
+            expires_at: now + chrono::Duration::seconds(RUNTIME_BUDGET_LEASE_TTL_SECONDS),
+            created_at: now,
+            updated_at: now,
+        });
     Ok(RuntimeBudgetReservation {
+        lease_id,
         counter_key,
         amount: 1,
     })
@@ -9587,46 +10232,123 @@ fn enforce_runtime_quota_preflight(
         })
         .collect::<Vec<_>>();
 
-    for policy in &policies {
-        if matches!(
-            (
-                policy.counter_kind.as_str(),
-                policy.increment_source.as_str()
-            ),
-            ("request_body_bytes", "request_body_bytes")
-        ) && usize_to_i64(request_body_bytes) > policy.limit
-        {
-            return Err(GatewayError::QuotaExceeded {
-                reason: "request_body_size_limit_reached",
-            });
+    let hot_state_available = state.store.runtime_policy_hot_state_available();
+    let input = RuntimeQuotaPreflightInput {
+        state,
+        replay_case,
+        request_body_bytes,
+        now,
+        hot_state_available,
+    };
+    enforce_runtime_quota_preflight_limits(&input, &policies)?;
+    reserve_runtime_quota_preflight(&input, policies)
+}
+
+struct RuntimeQuotaPreflightInput<'a> {
+    state: &'a AppState,
+    replay_case: &'a GatewayReplayCase,
+    request_body_bytes: usize,
+    now: chrono::DateTime<chrono::Utc>,
+    hot_state_available: bool,
+}
+
+fn enforce_runtime_quota_preflight_limits(
+    input: &RuntimeQuotaPreflightInput<'_>,
+    policies: &[QuotaPolicyRecord],
+) -> Result<()> {
+    for policy in policies {
+        if runtime_quota_policy_skips_request(policy, input.replay_case) {
+            continue;
         }
-        if matches!(
-            (
-                policy.counter_kind.as_str(),
-                policy.increment_source.as_str()
-            ),
-            ("token_actual_rate", "terminal_usage_event")
-        ) && runtime_quota_current_value(state, policy, now) >= policy.limit
-        {
-            return Err(GatewayError::QuotaExceeded {
-                reason: "token_actual_rate_limit_reached",
-            });
+        enforce_runtime_quota_body_limit(policy, input.request_body_bytes)?;
+        if input.hot_state_available {
+            enforce_runtime_quota_current_limit(input.state, policy, input.now)?;
         }
     }
+    Ok(())
+}
 
+fn enforce_runtime_quota_body_limit(
+    policy: &QuotaPolicyRecord,
+    request_body_bytes: usize,
+) -> Result<()> {
+    if matches!(
+        (
+            policy.counter_kind.as_str(),
+            policy.increment_source.as_str()
+        ),
+        ("request_body_bytes", "request_body_bytes")
+    ) && usize_to_i64(request_body_bytes) > policy.limit
+    {
+        return Err(GatewayError::QuotaExceeded {
+            reason: "request_body_size_limit_reached",
+        });
+    }
+    Ok(())
+}
+
+fn enforce_runtime_quota_current_limit(
+    state: &AppState,
+    policy: &QuotaPolicyRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    if matches!(
+        (
+            policy.counter_kind.as_str(),
+            policy.increment_source.as_str()
+        ),
+        ("token_actual_rate", "terminal_usage_event")
+    ) && runtime_quota_current_value(state, policy, now) >= policy.limit
+    {
+        return Err(GatewayError::QuotaExceeded {
+            reason: "token_actual_rate_limit_reached",
+        });
+    }
+    if matches!(
+        (
+            policy.counter_kind.as_str(),
+            policy.increment_source.as_str()
+        ),
+        ("stream_duration", "stream_start")
+    ) && runtime_quota_current_value(state, policy, now) >= policy.limit
+    {
+        return Err(GatewayError::QuotaExceeded {
+            reason: "stream_duration_limit_reached",
+        });
+    }
+    Ok(())
+}
+
+fn reserve_runtime_quota_preflight(
+    input: &RuntimeQuotaPreflightInput<'_>,
+    policies: Vec<QuotaPolicyRecord>,
+) -> Result<Vec<RuntimeQuotaReservation>> {
     let mut reservations = Vec::new();
     for policy in policies {
+        if runtime_quota_policy_skips_request(&policy, input.replay_case) {
+            continue;
+        }
+        if runtime_quota_policy_needs_hot_state(&policy) && !input.hot_state_available {
+            if let Some(reservation) =
+                handle_runtime_quota_hot_state_loss(input.state, &policy, input.now)?
+            {
+                reservations.push(reservation);
+            }
+            continue;
+        }
         match (
             policy.counter_kind.as_str(),
             policy.increment_source.as_str(),
         ) {
             ("request_rate", "accepted_preflight_request") => {
-                let key = runtime_quota_counter_key(&policy, now);
-                let decision = state
-                    .store
-                    .increment_runtime_quota_counter(key, 1, policy.limit);
+                let key = runtime_quota_counter_key(&policy, input.now);
+                let decision =
+                    input
+                        .state
+                        .store
+                        .increment_runtime_quota_counter(key, 1, policy.limit);
                 if !decision.allowed {
-                    release_runtime_quota_reservations(state, &reservations);
+                    release_runtime_quota_reservations(input.state, &reservations);
                     return Err(GatewayError::QuotaExceeded {
                         reason: "request_rate_limit_reached",
                     });
@@ -9634,15 +10356,30 @@ fn enforce_runtime_quota_preflight(
             }
             ("concurrent_request", "preflight_acquire") => {
                 match reserve_runtime_quota_counter(
-                    state,
+                    input.state,
                     &policy,
                     1,
                     "concurrent_request_limit_reached",
-                    now,
+                    input.now,
                 ) {
                     Ok(reservation) => reservations.push(reservation),
                     Err(error) => {
-                        release_runtime_quota_reservations(state, &reservations);
+                        release_runtime_quota_reservations(input.state, &reservations);
+                        return Err(error);
+                    }
+                }
+            }
+            ("concurrent_stream", "stream_start") => {
+                match reserve_runtime_quota_counter(
+                    input.state,
+                    &policy,
+                    1,
+                    "concurrent_stream_limit_reached",
+                    input.now,
+                ) {
+                    Ok(reservation) => reservations.push(reservation),
+                    Err(error) => {
+                        release_runtime_quota_reservations(input.state, &reservations);
                         return Err(error);
                     }
                 }
@@ -9651,6 +10388,85 @@ fn enforce_runtime_quota_preflight(
         }
     }
     Ok(reservations)
+}
+
+fn runtime_quota_policy_needs_hot_state(policy: &QuotaPolicyRecord) -> bool {
+    matches!(
+        (
+            policy.counter_kind.as_str(),
+            policy.increment_source.as_str()
+        ),
+        ("request_rate", "accepted_preflight_request")
+            | ("concurrent_request", "preflight_acquire")
+            | ("concurrent_stream" | "stream_duration", "stream_start")
+            | ("token_actual_rate", "terminal_usage_event")
+    )
+}
+
+fn runtime_quota_policy_skips_request(
+    policy: &QuotaPolicyRecord,
+    replay_case: &GatewayReplayCase,
+) -> bool {
+    runtime_quota_policy_requires_stream(policy) && !replay_case.streaming
+}
+
+fn runtime_quota_policy_requires_stream(policy: &QuotaPolicyRecord) -> bool {
+    matches!(
+        policy.counter_kind.as_str(),
+        "concurrent_stream" | "stream_duration"
+    )
+}
+
+fn handle_runtime_quota_hot_state_loss(
+    state: &AppState,
+    policy: &QuotaPolicyRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<RuntimeQuotaReservation>> {
+    match policy.loss_behavior.as_str() {
+        "fail_open" => Ok(None),
+        "fail_limited" => reserve_runtime_quota_loss_allowance(state, policy, now),
+        _ => Err(GatewayError::QuotaExceeded {
+            reason: "hot_state_unavailable",
+        }),
+    }
+}
+
+fn reserve_runtime_quota_loss_allowance(
+    state: &AppState,
+    policy: &QuotaPolicyRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<RuntimeQuotaReservation>> {
+    let limit = policy.burst_limit.unwrap_or_default();
+    if limit <= 0 {
+        return Err(GatewayError::QuotaExceeded {
+            reason: "fail_limited_allowance_unconfigured",
+        });
+    }
+    let counter_key = runtime_quota_loss_allowance_key(policy, now);
+    let decision =
+        state
+            .store
+            .increment_runtime_policy_loss_allowance_counter(counter_key.clone(), 1, limit);
+    if !decision.allowed {
+        return Err(GatewayError::QuotaExceeded {
+            reason: "fail_limited_allowance_exhausted",
+        });
+    }
+    if matches!(
+        (
+            policy.counter_kind.as_str(),
+            policy.increment_source.as_str()
+        ),
+        ("concurrent_request", "preflight_acquire") | ("concurrent_stream", "stream_start")
+    ) {
+        Ok(Some(RuntimeQuotaReservation {
+            counter_key,
+            amount: 1,
+            counter_backend: RuntimePolicyCounterBackend::LossAllowance,
+        }))
+    } else {
+        Ok(None)
+    }
 }
 
 fn runtime_quota_current_value(
@@ -9682,6 +10498,7 @@ fn reserve_runtime_quota_counter(
     Ok(RuntimeQuotaReservation {
         counter_key,
         amount,
+        counter_backend: RuntimePolicyCounterBackend::HotState,
     })
 }
 
@@ -9728,8 +10545,299 @@ fn runtime_quota_counter_key(
     .join("|")
 }
 
+fn runtime_quota_loss_allowance_key(
+    policy: &QuotaPolicyRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    format!("loss|{}", runtime_quota_counter_key(policy, now))
+}
+
 fn usize_to_i64(value: usize) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+/// Runs one deterministic runtime-policy reconciliation tick for a tenant.
+///
+/// The reconciler only repairs counters whose expected value can be proven from
+/// durable usage evidence. It never lowers counters and never clears active
+/// request or stream leases.
+#[must_use]
+pub fn run_runtime_policy_reconciler_once(
+    store: &InMemoryGatewayStore,
+    tenant_id: &str,
+    worker_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> RuntimePolicyReconciliationSummary {
+    let hot_state_available = store.runtime_policy_hot_state_available();
+    let mut summary = RuntimePolicyReconciliationSummary {
+        tenant_id: tenant_id.to_owned(),
+        worker_id: worker_id.to_owned(),
+        hot_state_available,
+        considered_budget_policy_count: 0,
+        expired_budget_lease_count: 0,
+        expired_budget_lease_total: 0,
+        considered_quota_policy_count: 0,
+        repairable_quota_policy_count: 0,
+        repaired_counter_count: 0,
+        audit_event_count: 0,
+        repaired_delta_total: 0,
+    };
+    if !hot_state_available {
+        return summary;
+    }
+
+    let budget_policies = store.budget_policies_for_tenant(tenant_id);
+    summary.considered_budget_policy_count = budget_policies
+        .iter()
+        .filter(|policy| runtime_budget_policy_is_preflight_enforced(policy))
+        .count();
+    for lease in store.expire_runtime_budget_leases(tenant_id, now) {
+        let previous_value = store.runtime_policy_counter(&lease.counter_key);
+        let repaired_value =
+            store.adjust_runtime_policy_counter(lease.counter_key.clone(), -lease.amount);
+        summary.expired_budget_lease_count += 1;
+        summary.expired_budget_lease_total = summary
+            .expired_budget_lease_total
+            .saturating_add(lease.amount);
+        summary.audit_event_count += 1;
+        let policy = budget_policies
+            .iter()
+            .find(|policy| policy.budget_policy_id == lease.budget_policy_id);
+        record_runtime_budget_lease_expiry_audit(
+            store,
+            policy,
+            &lease,
+            worker_id,
+            previous_value,
+            repaired_value,
+            now,
+        );
+    }
+
+    let usage_events = store.usage_events_for_tenant(tenant_id);
+    for policy in store.quota_policies_for_tenant(tenant_id) {
+        if policy.status != ResourceStatus::Active {
+            continue;
+        }
+        summary.considered_quota_policy_count += 1;
+        if !runtime_quota_policy_has_durable_repair_source(&policy) {
+            continue;
+        }
+        summary.repairable_quota_policy_count += 1;
+        let durable_value =
+            runtime_quota_durable_usage_value_for_policy(&policy, &usage_events, now);
+        if durable_value <= 0 {
+            continue;
+        }
+        let counter_key = runtime_quota_counter_key(&policy, now);
+        let current_value = store.runtime_policy_counter(&counter_key);
+        if current_value >= durable_value {
+            continue;
+        }
+        let delta = durable_value.saturating_sub(current_value);
+        store.adjust_runtime_policy_counter(counter_key, delta);
+        summary.repaired_counter_count += 1;
+        summary.audit_event_count += 1;
+        summary.repaired_delta_total = summary.repaired_delta_total.saturating_add(delta);
+        record_runtime_policy_reconciliation_audit(
+            store,
+            &policy,
+            worker_id,
+            current_value,
+            durable_value,
+            delta,
+            now,
+        );
+    }
+    summary
+}
+
+fn record_runtime_budget_lease_expiry_audit(
+    store: &InMemoryGatewayStore,
+    policy: Option<&BudgetPolicyRecord>,
+    lease: &RuntimeBudgetLeaseRecord,
+    worker_id: &str,
+    previous_value: i64,
+    repaired_value: i64,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    store.record_audit_event(AuditEventRecord {
+        audit_event_id: new_prefixed_id("aud"),
+        event_type: "gateway.runtime_policy.budget_lease_expired".to_owned(),
+        tenant_id: lease.tenant_id.clone(),
+        organization_id: policy.and_then(|policy| policy.organization_id.clone()),
+        project_id: policy.and_then(|policy| policy.project_id.clone()),
+        scope_kind: policy.map_or_else(|| "tenant".to_owned(), |policy| policy.scope_kind.clone()),
+        scope_id: policy.map_or_else(|| lease.tenant_id.clone(), |policy| policy.scope_id.clone()),
+        resource_kind: "BudgetPolicy".to_owned(),
+        resource_id: lease.budget_policy_id.clone(),
+        before_version: None,
+        after_version: None,
+        actor_id: worker_id.to_owned(),
+        actor_kind: ActorKind::System,
+        principal_id: None,
+        request_id: format!("req_runtime_policy_reconcile_{worker_id}"),
+        redacted_diff: json!({
+            "schema": "gateway.runtime_policy.budget_lease_expiry.v1",
+            "repair_action": "expire_budget_lease",
+            "source": "runtime_budget_lease_ttl",
+            "key_class": "runtime_budget_reservation_counter",
+            "lease": {
+                "lease_id": &lease.lease_id,
+                "budget_policy_id": &lease.budget_policy_id,
+                "request_id": &lease.request_id,
+                "amount": lease.amount,
+                "status": {
+                    "before": "reserved",
+                    "after": "expired"
+                },
+                "expires_at": lease.expires_at
+            },
+            "previous_counter_value": previous_value,
+            "repaired_counter_value": repaired_value,
+            "delta": repaired_value.saturating_sub(previous_value),
+            "redaction": {
+                "raw_hot_state_key_included": false,
+                "request_body_included": false,
+                "provider_body_included": false,
+                "secret_material_included": false
+            }
+        }),
+        occurred_at: now,
+    });
+}
+
+fn runtime_quota_policy_has_durable_repair_source(policy: &QuotaPolicyRecord) -> bool {
+    matches!(
+        (
+            policy.counter_kind.as_str(),
+            policy.increment_source.as_str()
+        ),
+        ("token_actual_rate", "terminal_usage_event") | ("stream_duration", "stream_start")
+    ) && matches!(
+        policy.window.as_str(),
+        "fixed" | "sliding" | "ledger_bucket"
+    )
+}
+
+fn runtime_quota_durable_usage_value_for_policy(
+    policy: &QuotaPolicyRecord,
+    usage_events: &[UsageEventRecord],
+    now: chrono::DateTime<chrono::Utc>,
+) -> i64 {
+    usage_events
+        .iter()
+        .filter(|event| {
+            event.status == "success"
+                && runtime_quota_usage_event_matches_policy(policy, event)
+                && runtime_quota_usage_event_matches_window(policy, event, now)
+        })
+        .map(|event| runtime_quota_durable_usage_event_value(policy, event))
+        .sum()
+}
+
+fn runtime_quota_usage_event_matches_policy(
+    policy: &QuotaPolicyRecord,
+    event: &UsageEventRecord,
+) -> bool {
+    match policy.scope_kind.as_str() {
+        "tenant" => event.tenant_id == policy.scope_id,
+        "organization" => event.organization_id.as_deref() == Some(policy.scope_id.as_str()),
+        "project" => event.project_id.as_deref() == Some(policy.scope_id.as_str()),
+        "credential" => event.upstream_credential_id.as_deref() == Some(policy.scope_id.as_str()),
+        "alias" => event.model_alias_id.as_deref() == Some(policy.scope_id.as_str()),
+        "endpoint" => event.provider_endpoint_id.as_deref() == Some(policy.scope_id.as_str()),
+        "protocol_family" => event.protocol_family.as_str() == policy.scope_id,
+        _ => false,
+    }
+}
+
+fn runtime_quota_usage_event_matches_window(
+    policy: &QuotaPolicyRecord,
+    event: &UsageEventRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    match policy.window.as_str() {
+        "fixed" | "sliding" => {
+            event.occurred_at.timestamp().div_euclid(60) == now.timestamp().div_euclid(60)
+        }
+        "ledger_bucket" => true,
+        _ => false,
+    }
+}
+
+fn runtime_quota_durable_usage_event_value(
+    policy: &QuotaPolicyRecord,
+    event: &UsageEventRecord,
+) -> i64 {
+    match policy.counter_kind.as_str() {
+        "token_actual_rate" => terminal_usage_token_count(&event.usage_payload),
+        "stream_duration" => durable_stream_duration_seconds(event),
+        _ => 0,
+    }
+}
+
+fn durable_stream_duration_seconds(event: &UsageEventRecord) -> i64 {
+    if event.time_to_first_token_ms.is_none() {
+        return 0;
+    }
+    event
+        .latency_ms
+        .unwrap_or_default()
+        .div_euclid(1_000)
+        .max(1)
+}
+
+fn record_runtime_policy_reconciliation_audit(
+    store: &InMemoryGatewayStore,
+    policy: &QuotaPolicyRecord,
+    worker_id: &str,
+    previous_value: i64,
+    repaired_value: i64,
+    delta: i64,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    store.record_audit_event(AuditEventRecord {
+        audit_event_id: new_prefixed_id("aud"),
+        event_type: "gateway.runtime_policy.reconciliation_repair".to_owned(),
+        tenant_id: policy.tenant_id.clone(),
+        organization_id: policy.organization_id.clone(),
+        project_id: policy.project_id.clone(),
+        scope_kind: policy.scope_kind.clone(),
+        scope_id: policy.scope_id.clone(),
+        resource_kind: "QuotaPolicy".to_owned(),
+        resource_id: policy.quota_policy_id.clone(),
+        before_version: None,
+        after_version: None,
+        actor_id: worker_id.to_owned(),
+        actor_kind: ActorKind::System,
+        principal_id: None,
+        request_id: format!("req_runtime_policy_reconcile_{worker_id}"),
+        redacted_diff: json!({
+            "schema": "gateway.runtime_policy.reconciliation_repair.v1",
+            "repair_action": "increase_hot_counter",
+            "source": "durable_usage_events",
+            "key_class": "runtime_policy_counter",
+            "policy": {
+                "quota_policy_id": &policy.quota_policy_id,
+                "scope_kind": &policy.scope_kind,
+                "scope_id": &policy.scope_id,
+                "counter_kind": &policy.counter_kind,
+                "window": &policy.window,
+                "increment_source": &policy.increment_source
+            },
+            "previous_value": previous_value,
+            "repaired_value": repaired_value,
+            "delta": delta,
+            "redaction": {
+                "raw_hot_state_key_included": false,
+                "request_body_included": false,
+                "provider_body_included": false,
+                "secret_material_included": false
+            }
+        }),
+        occurred_at: now,
+    });
 }
 
 fn record_runtime_policy_block_decision(
@@ -9942,6 +11050,16 @@ struct ExportPage {
     total_filtered_count: usize,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ExportBuildResult {
+    status: &'static str,
+    object_ref: String,
+    record_count: i64,
+    byte_count: i64,
+    checksum: String,
+    manifest_document: Value,
+}
+
 fn build_export_page(
     state: &AppState,
     export_kind: &str,
@@ -10038,6 +11156,16 @@ fn validate_export_kind(export_kind: &str) -> Result<()> {
     }
 }
 
+fn validate_export_storage_backend(storage_backend: &str) -> Result<&'static str> {
+    match storage_backend {
+        "inline_manifest" => Ok("inline_manifest"),
+        "object_storage" => Ok("object_storage"),
+        _ => Err(GatewayError::BadRequest {
+            message: "export_storage_backend_invalid".to_owned(),
+        }),
+    }
+}
+
 fn export_list_limit(limit: Option<usize>) -> Result<usize> {
     const DEFAULT_LIMIT: usize = 100;
     const MAX_LIMIT: usize = 200;
@@ -10077,15 +11205,95 @@ fn export_query_document(
     request: &AdminCreateExportJobRequest,
     scope: &DashboardScopeInput,
     limit: usize,
+    storage_backend: &str,
 ) -> Value {
     json!({
         "schema": "gateway.admin.export_query.v1",
         "export_kind": &request.export_kind,
+        "storage_backend": storage_backend,
         "scope": dashboard_scope_body(scope),
         "limit": limit,
         "cursor": &request.cursor,
         "retention_days": request.retention_days
     })
+}
+
+fn build_export_result(
+    state: &AppState,
+    job: &ExportJobRecord,
+    scope: &DashboardScopeInput,
+    request: &AdminCreateExportJobRequest,
+    page: &ExportPage,
+    limit: usize,
+    storage_backend: &str,
+) -> Result<ExportBuildResult> {
+    if storage_backend == "object_storage" && !export_object_storage_connected(state) {
+        return build_object_storage_failure_export_result(job, scope, page, storage_backend);
+    }
+    let object_storage_connected = storage_backend == "object_storage";
+    let object_ref = export_object_ref(job, storage_backend);
+    let payload_document =
+        export_payload_document(job, scope, request, page, limit, storage_backend);
+    let payload_bytes = encode_export_document(&payload_document)?;
+    let checksum = export_payload_checksum(&payload_bytes);
+    let manifest_document = export_manifest_document(
+        job,
+        scope,
+        page,
+        &object_ref,
+        &checksum,
+        storage_backend,
+        object_storage_connected,
+    );
+    Ok(ExportBuildResult {
+        status: "completed",
+        object_ref,
+        record_count: i64::try_from(page.rows.len()).unwrap_or(i64::MAX),
+        byte_count: i64::try_from(payload_bytes.len()).unwrap_or(i64::MAX),
+        checksum,
+        manifest_document,
+    })
+}
+
+fn build_object_storage_failure_export_result(
+    job: &ExportJobRecord,
+    scope: &DashboardScopeInput,
+    page: &ExportPage,
+    storage_backend: &str,
+) -> Result<ExportBuildResult> {
+    const FAILURE_REASON: &str = "export_object_storage_unavailable";
+    let object_ref = export_unavailable_object_ref(job);
+    let payload_document =
+        export_failure_payload_document(job, scope, page, storage_backend, FAILURE_REASON);
+    let payload_bytes = encode_export_document(&payload_document)?;
+    let checksum = export_payload_checksum(&payload_bytes);
+    let manifest_document = export_failure_manifest_document(
+        job,
+        scope,
+        page,
+        &object_ref,
+        &checksum,
+        storage_backend,
+        FAILURE_REASON,
+    );
+    Ok(ExportBuildResult {
+        status: "failed",
+        object_ref,
+        record_count: 0,
+        byte_count: i64::try_from(payload_bytes.len()).unwrap_or(i64::MAX),
+        checksum,
+        manifest_document,
+    })
+}
+
+fn encode_export_document(document: &Value) -> Result<Vec<u8>> {
+    serde_json::to_vec(document).map_err(|error| GatewayError::Internal {
+        message: format!("failed to encode export payload: {error}"),
+    })
+}
+
+const fn export_object_storage_connected(_state: &AppState) -> bool {
+    false
 }
 
 fn export_payload_document(
@@ -10094,11 +11302,13 @@ fn export_payload_document(
     request: &AdminCreateExportJobRequest,
     page: &ExportPage,
     limit: usize,
+    storage_backend: &str,
 ) -> Value {
     json!({
         "schema": "gateway.export_payload.v1",
         "export_job_id": &job.export_job_id,
         "export_kind": &job.export_kind,
+        "storage_backend": storage_backend,
         "scope": dashboard_scope_body(scope),
         "format": "json",
         "rows": &page.rows,
@@ -10114,23 +11324,56 @@ fn export_payload_document(
     })
 }
 
+fn export_failure_payload_document(
+    job: &ExportJobRecord,
+    scope: &DashboardScopeInput,
+    page: &ExportPage,
+    storage_backend: &str,
+    failure_reason: &str,
+) -> Value {
+    json!({
+        "schema": "gateway.export_failure_payload.v1",
+        "export_job_id": &job.export_job_id,
+        "export_kind": &job.export_kind,
+        "storage_backend": storage_backend,
+        "scope": dashboard_scope_body(scope),
+        "format": "json",
+        "record_count": 0,
+        "total_filtered_count": page.total_filtered_count,
+        "next_cursor": &page.next_cursor,
+        "failure": {
+            "reason": failure_reason,
+            "retryable": true
+        },
+        "redaction": {
+            "rows_included": false,
+            "raw_request_body_included": false,
+            "raw_provider_body_included": false,
+            "secret_material_included": false
+        }
+    })
+}
+
 fn export_manifest_document(
     job: &ExportJobRecord,
     scope: &DashboardScopeInput,
     page: &ExportPage,
     object_ref: &str,
     checksum: &str,
+    storage_backend: &str,
+    object_storage_connected: bool,
 ) -> Value {
     json!({
         "schema": "gateway.export_manifest.v1",
+        "status": "completed",
         "export_job_id": &job.export_job_id,
         "export_kind": &job.export_kind,
         "scope": dashboard_scope_body(scope),
         "format": "json",
         "object": {
             "object_ref": object_ref,
-            "backend": "inline_manifest",
-            "object_storage_connected": false
+            "backend": storage_backend,
+            "object_storage_connected": object_storage_connected
         },
         "checksum": checksum,
         "record_count": page.rows.len(),
@@ -10145,9 +11388,61 @@ fn export_manifest_document(
     })
 }
 
-fn export_object_ref(job: &ExportJobRecord) -> String {
+fn export_failure_manifest_document(
+    job: &ExportJobRecord,
+    scope: &DashboardScopeInput,
+    page: &ExportPage,
+    object_ref: &str,
+    checksum: &str,
+    storage_backend: &str,
+    failure_reason: &str,
+) -> Value {
+    json!({
+        "schema": "gateway.export_manifest.v1",
+        "status": "failed",
+        "export_job_id": &job.export_job_id,
+        "export_kind": &job.export_kind,
+        "scope": dashboard_scope_body(scope),
+        "format": "json",
+        "object": {
+            "object_ref": object_ref,
+            "backend": storage_backend,
+            "object_storage_connected": false
+        },
+        "checksum": checksum,
+        "record_count": 0,
+        "total_filtered_count": page.total_filtered_count,
+        "next_cursor": &page.next_cursor,
+        "rows": [],
+        "failure": {
+            "reason": failure_reason,
+            "retryable": true
+        },
+        "redaction": {
+            "rows_included": false,
+            "raw_request_body_included": false,
+            "raw_provider_body_included": false,
+            "secret_material_included": false
+        }
+    })
+}
+
+fn export_object_ref(job: &ExportJobRecord, storage_backend: &str) -> String {
+    match storage_backend {
+        "object_storage" => format!(
+            "object-storage://gateway-exports/{}/{}.json",
+            job.tenant_id, job.export_job_id
+        ),
+        _ => format!(
+            "memory://gateway-exports/{}/{}.json",
+            job.tenant_id, job.export_job_id
+        ),
+    }
+}
+
+fn export_unavailable_object_ref(job: &ExportJobRecord) -> String {
     format!(
-        "memory://gateway-exports/{}/{}.json",
+        "object-storage://unavailable/{}/{}.json",
         job.tenant_id, job.export_job_id
     )
 }
@@ -10687,6 +11982,15 @@ fn required_emergency_expected_version(request: &AdminEmergencyOperationRequest)
         })
 }
 
+fn ensure_emergency_expected_version(expected_version: i64, actual_version: i64) -> Result<()> {
+    if expected_version != actual_version {
+        return Err(GatewayError::BadRequest {
+            message: "stale_resource_version".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn record_idempotent_admin_response(
     state: &AppState,
     tenant_id: String,
@@ -10866,7 +12170,7 @@ fn record_emergency_operation_audit(
         state,
         actor,
         AdminResourceAuditInput {
-            event_type: "gateway.emergency.disable",
+            event_type: emergency_operation_audit_event_type(&operation.operation_kind),
             scope_kind: "tenant",
             scope_id: actor.tenant_id.clone(),
             resource_kind: "EmergencyOperation",
@@ -10885,6 +12189,16 @@ fn record_emergency_operation_audit(
             occurred_at: now,
         },
     )
+}
+
+fn emergency_operation_audit_event_type(operation_kind: &str) -> &'static str {
+    match operation_kind {
+        "drain_routing_group" => "gateway.emergency.drain",
+        "freeze_config" => "gateway.emergency.freeze",
+        "rollback_config_snapshot" => "gateway.emergency.rollback",
+        "force_budget_block" => "gateway.emergency.force_budget_block",
+        _ => "gateway.emergency.disable",
+    }
 }
 
 fn set_endpoint_emergency_drain(
@@ -11274,15 +12588,22 @@ fn emergency_operation_for_actor(
 fn export_manifest_for_job(
     state: &AppState,
     job: &ExportJobRecord,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<ExportManifestRecord> {
-    state
+    let manifest = state
         .store
         .export_manifests_for_job(&job.export_job_id)
         .into_iter()
         .find(|manifest| manifest.tenant_id == job.tenant_id)
         .ok_or_else(|| GatewayError::NotFound {
             resource: format!("export manifest for job {}", job.export_job_id),
-        })
+        })?;
+    if manifest.expires_at <= now {
+        return Err(GatewayError::NotFound {
+            resource: format!("export manifest for job {} expired", job.export_job_id),
+        });
+    }
+    Ok(manifest)
 }
 
 fn otel_export_config_for_actor(
@@ -11328,6 +12649,20 @@ fn notification_subscription_for_actor(
         })
         .ok_or_else(|| GatewayError::NotFound {
             resource: format!("notification subscription {notification_subscription_id}"),
+        })
+}
+
+fn notification_outbox_event_for_actor(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    notification_outbox_event_id: &str,
+) -> Result<NotificationOutboxEventRecord> {
+    state
+        .store
+        .notification_outbox_event(notification_outbox_event_id)
+        .filter(|event| event.tenant_id == actor.tenant_id)
+        .ok_or_else(|| GatewayError::NotFound {
+            resource: format!("notification outbox event {notification_outbox_event_id}"),
         })
 }
 
@@ -13429,6 +14764,11 @@ fn export_job_resource_body(state: &AppState, job: &ExportJobRecord) -> Value {
         "organization_id": &job.organization_id,
         "project_id": &job.project_id,
         "export_kind": &job.export_kind,
+        "storage_backend": job
+            .query_document
+            .get("storage_backend")
+            .and_then(Value::as_str)
+            .unwrap_or("inline_manifest"),
         "requested_by": &job.requested_by,
         "query": &job.query_document,
         "status": &job.status,
@@ -13533,6 +14873,10 @@ fn export_job_create_diff(
     json!({
         "export_job_id": &job.export_job_id,
         "export_kind": &job.export_kind,
+        "storage_backend": manifest
+            .manifest_document
+            .pointer("/object/backend")
+            .and_then(Value::as_str),
         "scope": dashboard_scope_body(scope),
         "status": &job.status,
         "manifest_id": &manifest.export_manifest_id,
@@ -13540,6 +14884,10 @@ fn export_job_create_diff(
         "record_count": manifest.record_count,
         "byte_count": manifest.byte_count,
         "checksum": &manifest.checksum,
+        "failure_reason": manifest
+            .manifest_document
+            .pointer("/failure/reason")
+            .and_then(Value::as_str),
         "next_cursor": &page.next_cursor,
         "total_filtered_count": page.total_filtered_count,
         "redaction": {
@@ -14294,6 +15642,30 @@ fn notification_subscription_resource_body(subscription: &NotificationSubscripti
     })
 }
 
+fn notification_outbox_event_resource_body(event: &NotificationOutboxEventRecord) -> Value {
+    json!({
+        "kind": "notification_outbox_event",
+        "id": &event.notification_outbox_event_id,
+        "tenant_id": &event.tenant_id,
+        "organization_id": &event.organization_id,
+        "project_id": &event.project_id,
+        "notification_subscription_id": &event.notification_subscription_id,
+        "notification_sink_id": &event.notification_sink_id,
+        "event_kind": &event.event_kind,
+        "dedupe_key": &event.dedupe_key,
+        "payload_schema": event
+            .payload_document
+            .get("schema")
+            .and_then(Value::as_str),
+        "payload_included": false,
+        "status": &event.status,
+        "attempt_count": event.attempt_count,
+        "next_attempt_at": event.next_attempt_at,
+        "created_at": event.created_at,
+        "updated_at": event.updated_at
+    })
+}
+
 fn notification_sink_create_diff(sink: &NotificationSinkRecord) -> Value {
     json!({
         "organization_id": &sink.organization_id,
@@ -14348,6 +15720,30 @@ fn notification_subscription_create_diff(subscription: &NotificationSubscription
             .map(|object| object.keys().map(String::as_str).collect::<Vec<_>>())
             .unwrap_or_default(),
         "status": subscription.status.as_str()
+    })
+}
+
+fn notification_outbox_replay_diff(
+    before: &NotificationOutboxEventRecord,
+    after: &NotificationOutboxEventRecord,
+    reason: &str,
+) -> Value {
+    json!({
+        "status": {
+            "before": &before.status,
+            "after": &after.status
+        },
+        "attempt_count": {
+            "before": before.attempt_count,
+            "after": after.attempt_count
+        },
+        "next_attempt_at": {
+            "before": before.next_attempt_at,
+            "after": after.next_attempt_at
+        },
+        "reason": reason,
+        "payload_included": false,
+        "secret_material_included": false
     })
 }
 
@@ -14944,6 +16340,76 @@ fn realtime_route_summary(state: &AppState, tenant_id: &str) -> Value {
         "no_route_count": no_route_count,
         "latest_decision_at": latest_decision_at,
         "source": "durable_route_evidence"
+    })
+}
+
+fn realtime_budget_summary(state: &AppState, tenant_id: &str) -> Value {
+    let policies = state
+        .store
+        .budget_policies_for_tenant(tenant_id)
+        .into_iter()
+        .filter(|policy| policy.status != ResourceStatus::Deleted)
+        .collect::<Vec<_>>();
+    let hard_block_policies = policies
+        .iter()
+        .filter(|policy| {
+            policy.hard_limit.is_some() && runtime_budget_policy_is_preflight_enforced(policy)
+        })
+        .collect::<Vec<_>>();
+    let hot_state_available = state.store.runtime_policy_hot_state_available();
+    let conservative_active = !hot_state_available && !hard_block_policies.is_empty();
+    let leases = state.store.runtime_budget_leases_for_tenant(tenant_id);
+    let reserved_lease_count = leases
+        .iter()
+        .filter(|lease| lease.status == "reserved")
+        .count();
+    let released_lease_count = leases
+        .iter()
+        .filter(|lease| lease.status == "released")
+        .count();
+    let expired_lease_count = leases
+        .iter()
+        .filter(|lease| lease.status == "expired")
+        .count();
+    json!({
+        "configured_policy_count": policies.len(),
+        "hard_block_policy_count": hard_block_policies.len(),
+        "hot_state_status": if hot_state_available { "available" } else { "unavailable" },
+        "source": "policy_config_and_runtime_hot_state",
+        "lease_summary": {
+            "source": "runtime_budget_lease_evidence",
+            "reserved_count": reserved_lease_count,
+            "released_count": released_lease_count,
+            "expired_count": expired_lease_count
+        },
+        "conservative_mode": {
+            "active": conservative_active,
+            "reason": conservative_active.then_some("budget_hot_state_unavailable"),
+            "failure_mode": conservative_active.then_some("fail_closed"),
+            "affected_policy_count": if conservative_active {
+                hard_block_policies.len()
+            } else {
+                0
+            },
+            "scopes": hard_block_policies
+                .iter()
+                .map(|policy| {
+                    json!({
+                        "budget_policy_id": &policy.budget_policy_id,
+                        "scope_kind": &policy.scope_kind,
+                        "scope_id": &policy.scope_id,
+                        "limit_kind": &policy.limit_kind,
+                        "period": &policy.period,
+                        "consistency_mode": &policy.consistency_mode,
+                        "fallback": if conservative_active {
+                            "fail_closed"
+                        } else {
+                            "not_active"
+                        }
+                    })
+                })
+                .collect::<Vec<_>>()
+        }
     })
 }
 
@@ -15991,6 +17457,10 @@ const fn default_export_retention_days() -> i64 {
     30
 }
 
+fn default_export_storage_backend() -> String {
+    "inline_manifest".to_owned()
+}
+
 fn request_id_from_headers(headers: &HeaderMap) -> String {
     headers
         .get(REQUEST_ID_HEADER)
@@ -16226,11 +17696,13 @@ mod tests {
     use super::{
         authenticate_request, deliver_due_notifications, enforce_runtime_policy_preflight,
         release_runtime_policy_reservations, router, run_otel_exporter_once,
-        runtime_budget_reservation_key, runtime_quota_counter_key, runtime_route_target,
+        run_runtime_policy_reconciler_once, runtime_budget_reservation_key,
+        runtime_quota_counter_key, runtime_quota_loss_allowance_key, runtime_route_target,
         validate_gateway_config, AppState, DependencyProbeMode, GatewayConfig,
-        SingleUserAuthConfig, PROJECT_ID_HEADER, REQUEST_ID_HEADER, SESSION_TOKEN_PREFIX,
-        SINGLE_USER_ID, SINGLE_USER_ORGANIZATION_ID, SINGLE_USER_PROJECT_ID,
-        SINGLE_USER_PROVIDER_ID, SINGLE_USER_TENANT_ID,
+        SingleUserAuthConfig, PROJECT_ID_HEADER, REQUEST_ID_HEADER,
+        RUNTIME_BUDGET_LEASE_TTL_SECONDS, SESSION_TOKEN_PREFIX, SINGLE_USER_ID,
+        SINGLE_USER_ORGANIZATION_ID, SINGLE_USER_PROJECT_ID, SINGLE_USER_PROVIDER_ID,
+        SINGLE_USER_TENANT_ID,
     };
     use crate::action::{ActionGrant, BuiltInRole};
     use crate::auth::{create_auth_session, verify_api_key, CreateAuthSessionRequest};
@@ -16252,11 +17724,12 @@ mod tests {
         RouteEvidenceSink, RouteFilterReason,
     };
     use crate::storage::{
-        CatalogAdminRepository, ConfigPublicationRepository, CreateNotificationOutboxEventRequest,
-        CreateSecretRefRequest, InMemoryGatewayStore, NotificationOutboxRepository,
-        ProviderAdminRepository, RuntimePolicyRepository, SecretRefAdminRepository,
-        ServiceAccountAdminRepository, TenancyBootstrapRepository, TenancyRepository,
-        UsageAccountingRepository, ValidationDiagnosticRepository,
+        CatalogAdminRepository, CompleteExportJobRequest, ConfigPublicationRepository,
+        ConfigSnapshotStore, CreateExportJobRequest, CreateNotificationOutboxEventRequest,
+        CreateSecretRefRequest, ExportRepository, InMemoryGatewayStore,
+        NotificationOutboxRepository, ProviderAdminRepository, RuntimePolicyRepository,
+        SecretRefAdminRepository, ServiceAccountAdminRepository, TenancyBootstrapRepository,
+        TenancyRepository, UsageAccountingRepository, ValidationDiagnosticRepository,
     };
     use crate::ProtocolFamily;
 
@@ -16627,13 +18100,73 @@ mod tests {
         assert_eq!(body["providers"]["endpoint_count"], 1);
         assert_eq!(body["providers"]["health_counts"]["degraded"], 1);
         assert_eq!(body["providers"]["freshness_status"], "fresh");
-        assert_eq!(body["budgets"]["hot_state_status"], "unavailable");
+        assert_eq!(body["budgets"]["hot_state_status"], "available");
+        assert_eq!(body["budgets"]["conservative_mode"]["active"], false);
         assert_eq!(body["quotas"]["hot_state_status"], "unavailable");
         assert_eq!(
             body["config"]["publication"]["source"],
             "durable_publication_pointer"
         );
         assert_eq!(body["workers"]["reload_evidence"], "not_connected");
+    }
+
+    #[tokio::test]
+    async fn realtime_overview_reports_budget_conservative_mode() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let create_policy = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/budget-policies",
+            json!({
+                "idempotency_key": "idem_realtime_budget_conservative",
+                "scope_kind": "project",
+                "scope_id": TEST_PROJECT_ID,
+                "period": "lifetime",
+                "limit_kind": "requests",
+                "hard_limit": 100,
+                "reset_policy": "manual_counter_reset",
+                "overage_mode": "block_new_requests",
+                "consistency_mode": "strong_terminal"
+            }),
+        )
+        .await;
+        assert_eq!(create_policy.status(), StatusCode::OK);
+        store.set_runtime_policy_hot_state_available(false);
+
+        let response = get_admin(store, &raw_session, "/admin/v1/realtime/overview").await;
+        let status = response.status();
+        let body = response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["budgets"]["configured_policy_count"], 1);
+        assert_eq!(body["budgets"]["hard_block_policy_count"], 1);
+        assert_eq!(body["budgets"]["hot_state_status"], "unavailable");
+        assert_eq!(body["budgets"]["lease_summary"]["reserved_count"], 0);
+        assert_eq!(body["budgets"]["conservative_mode"]["active"], true);
+        assert_eq!(
+            body["budgets"]["conservative_mode"]["reason"],
+            "budget_hot_state_unavailable"
+        );
+        assert_eq!(
+            body["budgets"]["conservative_mode"]["failure_mode"],
+            "fail_closed"
+        );
+        assert_eq!(
+            body["budgets"]["conservative_mode"]["affected_policy_count"],
+            1
+        );
+        assert_eq!(
+            body["budgets"]["conservative_mode"]["scopes"][0]["scope_kind"],
+            "project"
+        );
+        assert_eq!(
+            body["budgets"]["conservative_mode"]["scopes"][0]["scope_id"],
+            TEST_PROJECT_ID
+        );
+        assert_eq!(
+            body["budgets"]["conservative_mode"]["scopes"][0]["fallback"],
+            "fail_closed"
+        );
     }
 
     #[tokio::test]
@@ -17370,6 +18903,153 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_export_jobs_record_object_storage_failure_without_payload_leakage() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        publish_catalog_snapshot(&store, catalog_payload());
+        let response = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let export = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/exports/jobs",
+            json!({
+                "idempotency_key": "idem_usage_export_object_storage_failure",
+                "export_kind": "usage",
+                "storage_backend": "object_storage",
+                "scope_kind": "project",
+                "scope_id": TEST_PROJECT_ID,
+                "limit": 10,
+                "retention_days": 7
+            }),
+        )
+        .await;
+        let status = export.status();
+        let body = response_json(export).await;
+        let body_text = body.to_string();
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        assert_eq!(body["resource"]["status"], "failed");
+        assert_eq!(body["resource"]["storage_backend"], "object_storage");
+        assert_eq!(body["manifest"]["record_count"], 0);
+        assert!(body["manifest"]["object_ref"]
+            .as_str()
+            .is_some_and(|object_ref| object_ref.starts_with("object-storage://unavailable/")));
+        assert_eq!(body["manifest"]["manifest"]["status"], "failed");
+        assert_eq!(
+            body["manifest"]["manifest"]["object"]["backend"],
+            "object_storage"
+        );
+        assert_eq!(
+            body["manifest"]["manifest"]["object"]["object_storage_connected"],
+            false
+        );
+        assert_eq!(
+            body["manifest"]["manifest"]["failure"]["reason"],
+            "export_object_storage_unavailable"
+        );
+        assert_eq!(
+            body["manifest"]["manifest"]["redaction"]["rows_included"],
+            false
+        );
+        assert_eq!(
+            body["manifest"]["manifest"]["rows"]
+                .as_array()
+                .map_or(usize::MAX, Vec::len),
+            0
+        );
+        assert_eq!(body["manifest"]["manifest"]["total_filtered_count"], 1);
+        assert!(!body_text.contains("prompt text"));
+        assert!(!body_text.contains("sec_openai"));
+
+        let export_job_id = body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("export job id should be present"))
+            .to_owned();
+        let manifest = get_admin(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/exports/jobs/{export_job_id}/manifest"),
+        )
+        .await;
+        let manifest_status = manifest.status();
+        let manifest_body = response_json(manifest).await;
+        assert_eq!(manifest_status, StatusCode::OK, "{manifest_body:?}");
+        assert_eq!(
+            manifest_body["resource"]["manifest"]["failure"]["reason"],
+            "export_object_storage_unavailable"
+        );
+
+        let failed_list =
+            get_admin(store, &raw_session, "/admin/v1/exports/jobs?status=failed").await;
+        let failed_list_body = response_json(failed_list).await;
+        assert_eq!(
+            failed_list_body["resources"].as_array().map_or(0, Vec::len),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_export_job_manifest_respects_retention_boundary() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let now = chrono::Utc::now();
+        let created_at = now - Duration::days(2);
+        let job = store
+            .create_export_job(
+                CreateExportJobRequest {
+                    tenant_id: TEST_TENANT_ID.to_owned(),
+                    organization_id: Some(TEST_ORGANIZATION_ID.to_owned()),
+                    project_id: Some(TEST_PROJECT_ID.to_owned()),
+                    export_kind: "usage".to_owned(),
+                    requested_by: TEST_USER_ID.to_owned(),
+                    query_document: json!({
+                        "schema": "gateway.admin.export_query.v1",
+                        "export_kind": "usage",
+                        "storage_backend": "inline_manifest",
+                        "scope": {
+                            "kind": "project",
+                            "id": TEST_PROJECT_ID
+                        }
+                    }),
+                },
+                created_at,
+            )
+            .unwrap_or_else(|error| panic!("export job should create: {error}"));
+        store
+            .complete_export_job(
+                &job.export_job_id,
+                CompleteExportJobRequest {
+                    status: "completed".to_owned(),
+                    object_ref: format!(
+                        "memory://gateway-exports/{}/{}.json",
+                        TEST_TENANT_ID, job.export_job_id
+                    ),
+                    record_count: 0,
+                    byte_count: 2,
+                    checksum: "sha256:expired".to_owned(),
+                    manifest_document: json!({
+                        "schema": "gateway.export_manifest.v1",
+                        "status": "completed",
+                        "rows": []
+                    }),
+                    expires_at: now - Duration::seconds(1),
+                },
+                now - Duration::days(1),
+            )
+            .unwrap_or_else(|error| panic!("export job should complete: {error}"));
+
+        let response = get_admin(
+            store,
+            &raw_session,
+            &format!("/admin/v1/exports/jobs/{}/manifest", job.export_job_id),
+        )
+        .await;
+        let status = response.status();
+        let body = response_json(response).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+        assert!(body.to_string().contains("expired"));
+    }
+
+    #[tokio::test]
     async fn admin_export_jobs_create_audit_manifest_with_redaction() {
         let (store, raw_session, _) = gateway_store_with_admin_session_and_runtime_access();
         let endpoint_id = create_provider_endpoint_over_http(store.clone(), &raw_session).await;
@@ -17636,6 +19316,206 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_emergency_config_rollback_is_strong_auth_idempotent_and_freeze_safe() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        let original = publish_config_snapshot(
+            &store,
+            PublishConfigSnapshotRequest {
+                tenant_id: TEST_TENANT_ID.to_owned(),
+                resource_versions: Vec::new(),
+                payload: json!({"resources": [{"kind": "model_alias", "id": "ma_known_good"}]}),
+                created_by: TEST_USER_ID.to_owned(),
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap_or_else(|error| panic!("original snapshot should publish: {error}"));
+        publish_config_snapshot(
+            &store,
+            PublishConfigSnapshotRequest {
+                tenant_id: TEST_TENANT_ID.to_owned(),
+                resource_versions: Vec::new(),
+                payload: json!({"resources": [{"kind": "model_alias", "id": "ma_bad"}]}),
+                created_by: TEST_USER_ID.to_owned(),
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap_or_else(|error| panic!("latest snapshot should publish: {error}"));
+        let expires_at = (chrono::Utc::now() + Duration::minutes(30)).to_rfc3339();
+        let freeze = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/emergency/config/freeze",
+            json!({
+                "idempotency_key": "idem_emergency_rollback_freeze",
+                "reason": "Freeze before emergency rollback.",
+                "expires_at": expires_at
+            }),
+        )
+        .await;
+        assert_eq!(freeze.status(), StatusCode::OK);
+
+        let rollback_path = format!(
+            "/admin/v1/emergency/config/snapshots/{}/rollback",
+            original.metadata.snapshot_id
+        );
+        let request = json!({
+            "idempotency_key": "idem_emergency_config_rollback",
+            "reason": "Rollback known good routing config.",
+            "expires_at": expires_at
+        });
+        let denied =
+            post_admin_json_with_bearer(store.clone(), &raw_key, &rollback_path, request.clone())
+                .await;
+        let denied_status = denied.status();
+        let denied_body = response_json(denied).await;
+        assert_eq!(denied_status, StatusCode::FORBIDDEN, "{denied_body:?}");
+
+        let first =
+            post_admin_json(store.clone(), &raw_session, &rollback_path, request.clone()).await;
+        let first_status = first.status();
+        let first_body = response_json(first).await;
+        let second = post_admin_json(store.clone(), &raw_session, &rollback_path, request).await;
+        let second_status = second.status();
+        let second_body = response_json(second).await;
+        assert_eq!(first_status, StatusCode::OK, "{first_body:?}");
+        assert_eq!(second_status, StatusCode::OK, "{second_body:?}");
+        assert_eq!(
+            first_body["resource"]["operation_kind"],
+            "rollback_config_snapshot"
+        );
+        assert_eq!(
+            first_body["resource"]["target_resource_id"],
+            original.metadata.snapshot_id
+        );
+        assert_eq!(
+            first_body["affected_resource"]["rollback_of"],
+            original.metadata.snapshot_id
+        );
+        assert_eq!(first_body["affected_resource"]["version"], 3);
+        assert_eq!(
+            first_body["resource"]["operator_alert"]["target_resource_kind"],
+            "ConfigSnapshot"
+        );
+        assert_eq!(second_body["idempotency_replayed"], true);
+        assert_eq!(second_body["resource"]["id"], first_body["resource"]["id"]);
+        assert_eq!(store.config_snapshots().len(), 3);
+        assert_eq!(
+            store
+                .latest_published_snapshot_for_tenant(TEST_TENANT_ID)
+                .map(|metadata| metadata.version),
+            Some(3)
+        );
+        assert!(store.audit_events().iter().any(|event| {
+            event.event_type == "gateway.emergency.rollback"
+                && event.resource_kind == "EmergencyOperation"
+                && event.redacted_diff["operation_kind"] == "rollback_config_snapshot"
+        }));
+    }
+
+    #[tokio::test]
+    async fn admin_emergency_force_budget_block_is_strong_auth_idempotent_and_blocks_runtime() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        publish_catalog_snapshot(&store, catalog_payload());
+        let create_policy = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/budget-policies",
+            json!({
+                "idempotency_key": "idem_emergency_force_budget_policy",
+                "scope_kind": "project",
+                "scope_id": TEST_PROJECT_ID,
+                "period": "calendar_month",
+                "limit_kind": "requests",
+                "hard_limit": 1_000_000,
+                "reset_policy": "calendar_month",
+                "overage_mode": "block_new_requests",
+                "consistency_mode": "eventual"
+            }),
+        )
+        .await;
+        let policy_status = create_policy.status();
+        let policy_body = response_json(create_policy).await;
+        assert_eq!(policy_status, StatusCode::OK, "{policy_body:?}");
+        let budget_policy_id = policy_body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("budget policy id should be present"))
+            .to_owned();
+        let expires_at = (chrono::Utc::now() + Duration::minutes(30)).to_rfc3339();
+        let path = format!("/admin/v1/emergency/budget-policies/{budget_policy_id}/force-block");
+
+        let denied = post_admin_json_with_bearer(
+            store.clone(),
+            &raw_key,
+            &path,
+            json!({
+                "idempotency_key": "idem_emergency_force_budget_api_key_denied",
+                "expected_version": 1,
+                "reason": "Stop runaway spend.",
+                "expires_at": expires_at
+            }),
+        )
+        .await;
+        let denied_status = denied.status();
+        let denied_body = response_json(denied).await;
+        assert_eq!(denied_status, StatusCode::FORBIDDEN, "{denied_body:?}");
+
+        let request = json!({
+            "idempotency_key": "idem_emergency_force_budget_block",
+            "expected_version": 1,
+            "reason": "Stop runaway spend.",
+            "expires_at": expires_at
+        });
+        let first = post_admin_json(store.clone(), &raw_session, &path, request.clone()).await;
+        let first_status = first.status();
+        let first_body = response_json(first).await;
+        let second = post_admin_json(store.clone(), &raw_session, &path, request).await;
+        let second_status = second.status();
+        let second_body = response_json(second).await;
+
+        assert_eq!(first_status, StatusCode::OK, "{first_body:?}");
+        assert_eq!(second_status, StatusCode::OK, "{second_body:?}");
+        assert_eq!(
+            first_body["resource"]["operation_kind"],
+            "force_budget_block"
+        );
+        assert_eq!(
+            first_body["resource"]["target_resource_kind"],
+            "BudgetPolicy"
+        );
+        assert_eq!(
+            first_body["resource"]["target_resource_id"],
+            budget_policy_id
+        );
+        assert_eq!(first_body["affected_resource"]["status"], "forced_block");
+        assert_eq!(
+            first_body["affected_resource"]["budget_policy"]["scope_id"],
+            TEST_PROJECT_ID
+        );
+        assert_eq!(second_body["idempotency_replayed"], true);
+        assert_eq!(second_body["resource"]["id"], first_body["resource"]["id"]);
+
+        let blocked = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
+        let blocked_status = blocked.status();
+        let blocked_body = response_json(blocked).await;
+
+        assert_eq!(blocked_status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(blocked_body["error"]["code"], "gateway.budget.exceeded");
+        assert!(blocked_body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("emergency_force_budget_block")));
+        assert!(store.usage_events_for_tenant(TEST_TENANT_ID).is_empty());
+        assert!(store.route_attempts().is_empty());
+        assert!(store.route_decisions().iter().any(|decision| {
+            decision.status == RouteDecisionStatus::Blocked && decision.reason == "budget_exceeded"
+        }));
+        assert!(store.audit_events().iter().any(|event| {
+            event.event_type == "gateway.emergency.force_budget_block"
+                && event.resource_kind == "EmergencyOperation"
+                && event.redacted_diff["operation_kind"] == "force_budget_block"
+        }));
+    }
+
+    #[tokio::test]
     async fn model_ingress_blocks_after_project_request_budget_hard_limit() {
         let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
         publish_catalog_snapshot(&store, catalog_payload());
@@ -17742,6 +19622,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_policy_reconciler_expires_stale_request_budget_leases() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        publish_catalog_snapshot(&store, catalog_payload());
+        let create_policy = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/budget-policies",
+            json!({
+                "idempotency_key": "idem_runtime_budget_lease_expiry",
+                "scope_kind": "project",
+                "scope_id": TEST_PROJECT_ID,
+                "period": "lifetime",
+                "limit_kind": "requests",
+                "hard_limit": 1,
+                "reset_policy": "manual_counter_reset",
+                "overage_mode": "block_new_requests",
+                "consistency_mode": "strong_terminal"
+            }),
+        )
+        .await;
+        assert_eq!(create_policy.status(), StatusCode::OK);
+        let now = chrono::Utc::now();
+        let state = AppState::new(GatewayConfig::default(), store.clone());
+        let actor = verify_api_key(
+            &store,
+            &raw_key,
+            "req_budget_lease_expiry_1".to_owned(),
+            now,
+        )
+        .unwrap_or_else(|error| panic!("api key should verify: {error}"));
+        let replay_cases = foundation_route_replay_cases();
+        let replay_case = replay_cases
+            .iter()
+            .find(|case| case.protocol_family == ProtocolFamily::OpenAiResponses && !case.streaming)
+            .unwrap_or_else(|| panic!("openai responses replay case should exist"));
+        let route_target = runtime_route_target(&state, &actor, replay_case, "gpt-test")
+            .unwrap_or_else(|error| panic!("route target should resolve: {error}"));
+        let selected = route_target
+            .selected_route
+            .as_ref()
+            .unwrap_or_else(|| panic!("route should be selected"));
+        let policy = store
+            .budget_policies_for_tenant(TEST_TENANT_ID)
+            .into_iter()
+            .find(|policy| policy.limit_kind == "requests")
+            .unwrap_or_else(|| panic!("budget policy should exist"));
+        let reservation_key = runtime_budget_reservation_key(&policy, now);
+
+        let first =
+            enforce_runtime_policy_preflight(&state, &actor, replay_case, Some(selected), 32, now)
+                .unwrap_or_else(|error| panic!("first preflight should reserve: {error}"));
+        let blocked =
+            enforce_runtime_policy_preflight(&state, &actor, replay_case, Some(selected), 32, now);
+        let leases = store.runtime_budget_leases_for_tenant(TEST_TENANT_ID);
+
+        assert!(matches!(
+            blocked,
+            Err(GatewayError::BudgetExceeded {
+                reason: "hard_limit_reserved"
+            })
+        ));
+        assert_eq!(leases.len(), 1);
+        assert_eq!(leases[0].status, "reserved");
+        assert_eq!(leases[0].request_id, "req_budget_lease_expiry_1");
+        assert_eq!(store.runtime_policy_counter(&reservation_key), 1);
+
+        let repair_at = now + Duration::seconds(RUNTIME_BUDGET_LEASE_TTL_SECONDS + 1);
+        let summary = run_runtime_policy_reconciler_once(
+            &store,
+            TEST_TENANT_ID,
+            "runtime_policy_reconciler_test",
+            repair_at,
+        );
+        let repaired_leases = store.runtime_budget_leases_for_tenant(TEST_TENANT_ID);
+
+        assert_eq!(summary.considered_budget_policy_count, 1);
+        assert_eq!(summary.expired_budget_lease_count, 1);
+        assert_eq!(summary.expired_budget_lease_total, 1);
+        assert_eq!(summary.considered_quota_policy_count, 0);
+        assert_eq!(summary.audit_event_count, 1);
+        assert_eq!(store.runtime_policy_counter(&reservation_key), 0);
+        assert_eq!(repaired_leases[0].status, "expired");
+        assert!(store.audit_events().iter().any(|event| {
+            event.event_type == "gateway.runtime_policy.budget_lease_expired"
+                && event.resource_id == policy.budget_policy_id
+                && event.redacted_diff["repair_action"] == "expire_budget_lease"
+                && event.redacted_diff["lease"]["request_id"] == "req_budget_lease_expiry_1"
+                && event.redacted_diff["redaction"]["raw_hot_state_key_included"] == false
+        }));
+
+        release_runtime_policy_reservations(&state, &first);
+        assert_eq!(store.runtime_policy_counter(&reservation_key), 0);
+        let third = enforce_runtime_policy_preflight(
+            &state,
+            &actor,
+            replay_case,
+            Some(selected),
+            32,
+            repair_at,
+        )
+        .unwrap_or_else(|error| panic!("expired reservation should free budget: {error}"));
+        assert_eq!(store.runtime_policy_counter(&reservation_key), 1);
+        release_runtime_policy_reservations(&state, &third);
+        assert_eq!(store.runtime_policy_counter(&reservation_key), 0);
+    }
+
+    #[tokio::test]
     async fn runtime_concurrent_request_quota_reservation_blocks_overlapping_preflight() {
         let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
         publish_catalog_snapshot(&store, catalog_payload());
@@ -17803,6 +19790,83 @@ mod tests {
         let third =
             enforce_runtime_policy_preflight(&state, &actor, replay_case, Some(selected), 32, now)
                 .unwrap_or_else(|error| panic!("released reservation should free quota: {error}"));
+        release_runtime_policy_reservations(&state, &third);
+    }
+
+    #[tokio::test]
+    async fn runtime_concurrent_stream_quota_reservation_blocks_overlapping_preflight() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        publish_catalog_snapshot(&store, protocol_replay_catalog_payload());
+        let create_policy = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/quota-policies",
+            json!({
+                "idempotency_key": "idem_runtime_concurrent_stream_quota",
+                "scope_kind": "project",
+                "scope_id": TEST_PROJECT_ID,
+                "counter_kind": "concurrent_stream",
+                "limit": 1,
+                "window": "stream_lifetime",
+                "increment_source": "stream_start",
+                "loss_behavior": "fail_closed"
+            }),
+        )
+        .await;
+        assert_eq!(create_policy.status(), StatusCode::OK);
+        let now = chrono::Utc::now();
+        let state = AppState::new(GatewayConfig::default(), store.clone());
+        let actor = verify_api_key(
+            &store,
+            &raw_key,
+            "req_stream_quota_reservation_1".to_owned(),
+            now,
+        )
+        .unwrap_or_else(|error| panic!("api key should verify: {error}"));
+        let replay_cases = foundation_route_replay_cases();
+        let replay_case = replay_cases
+            .iter()
+            .find(|case| case.protocol_family == ProtocolFamily::OpenAiChat && case.streaming)
+            .unwrap_or_else(|| panic!("openai chat stream replay case should exist"));
+        let route_target = runtime_route_target(
+            &state,
+            &actor,
+            replay_case,
+            protocol_replay_alias_name(ProtocolFamily::OpenAiChat),
+        )
+        .unwrap_or_else(|error| panic!("route target should resolve: {error}"));
+        let selected = route_target
+            .selected_route
+            .as_ref()
+            .unwrap_or_else(|| panic!("route should be selected"));
+        let policy = store
+            .quota_policies_for_tenant(TEST_TENANT_ID)
+            .into_iter()
+            .find(|policy| policy.counter_kind == "concurrent_stream")
+            .unwrap_or_else(|| panic!("quota policy should exist"));
+        let reservation_key = runtime_quota_counter_key(&policy, now);
+
+        let first =
+            enforce_runtime_policy_preflight(&state, &actor, replay_case, Some(selected), 32, now)
+                .unwrap_or_else(|error| panic!("first preflight should reserve: {error}"));
+        let second =
+            enforce_runtime_policy_preflight(&state, &actor, replay_case, Some(selected), 32, now);
+
+        assert!(matches!(
+            second,
+            Err(GatewayError::QuotaExceeded {
+                reason: "concurrent_stream_limit_reached"
+            })
+        ));
+        assert_eq!(store.runtime_policy_counter(&reservation_key), 1);
+        release_runtime_policy_reservations(&state, &first);
+        assert_eq!(store.runtime_policy_counter(&reservation_key), 0);
+
+        let third =
+            enforce_runtime_policy_preflight(&state, &actor, replay_case, Some(selected), 32, now)
+                .unwrap_or_else(|error| {
+                    panic!("released reservation should free stream quota: {error}")
+                });
         release_runtime_policy_reservations(&state, &third);
     }
 
@@ -17895,6 +19959,246 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_policy_reconciler_repairs_token_actual_quota_from_usage_events() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        publish_catalog_snapshot(&store, catalog_payload());
+        let create_policy = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/quota-policies",
+            json!({
+                "idempotency_key": "idem_runtime_token_actual_repair_quota",
+                "scope_kind": "project",
+                "scope_id": TEST_PROJECT_ID,
+                "counter_kind": "token_actual_rate",
+                "limit": 3,
+                "window": "ledger_bucket",
+                "increment_source": "terminal_usage_event",
+                "loss_behavior": "fail_closed"
+            }),
+        )
+        .await;
+        assert_eq!(create_policy.status(), StatusCode::OK);
+
+        let first = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
+        let first_status = first.status();
+        let first_body = response_json(first).await;
+        assert_eq!(first_status, StatusCode::OK, "{first_body:?}");
+
+        let policy = store
+            .quota_policies_for_tenant(TEST_TENANT_ID)
+            .into_iter()
+            .find(|policy| policy.counter_kind == "token_actual_rate")
+            .unwrap_or_else(|| panic!("quota policy should exist"));
+        let counter_key = runtime_quota_counter_key(&policy, chrono::Utc::now());
+        assert_eq!(store.runtime_policy_counter(&counter_key), 3);
+        store.adjust_runtime_policy_counter(counter_key.clone(), -3);
+        assert_eq!(store.runtime_policy_counter(&counter_key), 0);
+
+        let summary = run_runtime_policy_reconciler_once(
+            &store,
+            TEST_TENANT_ID,
+            "runtime_policy_reconciler_test",
+            chrono::Utc::now(),
+        );
+
+        assert_eq!(summary.considered_quota_policy_count, 1);
+        assert_eq!(summary.repairable_quota_policy_count, 1);
+        assert_eq!(summary.repaired_counter_count, 1);
+        assert_eq!(summary.audit_event_count, 1);
+        assert_eq!(summary.repaired_delta_total, 3);
+        assert_eq!(store.runtime_policy_counter(&counter_key), 3);
+        assert!(store.audit_events().iter().any(|event| {
+            event.event_type == "gateway.runtime_policy.reconciliation_repair"
+                && event.resource_id == policy.quota_policy_id
+                && event.redacted_diff["repair_action"] == "increase_hot_counter"
+                && event.redacted_diff["previous_value"] == 0
+                && event.redacted_diff["repaired_value"] == 3
+                && event.redacted_diff["redaction"]["raw_hot_state_key_included"] == false
+        }));
+
+        let second = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
+        let second_status = second.status();
+        let second_body = response_json(second).await;
+        assert_eq!(second_status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(second_body["error"]["code"], "gateway.quota.exceeded");
+        assert_eq!(store.usage_events_for_tenant(TEST_TENANT_ID).len(), 1);
+        assert_eq!(store.route_attempts().len(), 1);
+        assert!(store.route_decisions().iter().any(|decision| {
+            decision.status == RouteDecisionStatus::Blocked && decision.reason == "quota_exceeded"
+        }));
+    }
+
+    #[tokio::test]
+    async fn model_ingress_blocks_after_stream_duration_quota_limit() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        let graph = create_admin_graph_for_dashboards(store.clone(), &raw_session).await;
+        let replay_cases = foundation_route_replay_cases();
+        let replay_case = replay_cases
+            .iter()
+            .find(|case| case.protocol_family == ProtocolFamily::OpenAiChat && case.streaming)
+            .unwrap_or_else(|| panic!("openai chat stream replay case should exist"));
+        seed_replay_case_action_grant(&store, replay_case, graph.alias_id.clone());
+        publish_catalog_snapshot(
+            &store,
+            catalog_payload_for_admin_graph_protocol(
+                &graph,
+                ProtocolFamily::OpenAiChat,
+                protocol_replay_alias_name(ProtocolFamily::OpenAiChat),
+            ),
+        );
+        let create_policy = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/quota-policies",
+            json!({
+                "idempotency_key": "idem_runtime_stream_duration_quota",
+                "scope_kind": "alias",
+                "scope_id": graph.alias_id,
+                "counter_kind": "stream_duration",
+                "limit": 1,
+                "window": "fixed",
+                "increment_source": "stream_start",
+                "loss_behavior": "fail_closed"
+            }),
+        )
+        .await;
+        assert_eq!(create_policy.status(), StatusCode::OK);
+        wait_for_quota_fixed_window_margin().await;
+
+        let first = post_replay_case_over_http(
+            store.clone(),
+            &raw_key,
+            replay_case,
+            &protocol_replay_request_body(replay_case),
+        )
+        .await;
+        let first_status = first.status();
+        let first_body = response_json(first).await;
+        assert_eq!(first_status, StatusCode::OK, "{first_body:?}");
+
+        let policy = store
+            .quota_policies_for_tenant(TEST_TENANT_ID)
+            .into_iter()
+            .find(|policy| policy.counter_kind == "stream_duration")
+            .unwrap_or_else(|| panic!("quota policy should exist"));
+        let counter_key = runtime_quota_counter_key(&policy, chrono::Utc::now());
+        assert_eq!(store.runtime_policy_counter(&counter_key), 1);
+
+        let second = post_replay_case_over_http(
+            store.clone(),
+            &raw_key,
+            replay_case,
+            &protocol_replay_request_body(replay_case),
+        )
+        .await;
+        let second_status = second.status();
+        let second_body = response_json(second).await;
+
+        assert_eq!(second_status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(second_body["error"]["code"], "gateway.quota.exceeded");
+        assert_eq!(store.usage_events_for_tenant(TEST_TENANT_ID).len(), 1);
+        assert_eq!(store.route_attempts().len(), 1);
+        assert!(store.route_decisions().iter().any(|decision| {
+            decision.status == RouteDecisionStatus::Blocked && decision.reason == "quota_exceeded"
+        }));
+    }
+
+    #[tokio::test]
+    async fn runtime_policy_reconciler_repairs_stream_duration_quota_from_usage_events() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        let graph = create_admin_graph_for_dashboards(store.clone(), &raw_session).await;
+        let replay_cases = foundation_route_replay_cases();
+        let replay_case = replay_cases
+            .iter()
+            .find(|case| case.protocol_family == ProtocolFamily::OpenAiChat && case.streaming)
+            .unwrap_or_else(|| panic!("openai chat stream replay case should exist"));
+        seed_replay_case_action_grant(&store, replay_case, graph.alias_id.clone());
+        publish_catalog_snapshot(
+            &store,
+            catalog_payload_for_admin_graph_protocol(
+                &graph,
+                ProtocolFamily::OpenAiChat,
+                protocol_replay_alias_name(ProtocolFamily::OpenAiChat),
+            ),
+        );
+        let create_policy = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/quota-policies",
+            json!({
+                "idempotency_key": "idem_runtime_stream_duration_repair_quota",
+                "scope_kind": "alias",
+                "scope_id": graph.alias_id,
+                "counter_kind": "stream_duration",
+                "limit": 1,
+                "window": "fixed",
+                "increment_source": "stream_start",
+                "loss_behavior": "fail_closed"
+            }),
+        )
+        .await;
+        assert_eq!(create_policy.status(), StatusCode::OK);
+        wait_for_quota_fixed_window_margin().await;
+
+        let first = post_replay_case_over_http(
+            store.clone(),
+            &raw_key,
+            replay_case,
+            &protocol_replay_request_body(replay_case),
+        )
+        .await;
+        let first_status = first.status();
+        let first_body = response_json(first).await;
+        assert_eq!(first_status, StatusCode::OK, "{first_body:?}");
+
+        let now = chrono::Utc::now();
+        let policy = store
+            .quota_policies_for_tenant(TEST_TENANT_ID)
+            .into_iter()
+            .find(|policy| policy.counter_kind == "stream_duration")
+            .unwrap_or_else(|| panic!("quota policy should exist"));
+        let counter_key = runtime_quota_counter_key(&policy, now);
+        assert_eq!(store.runtime_policy_counter(&counter_key), 1);
+        store.adjust_runtime_policy_counter(counter_key.clone(), -1);
+        assert_eq!(store.runtime_policy_counter(&counter_key), 0);
+
+        let summary = run_runtime_policy_reconciler_once(
+            &store,
+            TEST_TENANT_ID,
+            "runtime_policy_reconciler_test",
+            now,
+        );
+
+        assert_eq!(summary.considered_quota_policy_count, 1);
+        assert_eq!(summary.repairable_quota_policy_count, 1);
+        assert_eq!(summary.repaired_counter_count, 1);
+        assert_eq!(summary.audit_event_count, 1);
+        assert_eq!(summary.repaired_delta_total, 1);
+        assert_eq!(store.runtime_policy_counter(&counter_key), 1);
+        assert!(store.audit_events().iter().any(|event| {
+            event.event_type == "gateway.runtime_policy.reconciliation_repair"
+                && event.resource_id == policy.quota_policy_id
+                && event.redacted_diff["policy"]["counter_kind"] == "stream_duration"
+                && event.redacted_diff["redaction"]["raw_hot_state_key_included"] == false
+        }));
+
+        let second = post_replay_case_over_http(
+            store.clone(),
+            &raw_key,
+            replay_case,
+            &protocol_replay_request_body(replay_case),
+        )
+        .await;
+        let second_status = second.status();
+        let second_body = response_json(second).await;
+        assert_eq!(second_status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(second_body["error"]["code"], "gateway.quota.exceeded");
+        assert_eq!(store.usage_events_for_tenant(TEST_TENANT_ID).len(), 1);
+        assert_eq!(store.route_attempts().len(), 1);
+    }
+
+    #[tokio::test]
     async fn model_ingress_blocks_request_body_bytes_quota_before_usage() {
         let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
         publish_catalog_snapshot(&store, catalog_payload());
@@ -17935,6 +20239,138 @@ mod tests {
         assert!(store.route_decisions().iter().any(|decision| {
             decision.status == RouteDecisionStatus::Blocked && decision.reason == "quota_exceeded"
         }));
+    }
+
+    #[tokio::test]
+    async fn runtime_request_budget_hot_state_loss_fails_closed() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        publish_catalog_snapshot(&store, catalog_payload());
+        let create_policy = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/budget-policies",
+            json!({
+                "idempotency_key": "idem_runtime_budget_hot_state_loss",
+                "scope_kind": "project",
+                "scope_id": TEST_PROJECT_ID,
+                "period": "calendar_month",
+                "limit_kind": "requests",
+                "hard_limit": 100,
+                "reset_policy": "calendar_month",
+                "overage_mode": "block_new_requests",
+                "consistency_mode": "strong_terminal"
+            }),
+        )
+        .await;
+        assert_eq!(create_policy.status(), StatusCode::OK);
+        store.set_runtime_policy_hot_state_available(false);
+
+        let response = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
+        let status = response.status();
+        let body = response_json(response).await;
+
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["error"]["code"], "gateway.budget.exceeded");
+        assert!(body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("budget_hot_state_unavailable")));
+        assert!(store.usage_events_for_tenant(TEST_TENANT_ID).is_empty());
+        assert!(store.route_attempts().is_empty());
+        assert!(store.route_decisions().iter().any(|decision| {
+            decision.status == RouteDecisionStatus::Blocked && decision.reason == "budget_exceeded"
+        }));
+    }
+
+    #[tokio::test]
+    async fn runtime_quota_hot_state_loss_fail_closed_blocks_request() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        publish_catalog_snapshot(&store, catalog_payload());
+        create_runtime_request_rate_quota_policy(
+            store.clone(),
+            &raw_session,
+            "idem_runtime_quota_loss_fail_closed",
+            "fail_closed",
+            None,
+        )
+        .await;
+        store.set_runtime_policy_hot_state_available(false);
+
+        let response = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
+        let status = response.status();
+        let body = response_json(response).await;
+
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["error"]["code"], "gateway.quota.exceeded");
+        assert!(body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("hot_state_unavailable")));
+        assert!(store.usage_events_for_tenant(TEST_TENANT_ID).is_empty());
+        assert!(store.route_attempts().is_empty());
+        assert!(store.route_decisions().iter().any(|decision| {
+            decision.status == RouteDecisionStatus::Blocked && decision.reason == "quota_exceeded"
+        }));
+    }
+
+    #[tokio::test]
+    async fn runtime_quota_hot_state_loss_fail_open_allows_requests() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        publish_catalog_snapshot(&store, catalog_payload());
+        create_runtime_request_rate_quota_policy(
+            store.clone(),
+            &raw_session,
+            "idem_runtime_quota_loss_fail_open",
+            "fail_open",
+            None,
+        )
+        .await;
+        store.set_runtime_policy_hot_state_available(false);
+
+        let first = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
+        let second = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
+
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(store.usage_events_for_tenant(TEST_TENANT_ID).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn runtime_quota_hot_state_loss_fail_limited_consumes_burst_allowance() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        publish_catalog_snapshot(&store, catalog_payload());
+        create_runtime_request_rate_quota_policy(
+            store.clone(),
+            &raw_session,
+            "idem_runtime_quota_loss_fail_limited",
+            "fail_limited",
+            Some(1),
+        )
+        .await;
+        wait_for_quota_fixed_window_margin().await;
+        let now = chrono::Utc::now();
+        let policy = store
+            .quota_policies_for_tenant(TEST_TENANT_ID)
+            .into_iter()
+            .find(|policy| policy.loss_behavior == "fail_limited")
+            .unwrap_or_else(|| panic!("fail-limited quota policy should exist"));
+        let allowance_key = runtime_quota_loss_allowance_key(&policy, now);
+        store.set_runtime_policy_hot_state_available(false);
+
+        let first = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
+        let second = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
+        let second_status = second.status();
+        let second_body = response_json(second).await;
+
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(second_status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(second_body["error"]["code"], "gateway.quota.exceeded");
+        assert!(second_body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("fail_limited_allowance_exhausted")));
+        assert_eq!(store.usage_events_for_tenant(TEST_TENANT_ID).len(), 1);
+        assert_eq!(
+            store.runtime_policy_loss_allowance_counter(&allowance_key),
+            2
+        );
     }
 
     #[tokio::test]
@@ -21597,6 +24033,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_terminal_budget_threshold_enqueues_redacted_notification_outbox_event() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        publish_catalog_snapshot(&store, catalog_payload());
+        let notification_sink_id =
+            create_stdout_notification_sink_over_http(store.clone(), &raw_session).await;
+        let subscription = post_admin_json(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/notification/sinks/{notification_sink_id}/subscriptions"),
+            json!({
+                "idempotency_key": "idem_budget_threshold_notification_subscription",
+                "event_family": "budget",
+                "filter_document": {
+                    "event_types": ["gateway.budget.hard_limit_reached"],
+                    "scope_kind": "project",
+                    "scope_id": TEST_PROJECT_ID
+                }
+            }),
+        )
+        .await;
+        assert_eq!(subscription.status(), StatusCode::OK);
+        let policy = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/budget-policies",
+            json!({
+                "idempotency_key": "idem_terminal_budget_threshold_policy",
+                "scope_kind": "project",
+                "scope_id": TEST_PROJECT_ID,
+                "period": "calendar_month",
+                "limit_kind": "tokens",
+                "hard_limit": 3,
+                "reset_policy": "calendar_month",
+                "overage_mode": "block_new_requests",
+                "consistency_mode": "strong_terminal"
+            }),
+        )
+        .await;
+        assert_eq!(policy.status(), StatusCode::OK);
+
+        let first = post_responses_request_with_body(
+            store.clone(),
+            &raw_key,
+            json!({
+                "model": "gpt-test",
+                "input": "prompt text that must not enter terminal budget payload"
+            }),
+        )
+        .await;
+        let first_status = first.status();
+        let first_body = response_json(first).await;
+        let second = post_responses_request(store.clone(), &raw_key, "gpt-test").await;
+        let second_status = second.status();
+        let second_body = response_json(second).await;
+        let events = store.notification_outbox_events_for_tenant(TEST_TENANT_ID);
+
+        assert_eq!(first_status, StatusCode::OK, "{first_body:?}");
+        assert_eq!(second_status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(second_body["error"]["code"], "gateway.budget.exceeded");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_kind, "gateway.budget.hard_limit_reached");
+        assert_eq!(events[0].status, "pending");
+        assert_eq!(
+            events[0].notification_sink_id.as_deref(),
+            Some(notification_sink_id.as_str())
+        );
+        assert_eq!(events[0].payload_document["scope"]["id"], TEST_PROJECT_ID);
+        assert_eq!(
+            events[0].payload_document["request"]["requested_model"],
+            "gpt-test"
+        );
+        assert_eq!(
+            events[0].payload_document["policy"]["threshold_kind"],
+            "hard_limit"
+        );
+        assert_eq!(events[0].payload_document["policy"]["previous_value"], 0);
+        assert_eq!(events[0].payload_document["policy"]["current_value"], 3);
+        assert_eq!(
+            events[0].payload_document["redaction"]["request_body_included"],
+            false
+        );
+        let payload_text = events[0].payload_document.to_string();
+        assert!(!payload_text.contains("prompt text"));
+        assert!(!payload_text.contains("sec_"));
+    }
+
+    #[tokio::test]
     async fn notification_delivery_retry_failure_does_not_block_runtime_requests() {
         let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
         publish_catalog_snapshot(&store, catalog_payload());
@@ -21656,6 +24179,223 @@ mod tests {
             10,
         )
         .is_empty());
+    }
+
+    #[tokio::test]
+    async fn notification_dead_letter_replay_is_idempotent_and_resets_retry_budget() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        let notification_sink_id = create_webhook_notification_sink_over_http(
+            store.clone(),
+            &raw_session,
+            "idem_notification_outbox_replay_retry_sink",
+            "replay-retry-webhook",
+            "https://retry.example/gateway",
+        )
+        .await;
+        let (event_id, first_attempt, second_attempt, third_attempt) =
+            append_and_dead_letter_retry_notification_event(&store, &notification_sink_id);
+        let replay_path = format!("/admin/v1/notification/outbox/{event_id}/replay");
+        let replay_request = json!({
+            "idempotency_key": "idem_notification_outbox_replay",
+            "reason": "receiver recovered after incident"
+        });
+        let api_key_denied = post_admin_json_with_bearer(
+            store.clone(),
+            &raw_key,
+            &replay_path,
+            replay_request.clone(),
+        )
+        .await;
+        let api_key_denied_status = api_key_denied.status();
+        let api_key_denied_body = response_json(api_key_denied).await;
+        let replay = post_admin_json(
+            store.clone(),
+            &raw_session,
+            &replay_path,
+            replay_request.clone(),
+        )
+        .await;
+        let replay_status = replay.status();
+        let replay_body = response_json(replay).await;
+        let replay_text = serde_json::to_string(&replay_body)
+            .unwrap_or_else(|error| panic!("replay response should serialize: {error}"));
+        let replay_again =
+            post_admin_json(store.clone(), &raw_session, &replay_path, replay_request).await;
+        let replay_again_status = replay_again.status();
+        let replay_again_body = response_json(replay_again).await;
+        let replayed_event = store
+            .notification_outbox_event(&event_id)
+            .unwrap_or_else(|| panic!("replayed event should remain stored"));
+        let attempts_before_redelivery = store.notification_delivery_attempts_for_event(&event_id);
+        let redelivery_due_at = replayed_event
+            .next_attempt_at
+            .unwrap_or_else(|| panic!("replayed event should be immediately due"));
+        let redelivery_attempt = deliver_first_due_notification(store.clone(), redelivery_due_at);
+        let redelivered_event = store
+            .notification_outbox_event(&event_id)
+            .unwrap_or_else(|| panic!("redelivered event should remain stored"));
+        let attempts_after_redelivery = store.notification_delivery_attempts_for_event(&event_id);
+        let audit_text = serde_json::to_string(&store.audit_events())
+            .unwrap_or_else(|error| panic!("audit events should serialize: {error}"));
+
+        assert_retryable_webhook_attempt(&first_attempt, "notification_webhook_retryable_failure");
+        assert_retryable_webhook_attempt(&second_attempt, "notification_webhook_retryable_failure");
+        assert_eq!(third_attempt.status, "dead_lettered");
+        assert_eq!(api_key_denied_status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            api_key_denied_body["error"]["code"],
+            "gateway.auth.authorization_denied"
+        );
+        assert!(api_key_denied_body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("api_key_not_allowed_for_route")));
+        assert_eq!(replay_status, StatusCode::OK);
+        assert_eq!(
+            replay_body["schema"],
+            "gateway.admin.notification_outbox_replay.v1"
+        );
+        assert_eq!(replay_body["resource"]["id"], event_id);
+        assert_eq!(replay_body["resource"]["status"], "pending");
+        assert_eq!(replay_body["resource"]["attempt_count"], 0);
+        assert_eq!(replay_body["resource"]["payload_included"], false);
+        assert!(replay_body["resource"]["next_attempt_at"].is_string());
+        assert_eq!(replay_body["idempotency_replayed"], false);
+        assert_eq!(replay_again_status, StatusCode::OK);
+        assert_eq!(replay_again_body["resource"]["id"], event_id);
+        assert_eq!(replay_again_body["idempotency_replayed"], true);
+        assert_eq!(replayed_event.status, "pending");
+        assert_eq!(replayed_event.attempt_count, 0);
+        assert_eq!(attempts_before_redelivery.len(), 3);
+        assert_retryable_webhook_attempt(
+            &redelivery_attempt,
+            "notification_webhook_retryable_failure",
+        );
+        assert_eq!(redelivered_event.status, "retryable_failed");
+        assert_eq!(redelivered_event.attempt_count, 1);
+        assert_eq!(attempts_after_redelivery.len(), 4);
+        assert!(store.audit_events().iter().any(|event| {
+            event.event_type == "gateway.notification_outbox.replay"
+                && event.resource_kind == "NotificationOutboxEvent"
+                && event.resource_id == event_id
+                && event.redacted_diff["payload_included"] == false
+        }));
+        assert!(!replay_text.contains("replay-secret-marker"));
+        assert!(!replay_text.contains("notification-webhook-secret-value"));
+        assert!(!audit_text.contains("replay-secret-marker"));
+        assert!(!audit_text.contains("notification-webhook-secret-value"));
+    }
+
+    #[tokio::test]
+    async fn notification_replay_rejects_non_dead_lettered_events() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let notification_sink_id =
+            create_stdout_notification_sink_over_http(store.clone(), &raw_session).await;
+        let event_id = append_synthetic_notification_event(
+            &store,
+            &notification_sink_id,
+            "notification_outbox_replay_pending",
+            "pending",
+        );
+        let replay = post_admin_json(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/notification/outbox/{event_id}/replay"),
+            json!({
+                "idempotency_key": "idem_notification_outbox_replay_pending",
+                "reason": "operator test"
+            }),
+        )
+        .await;
+        let replay_status = replay.status();
+        let replay_body = response_json(replay).await;
+        let event = store
+            .notification_outbox_event(&event_id)
+            .unwrap_or_else(|| panic!("event should remain stored"));
+
+        assert_eq!(replay_status, StatusCode::BAD_REQUEST);
+        assert_eq!(replay_body["error"]["code"], "gateway.request.invalid");
+        assert!(replay_body["error"]["message"].as_str().is_some_and(
+            |message| message.contains("notification_replay_requires_dead_lettered_event")
+        ));
+        assert_eq!(event.status, "pending");
+        assert_eq!(event.attempt_count, 0);
+        assert!(event.next_attempt_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn notification_delivery_respects_batch_limit_and_created_order() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let notification_sink_id =
+            create_stdout_notification_sink_over_http(store.clone(), &raw_session).await;
+        let base = chrono::Utc::now() - Duration::seconds(10);
+        let append_event = |dedupe_key: &str, created_at| {
+            store
+                .append_notification_outbox_event(
+                    CreateNotificationOutboxEventRequest {
+                        tenant_id: TEST_TENANT_ID.to_owned(),
+                        organization_id: Some(TEST_ORGANIZATION_ID.to_owned()),
+                        project_id: Some(TEST_PROJECT_ID.to_owned()),
+                        notification_subscription_id: None,
+                        notification_sink_id: Some(notification_sink_id.clone()),
+                        event_kind: "gateway.delivery.synthetic".to_owned(),
+                        dedupe_key: dedupe_key.to_owned(),
+                        payload_document: json!({
+                            "schema": "gateway.notification.synthetic.v1",
+                            "redaction": {
+                                "request_body_included": false,
+                                "provider_body_included": false
+                            },
+                            "event": {"kind": dedupe_key}
+                        }),
+                        next_attempt_at: Some(base),
+                    },
+                    created_at,
+                )
+                .notification_outbox_event_id
+        };
+
+        let first_id = append_event("notification_batch_first", base);
+        let second_id = append_event("notification_batch_second", base + Duration::seconds(1));
+        let third_id = append_event("notification_batch_third", base + Duration::seconds(2));
+
+        let first_batch = deliver_due_notifications(
+            &AppState::new(GatewayConfig::default(), store.clone()),
+            TEST_TENANT_ID,
+            base + Duration::seconds(3),
+            2,
+        );
+        let first_event = store
+            .notification_outbox_event(&first_id)
+            .unwrap_or_else(|| panic!("first notification event should remain stored"));
+        let second_event = store
+            .notification_outbox_event(&second_id)
+            .unwrap_or_else(|| panic!("second notification event should remain stored"));
+        let third_event = store
+            .notification_outbox_event(&third_id)
+            .unwrap_or_else(|| panic!("third notification event should remain stored"));
+
+        assert_eq!(first_batch.len(), 2);
+        assert_eq!(first_batch[0].notification_outbox_event_id, first_id);
+        assert_eq!(first_batch[1].notification_outbox_event_id, second_id);
+        assert_eq!(first_event.status, "delivered");
+        assert_eq!(second_event.status, "delivered");
+        assert_eq!(third_event.status, "pending");
+        assert_eq!(third_event.attempt_count, 0);
+
+        let second_batch = deliver_due_notifications(
+            &AppState::new(GatewayConfig::default(), store.clone()),
+            TEST_TENANT_ID,
+            base + Duration::seconds(4),
+            10,
+        );
+        let third_delivered = store
+            .notification_outbox_event(&third_id)
+            .unwrap_or_else(|| panic!("third notification event should remain stored"));
+
+        assert_eq!(second_batch.len(), 1);
+        assert_eq!(second_batch[0].notification_outbox_event_id, third_id);
+        assert_eq!(third_delivered.status, "delivered");
+        assert_eq!(third_delivered.attempt_count, 1);
     }
 
     #[tokio::test]
@@ -22541,8 +25281,10 @@ mod tests {
 
     fn assert_usage_export_manifest_body(body: &serde_json::Value) {
         assert_eq!(body["resource"]["export_kind"], "usage");
+        assert_eq!(body["resource"]["storage_backend"], "inline_manifest");
         assert_eq!(body["resource"]["record_count"], 1);
         assert_eq!(body["manifest"]["record_count"], 1);
+        assert_eq!(body["manifest"]["manifest"]["status"], "completed");
         assert!(body["manifest"]["checksum"]
             .as_str()
             .is_some_and(|checksum| checksum.starts_with("sha256:")));
@@ -22662,22 +25404,33 @@ mod tests {
 
     fn seed_protocol_replay_action_grants(store: &InMemoryGatewayStore) {
         for case in foundation_route_replay_cases() {
-            let route = foundation_routes()
-                .iter()
-                .find(|route| {
-                    route.protocol_family == Some(case.protocol_family)
-                        && route.action == case.action
-                })
-                .unwrap_or_else(|| panic!("case {} should have route metadata", case.name));
-            store.insert_action_grant(ActionGrant::project(
-                TEST_TENANT_ID,
-                TEST_ORGANIZATION_ID,
-                TEST_PROJECT_ID,
-                TEST_USER_ID,
-                case.action,
-                route.resource(protocol_replay_id("ma", case.protocol_family)),
-            ));
+            seed_replay_case_action_grant(
+                store,
+                case,
+                protocol_replay_id("ma", case.protocol_family),
+            );
         }
+    }
+
+    fn seed_replay_case_action_grant(
+        store: &InMemoryGatewayStore,
+        case: &GatewayReplayCase,
+        resource_id: impl Into<String>,
+    ) {
+        let route = foundation_routes()
+            .iter()
+            .find(|route| {
+                route.protocol_family == Some(case.protocol_family) && route.action == case.action
+            })
+            .unwrap_or_else(|| panic!("case {} should have route metadata", case.name));
+        store.insert_action_grant(ActionGrant::project(
+            TEST_TENANT_ID,
+            TEST_ORGANIZATION_ID,
+            TEST_PROJECT_ID,
+            TEST_USER_ID,
+            case.action,
+            route.resource(resource_id),
+        ));
     }
 
     fn pricing_document_fixture() -> serde_json::Value {
@@ -23137,6 +25890,82 @@ mod tests {
             }],
             "provider_grants": [{
                 "provider_grant_id": "pg_dynamic",
+                "tenant_id": TEST_TENANT_ID,
+                "organization_id": TEST_ORGANIZATION_ID,
+                "project_id": TEST_PROJECT_ID,
+                "principal_id": TEST_USER_ID,
+                "provider_endpoint_id": graph.endpoint_id.as_str(),
+                "model_target_id": graph.target_id.as_str(),
+                "status": "active"
+            }]
+        })
+    }
+
+    fn catalog_payload_for_admin_graph_protocol(
+        graph: &AdminGraphFixture,
+        protocol_family: ProtocolFamily,
+        alias_name: &str,
+    ) -> serde_json::Value {
+        json!({
+            "provider_endpoints": [{
+                "provider_endpoint_id": graph.endpoint_id.as_str(),
+                "tenant_id": TEST_TENANT_ID,
+                "name": protocol_replay_provider_kind(protocol_family),
+                "provider_kind": protocol_replay_provider_kind(protocol_family),
+                "protocol_families": [protocol_family.as_str()],
+                "upstream_base_url": "https://api.openai.example",
+                "status": "active"
+            }],
+            "upstream_credentials": [{
+                "upstream_credential_id": graph.credential_id.as_str(),
+                "tenant_id": TEST_TENANT_ID,
+                "provider_endpoint_id": graph.endpoint_id.as_str(),
+                "credential_kind": "api_key",
+                "secret_ref_id": "sec_openai",
+                "status": "active"
+            }],
+            "model_targets": [{
+                "model_target_id": graph.target_id.as_str(),
+                "tenant_id": TEST_TENANT_ID,
+                "provider_endpoint_id": graph.endpoint_id.as_str(),
+                "upstream_credential_id": graph.credential_id.as_str(),
+                "protocol_family": protocol_family.as_str(),
+                "upstream_model_id": protocol_replay_upstream_model(protocol_family),
+                "status": "active",
+                "supports_streaming": true
+            }],
+            "model_aliases": [{
+                "model_alias_id": graph.alias_id.as_str(),
+                "tenant_id": TEST_TENANT_ID,
+                "organization_id": TEST_ORGANIZATION_ID,
+                "project_id": TEST_PROJECT_ID,
+                "alias_name": alias_name,
+                "protocol_family": protocol_family.as_str(),
+                "route_policy_id": graph.route_policy_id.as_str(),
+                "status": "active"
+            }],
+            "routing_groups": [{
+                "routing_group_id": graph.routing_group_id.as_str(),
+                "tenant_id": TEST_TENANT_ID,
+                "status": "active"
+            }],
+            "routing_group_targets": [{
+                "routing_group_target_id": graph.routing_group_target_id.as_str(),
+                "routing_group_id": graph.routing_group_id.as_str(),
+                "model_target_id": graph.target_id.as_str(),
+                "weight": 1,
+                "priority": 10,
+                "status": "active"
+            }],
+            "route_policies": [{
+                "route_policy_id": graph.route_policy_id.as_str(),
+                "tenant_id": TEST_TENANT_ID,
+                "model_alias_id": graph.alias_id.as_str(),
+                "routing_group_id": graph.routing_group_id.as_str(),
+                "status": "active"
+            }],
+            "provider_grants": [{
+                "provider_grant_id": "pg_dynamic_protocol",
                 "tenant_id": TEST_TENANT_ID,
                 "organization_id": TEST_ORGANIZATION_ID,
                 "project_id": TEST_PROJECT_ID,
@@ -23613,6 +26442,30 @@ mod tests {
             .to_owned()
     }
 
+    async fn create_runtime_request_rate_quota_policy(
+        store: InMemoryGatewayStore,
+        raw_session: &str,
+        idempotency_key: &str,
+        loss_behavior: &str,
+        burst_limit: Option<i64>,
+    ) {
+        let mut request = json!({
+            "idempotency_key": idempotency_key,
+            "scope_kind": "project",
+            "scope_id": TEST_PROJECT_ID,
+            "counter_kind": "request_rate",
+            "limit": 100,
+            "window": "fixed",
+            "increment_source": "accepted_preflight_request",
+            "loss_behavior": loss_behavior
+        });
+        if let Some(burst_limit) = burst_limit {
+            request["burst_limit"] = json!(burst_limit);
+        }
+        let policy = post_admin_json(store, raw_session, "/admin/v1/quota-policies", request).await;
+        assert_eq!(policy.status(), StatusCode::OK);
+    }
+
     async fn create_quota_notification_subscription_and_policy(
         store: InMemoryGatewayStore,
         raw_session: &str,
@@ -23677,6 +26530,35 @@ mod tests {
             chrono::Utc::now(),
         );
         event.notification_outbox_event_id
+    }
+
+    fn append_and_dead_letter_retry_notification_event(
+        store: &InMemoryGatewayStore,
+        notification_sink_id: &str,
+    ) -> (
+        String,
+        NotificationDeliveryAttemptRecord,
+        NotificationDeliveryAttemptRecord,
+        NotificationDeliveryAttemptRecord,
+    ) {
+        let event_id = append_synthetic_notification_event(
+            store,
+            notification_sink_id,
+            "notification_outbox_replay_dead_letter",
+            "replay-secret-marker",
+        );
+        let first_attempt = deliver_first_due_notification(store.clone(), chrono::Utc::now());
+        let second_due_at = store
+            .notification_outbox_event(&event_id)
+            .and_then(|event| event.next_attempt_at)
+            .unwrap_or_else(|| panic!("first retryable event should have next attempt"));
+        let second_attempt = deliver_first_due_notification(store.clone(), second_due_at);
+        let third_due_at = store
+            .notification_outbox_event(&event_id)
+            .and_then(|event| event.next_attempt_at)
+            .unwrap_or_else(|| panic!("second retryable event should have next attempt"));
+        let third_attempt = deliver_first_due_notification(store.clone(), third_due_at);
+        (event_id, first_attempt, second_attempt, third_attempt)
     }
 
     fn deliver_first_due_notification(
