@@ -7,11 +7,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::ProtocolFamily;
 use crate::domain::{AuthenticatedActor, ProviderEndpoint, ResourceStatus};
 use crate::error::{GatewayError, Result};
 use crate::hot_state::{EndpointHealthState, NullRouteHotState, RouteHotState};
-use crate::routing::{add_filter_reason, RouteFilterReason, RouteFilterSummary};
-use crate::ProtocolFamily;
+use crate::routing::{RouteFilterReason, RouteFilterSummary, add_filter_reason};
 
 /// Runtime-safe gateway catalog compiled into a config snapshot.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1653,11 +1653,11 @@ impl ResourceStatus {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
+    use crate::ProtocolFamily;
     use crate::catalog::GatewayCatalogSnapshot;
     use crate::domain::{ActorKind, AuthenticatedActor, CredentialKind};
-    use crate::ProtocolFamily;
 
     fn actor() -> AuthenticatedActor {
         AuthenticatedActor {

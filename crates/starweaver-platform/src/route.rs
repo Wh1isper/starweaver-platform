@@ -566,7 +566,7 @@ pub fn route_metadata(method: HttpMethod, path_pattern: &str) -> Option<&'static
 mod tests {
     use std::collections::HashSet;
 
-    use super::{foundation_routes, route_metadata, HttpMethod, RouteAccess};
+    use super::{HttpMethod, RouteAccess, foundation_routes, route_metadata};
     use crate::action::PlatformAction;
 
     #[test]

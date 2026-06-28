@@ -216,10 +216,10 @@ pub fn validate_platform_user_record(record: &PlatformUserRecord) -> Result<(), 
     if let Some(project_id) = record.default_project_id.as_deref() {
         validate_prefixed_id(project_id, "prj_", PlatformUserError::InvalidProjectId)?;
     }
-    if let Some(email) = record.primary_email.as_deref() {
-        if !valid_email(email) {
-            return Err(PlatformUserError::InvalidEmail);
-        }
+    if let Some(email) = record.primary_email.as_deref()
+        && !valid_email(email)
+    {
+        return Err(PlatformUserError::InvalidEmail);
     }
     if record.display_name.trim().is_empty() {
         return Err(PlatformUserError::InvalidDisplayName);
@@ -260,8 +260,8 @@ fn write_lock<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_platform_user_record, InMemoryPlatformUserStore, PlatformUserError,
-        PlatformUserRecord, PlatformUserStatus,
+        InMemoryPlatformUserStore, PlatformUserError, PlatformUserRecord, PlatformUserStatus,
+        validate_platform_user_record,
     };
 
     #[test]

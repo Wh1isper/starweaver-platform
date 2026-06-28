@@ -5,21 +5,21 @@ use std::fmt::{Display, Formatter};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::body::{to_bytes, Body};
+use axum::body::{Body, to_bytes};
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::jwk::JwkSet;
 use rand_core::{OsRng, RngCore};
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde::de::DeserializeOwned;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 
@@ -28,8 +28,8 @@ use crate::action::{
     BuiltInRole, FoundationAuthorizationEngine, PlatformAction, ResourceRef,
 };
 use crate::audit::{
-    InMemoryPlatformAuditStore, PlatformAuditError, PlatformAuditEventRecord,
-    PLATFORM_AUDIT_REDACTION_PROFILE,
+    InMemoryPlatformAuditStore, PLATFORM_AUDIT_REDACTION_PROFILE, PlatformAuditError,
+    PlatformAuditEventRecord,
 };
 use crate::auth::{
     AuthError, InMemoryPlatformAuthSessionStore, InMemoryPlatformBearerCredentialStore,
@@ -37,20 +37,20 @@ use crate::auth::{
     PlatformBearerCredentialRepository, PlatformMtlsIdentityRepository,
 };
 use crate::config::{
-    validate_platform_config, PlatformConfig, PlatformConfigError, PlatformSingleUserConfig,
+    PlatformConfig, PlatformConfigError, PlatformSingleUserConfig, validate_platform_config,
 };
 use crate::identity::{
+    InMemoryPlatformExternalIdentityStore, OidcDiscoveryDocument, OidcLoginAttemptRecord,
+    OidcLoginAttemptStatus, OidcLoginProviderRecord, OidcLoginProviderStatus,
+    OidcResolvedProviderMetadata, OidcTokenEndpointAuthMethod, OidcVerifiedClaims,
+    PlatformExternalIdentityError, PlatformExternalIdentityRecord, PlatformExternalIdentityStatus,
     hash_oidc_login_nonce, hash_oidc_login_state, hash_oidc_pkce_verifier, oidc_discovery_url,
-    resolve_oidc_provider_metadata, validate_oidc_id_token, InMemoryPlatformExternalIdentityStore,
-    OidcDiscoveryDocument, OidcLoginAttemptRecord, OidcLoginAttemptStatus, OidcLoginProviderRecord,
-    OidcLoginProviderStatus, OidcResolvedProviderMetadata, OidcTokenEndpointAuthMethod,
-    OidcVerifiedClaims, PlatformExternalIdentityError, PlatformExternalIdentityRecord,
-    PlatformExternalIdentityStatus,
+    resolve_oidc_provider_metadata, validate_oidc_id_token,
 };
 use crate::invitation::{
-    hash_platform_invitation_token, AcceptPlatformOrganizationInvitationRequest,
-    InMemoryPlatformInvitationStore, PlatformInvitationError, PlatformInvitationStatus,
-    PlatformOrganizationInvitationRecord, PLATFORM_INVITATION_TOKEN_PREFIX,
+    AcceptPlatformOrganizationInvitationRequest, InMemoryPlatformInvitationStore,
+    PLATFORM_INVITATION_TOKEN_PREFIX, PlatformInvitationError, PlatformInvitationStatus,
+    PlatformOrganizationInvitationRecord, hash_platform_invitation_token,
 };
 use crate::membership::{
     InMemoryPlatformMembershipStore, PlatformInvitedProjectMembershipUpsert,
@@ -70,11 +70,11 @@ use crate::role::{
     InMemoryPlatformRoleBindingStore, PlatformRoleBindingError, PlatformRoleBindingRecord,
     PlatformRoleBindingStatus, PlatformRoleBindingUpsert,
 };
-use crate::route::{foundation_routes, HttpMethod, RouteMetadata};
+use crate::route::{HttpMethod, RouteMetadata, foundation_routes};
 use crate::secret::{
-    environment_secret_ref_record, CreatePlatformSecretRefRequest, InMemoryPlatformSecretStore,
-    PlatformSecretError, PlatformSecretRefRecord, PlatformSecretValue, ENVIRONMENT_SECRET_BACKEND,
-    IN_MEMORY_SECRET_BACKEND,
+    CreatePlatformSecretRefRequest, ENVIRONMENT_SECRET_BACKEND, IN_MEMORY_SECRET_BACKEND,
+    InMemoryPlatformSecretStore, PlatformSecretError, PlatformSecretRefRecord, PlatformSecretValue,
+    environment_secret_ref_record,
 };
 use crate::storage::{InMemoryResourceOwnerStore, ResourceOwnerRecord, ResourceOwnerRepository};
 use crate::user::{
@@ -3931,16 +3931,16 @@ fn organization_invitation_record_from_create_request(
             return Err(ServiceError::BadRequest("invitation_target_invalid"));
         }
     }
-    if let Some(principal_id) = invited_principal_id.as_deref() {
-        if !principal_id.starts_with("usr_") {
-            return Err(ServiceError::BadRequest("principal_id_invalid"));
-        }
+    if let Some(principal_id) = invited_principal_id.as_deref()
+        && !principal_id.starts_with("usr_")
+    {
+        return Err(ServiceError::BadRequest("principal_id_invalid"));
     }
     let project_id = normalized_optional_string(request.project_id);
-    if let Some(project_id) = project_id.as_deref() {
-        if !project_id.starts_with("prj_") {
-            return Err(ServiceError::BadRequest("project_id_invalid"));
-        }
+    if let Some(project_id) = project_id.as_deref()
+        && !project_id.starts_with("prj_")
+    {
+        return Err(ServiceError::BadRequest("project_id_invalid"));
     }
     let expires_at_unix = request
         .expires_at_unix
@@ -6078,14 +6078,14 @@ fn data_repository_error(error: PlatformRepositoryError) -> ServiceError {
 
 #[cfg(test)]
 mod tests {
-    use axum::body::{to_bytes, Body};
+    use axum::Router;
+    use axum::body::{Body, to_bytes};
     use axum::http::header::AUTHORIZATION;
     use axum::http::{Method, Request, StatusCode};
     use axum::routing::get;
-    use axum::Router;
     use jsonwebtoken::jwk::{Jwk, JwkSet, PublicKeyUse};
-    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-    use serde_json::{json, Value};
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    use serde_json::{Value, json};
     use sqlx::postgres::PgPoolOptions;
     use tower::ServiceExt;
 
@@ -6093,7 +6093,7 @@ mod tests {
         ActionGrant, ActorKind, AuthenticatedActor, AuthorizationEngine, AuthorizationRequest,
         BuiltInRole, FoundationAuthorizationEngine, PlatformAction, ResourceRef, RoleScopeKind,
     };
-    use crate::audit::{PlatformAuditEventRecord, PLATFORM_AUDIT_REDACTION_PROFILE};
+    use crate::audit::{PLATFORM_AUDIT_REDACTION_PROFILE, PlatformAuditEventRecord};
     use crate::auth::{
         InMemoryPlatformAuthSessionStore, InMemoryPlatformBearerCredentialStore,
         InMemoryPlatformMtlsIdentityStore, PlatformAuthSessionRecord,
@@ -6103,14 +6103,13 @@ mod tests {
     };
     use crate::config::{PlatformConfig, PlatformSingleUserConfig};
     use crate::identity::{
-        oidc_discovery_url, InMemoryPlatformExternalIdentityStore, OidcLoginAttemptRecord,
-        OidcLoginAttemptStart, OidcLoginProviderRecord, OidcLoginProviderStatus,
-        OidcTokenEndpointAuthMethod, PlatformExternalIdentityRecord,
-        PlatformExternalIdentityStatus,
+        InMemoryPlatformExternalIdentityStore, OidcLoginAttemptRecord, OidcLoginAttemptStart,
+        OidcLoginProviderRecord, OidcLoginProviderStatus, OidcTokenEndpointAuthMethod,
+        PlatformExternalIdentityRecord, PlatformExternalIdentityStatus, oidc_discovery_url,
     };
     use crate::invitation::{
-        hash_platform_invitation_token, InMemoryPlatformInvitationStore, PlatformInvitationStatus,
-        PlatformOrganizationInvitationRecord,
+        InMemoryPlatformInvitationStore, PlatformInvitationStatus,
+        PlatformOrganizationInvitationRecord, hash_platform_invitation_token,
     };
     use crate::membership::{
         InMemoryPlatformMembershipStore, PlatformMembershipStatus,
@@ -6126,14 +6125,14 @@ mod tests {
         InMemoryPlatformRoleBindingStore, PlatformRoleBindingRecord, PlatformRoleBindingStatus,
     };
     use crate::secret::{
-        CreatePlatformSecretRefRequest, InMemoryPlatformSecretStore, IN_MEMORY_SECRET_BACKEND,
+        CreatePlatformSecretRefRequest, IN_MEMORY_SECRET_BACKEND, InMemoryPlatformSecretStore,
     };
     use crate::service::{
+        InMemoryOidcLoginStore, PLATFORM_CSRF_TOKEN_HEADER, PlatformOidcHttpClient,
+        PlatformRepositoryBackendKind, PlatformRunError, PlatformServiceState, SINGLE_USER_ID,
+        SINGLE_USER_ORGANIZATION_ID, SINGLE_USER_PROJECT_ID, SINGLE_USER_SESSION_TOKEN_PREFIX,
+        SINGLE_USER_TENANT_ID, StaticOidcHttpClient, VERIFIED_MTLS_SUBJECT_HEADER,
         build_platform_service_state, current_unix_timestamp, match_route, router,
-        InMemoryOidcLoginStore, PlatformOidcHttpClient, PlatformRepositoryBackendKind,
-        PlatformRunError, PlatformServiceState, StaticOidcHttpClient, PLATFORM_CSRF_TOKEN_HEADER,
-        SINGLE_USER_ID, SINGLE_USER_ORGANIZATION_ID, SINGLE_USER_PROJECT_ID,
-        SINGLE_USER_SESSION_TOKEN_PREFIX, SINGLE_USER_TENANT_ID, VERIFIED_MTLS_SUBJECT_HEADER,
     };
     use crate::storage::{
         InMemoryResourceOwnerStore, ResourceOwnerRecord, ResourceOwnerRepository,
@@ -6429,9 +6428,11 @@ mod tests {
             .unwrap_or_else(|| panic!("login response should include access token"));
         assert!(token.starts_with(SINGLE_USER_SESSION_TOKEN_PREFIX));
         assert_eq!(response.body["csrf"]["header"], PLATFORM_CSRF_TOKEN_HEADER);
-        assert!(response.body["csrf"]["token"]
-            .as_str()
-            .is_some_and(|token| token.starts_with("sha256:")));
+        assert!(
+            response.body["csrf"]["token"]
+                .as_str()
+                .is_some_and(|token| token.starts_with("sha256:"))
+        );
 
         let actor = state
             .auth_sessions()
@@ -6665,6 +6666,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn oidc_login_start_persists_attempt_for_callback() {
         let provider = oidc_provider_with_discovery();
         let oidc_logins = InMemoryOidcLoginStore::new();
@@ -6707,21 +6709,31 @@ mod tests {
         let parsed_url = url::Url::parse(authorization_url)
             .unwrap_or_else(|error| panic!("authorization URL should parse: {error}"));
         let query = parsed_url.query_pairs().collect::<Vec<_>>();
-        assert!(query
-            .iter()
-            .any(|(name, value)| name == "response_type" && value == "code"));
-        assert!(query
-            .iter()
-            .any(|(name, value)| name == "client_id" && value == "oidc_client"));
-        assert!(query
-            .iter()
-            .any(|(name, value)| name == "state" && value == raw_state));
-        assert!(query
-            .iter()
-            .any(|(name, value)| name == "nonce" && value == nonce));
-        assert!(query
-            .iter()
-            .any(|(name, value)| name == "code_challenge_method" && value == "S256"));
+        assert!(
+            query
+                .iter()
+                .any(|(name, value)| name == "response_type" && value == "code")
+        );
+        assert!(
+            query
+                .iter()
+                .any(|(name, value)| name == "client_id" && value == "oidc_client")
+        );
+        assert!(
+            query
+                .iter()
+                .any(|(name, value)| name == "state" && value == raw_state)
+        );
+        assert!(
+            query
+                .iter()
+                .any(|(name, value)| name == "nonce" && value == nonce)
+        );
+        assert!(
+            query
+                .iter()
+                .any(|(name, value)| name == "code_challenge_method" && value == "S256")
+        );
         assert!(query.iter().any(|(name, value)| {
             name == "scope" && value.split(' ').any(|scope| scope == "openid")
         }));
@@ -6969,14 +6981,18 @@ mod tests {
             .authenticated_actor_for_bearer(access_token)
             .unwrap_or_else(|error| panic!("OIDC session should resolve: {error:?}"));
         assert!(actor.principal_id.starts_with("usr_oidc_"));
-        assert!(actor
-            .organization_id
-            .as_deref()
-            .is_some_and(|id| id.starts_with("org_oidc_")));
-        assert!(actor
-            .project_id
-            .as_deref()
-            .is_some_and(|id| id.starts_with("prj_oidc_")));
+        assert!(
+            actor
+                .organization_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("org_oidc_"))
+        );
+        assert!(
+            actor
+                .project_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("prj_oidc_"))
+        );
         assert_oidc_external_identity_recorded(&state, &actor.principal_id);
 
         let requests = oidc_http.requests();
@@ -7131,10 +7147,12 @@ mod tests {
             get_provider.body["resource"]["client_secret_ref"],
             "sec_***"
         );
-        assert!(!get_provider
-            .body
-            .to_string()
-            .contains("sec_oidc_client_secret"));
+        assert!(
+            !get_provider
+                .body
+                .to_string()
+                .contains("sec_oidc_client_secret")
+        );
 
         let list_provider = request_json(
             state.clone(),
@@ -8038,9 +8056,11 @@ mod tests {
         );
         assert_eq!(first_page.body["resources"][0]["actor_kind"], "user");
         assert!(first_page.body["resources"][0].get("token_hash").is_none());
-        assert!(first_page.body["resources"][0]
-            .get("raw_session_token")
-            .is_none());
+        assert!(
+            first_page.body["resources"][0]
+                .get("raw_session_token")
+                .is_none()
+        );
 
         let second_page = request_json(
             state.clone(),
@@ -8148,13 +8168,16 @@ mod tests {
             project_member.body
         );
         assert_eq!(project_member.body["resource"]["status"], "removed");
-        assert!(state
-            .role_bindings()
-            .active_role_bindings_for_principal(TENANT_ID, TARGET_USER_ID)
-            .is_empty());
+        assert!(
+            state
+                .role_bindings()
+                .active_role_bindings_for_principal(TENANT_ID, TARGET_USER_ID)
+                .is_empty()
+        );
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn organization_invitation_create_preview_accept_are_redacted() {
         let state = project_state(USER_ID, BuiltInRole::OrganizationAdmin, []);
 
@@ -8200,10 +8223,12 @@ mod tests {
             Some(1)
         );
         assert!(!replay_list.body.to_string().contains(&raw_token));
-        assert!(!replay_list
-            .body
-            .to_string()
-            .contains(&hash_platform_invitation_token(&raw_token)));
+        assert!(
+            !replay_list
+                .body
+                .to_string()
+                .contains(&hash_platform_invitation_token(&raw_token))
+        );
 
         let preview = request_json(
             state.clone(),

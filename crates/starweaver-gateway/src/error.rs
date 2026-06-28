@@ -1,6 +1,6 @@
 //! Stable gateway error envelope.
 
-use axum::{http::StatusCode, response::IntoResponse, Json};
+use axum::{Json, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
 
 /// Gateway error type.

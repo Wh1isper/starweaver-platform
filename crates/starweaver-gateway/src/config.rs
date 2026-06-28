@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::domain::{new_prefixed_id, ConfigSnapshot, ConfigSnapshotStatus, TenantId};
+use crate::domain::{ConfigSnapshot, ConfigSnapshotStatus, TenantId, new_prefixed_id};
 use crate::error::{GatewayError, Result};
 use crate::policy::validate_cedar_policy_bundle;
 use crate::storage::ConfigSnapshotStore;
@@ -153,8 +153,8 @@ mod tests {
     use serde_json::json;
 
     use crate::config::{
-        publish_config_snapshot, rollback_config_snapshot, PublishConfigSnapshotRequest,
-        ResourceVersion,
+        PublishConfigSnapshotRequest, ResourceVersion, publish_config_snapshot,
+        rollback_config_snapshot,
     };
     use crate::domain::ConfigReloadSource;
     use crate::storage::{ConfigPublicationRepository, InMemoryGatewayStore};
@@ -353,9 +353,11 @@ mod tests {
             panic!("invalid policy bundle should not publish");
         };
 
-        assert!(error
-            .to_string()
-            .contains("cedar policy bundle validation failed"));
+        assert!(
+            error
+                .to_string()
+                .contains("cedar policy bundle validation failed")
+        );
         assert!(store.config_snapshots().is_empty());
     }
 
@@ -369,9 +371,11 @@ mod tests {
             panic!("non-string policy bundle should not publish");
         };
 
-        assert!(error
-            .to_string()
-            .contains("cedar_policy_bundle must be a string"));
+        assert!(
+            error
+                .to_string()
+                .contains("cedar_policy_bundle must be a string")
+        );
         assert!(store.config_snapshots().is_empty());
     }
 
@@ -383,13 +387,15 @@ mod tests {
             Err(error) => panic!("snapshot should publish: {error}"),
         };
 
-        assert!(rollback_config_snapshot(
-            &store,
-            "ten_other".to_owned(),
-            &first.metadata.snapshot_id,
-            "usr_test".to_owned(),
-            chrono::Utc::now(),
-        )
-        .is_err());
+        assert!(
+            rollback_config_snapshot(
+                &store,
+                "ten_other".to_owned(),
+                &first.metadata.snapshot_id,
+                "usr_test".to_owned(),
+                chrono::Utc::now(),
+            )
+            .is_err()
+        );
     }
 }

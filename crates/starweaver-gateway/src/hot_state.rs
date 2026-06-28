@@ -239,8 +239,8 @@ mod tests {
     use chrono::Duration;
 
     use crate::hot_state::{
-        endpoint_drain_key, endpoint_health_key, sticky_route_key, EndpointHealthRecord,
-        EndpointHealthState, StickyRouteRecord,
+        EndpointHealthRecord, EndpointHealthState, StickyRouteRecord, endpoint_drain_key,
+        endpoint_health_key, sticky_route_key,
     };
 
     #[test]

@@ -220,8 +220,8 @@ fn write_lock<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
 mod tests {
     use crate::action::ActorKind;
     use crate::audit::{
-        validate_platform_audit_event_record, InMemoryPlatformAuditStore, PlatformAuditError,
-        PlatformAuditEventRecord, PLATFORM_AUDIT_REDACTION_PROFILE,
+        InMemoryPlatformAuditStore, PLATFORM_AUDIT_REDACTION_PROFILE, PlatformAuditError,
+        PlatformAuditEventRecord, validate_platform_audit_event_record,
     };
 
     const TENANT_ID: &str = "ten_test";

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::storage::ResourceOwnerRecord;
 

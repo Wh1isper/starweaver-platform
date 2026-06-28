@@ -72,7 +72,7 @@ pub enum PlatformPlane {
 
 #[cfg(test)]
 mod tests {
-    use super::{service_name, SERVICE_NAME};
+    use super::{SERVICE_NAME, service_name};
 
     #[test]
     fn service_name_is_stable() {

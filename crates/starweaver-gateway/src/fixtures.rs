@@ -3,7 +3,7 @@
 use secrecy::ExposeSecret;
 
 use crate::action::ActionGrant;
-use crate::auth::{create_api_key, CreateApiKeyRequest};
+use crate::auth::{CreateApiKeyRequest, create_api_key};
 use crate::replay::foundation_route_replay_cases;
 use crate::route::foundation_routes;
 use crate::storage::{
@@ -115,10 +115,12 @@ mod tests {
         let prefix = &fixture.raw_api_key[..16];
 
         assert_eq!(fixture.store.candidates_by_prefix(prefix).len(), 1);
-        assert!(fixture
-            .store
-            .project_membership("usr_test", "prj_test")
-            .is_some());
+        assert!(
+            fixture
+                .store
+                .project_membership("usr_test", "prj_test")
+                .is_some()
+        );
         assert!(!fixture.store.action_grants().is_empty());
     }
 }

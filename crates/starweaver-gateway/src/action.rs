@@ -1,10 +1,10 @@
 //! Canonical gateway action registry and authorization request types.
 
 use chrono::{DateTime, Utc};
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use crate::domain::{
-    new_prefixed_id, ActorKind, AuthenticatedActor, OrganizationId, ProjectId, TenantId,
+    ActorKind, AuthenticatedActor, OrganizationId, ProjectId, TenantId, new_prefixed_id,
 };
 
 /// Canonical action definition used by policy, route metadata, and docs.
@@ -1018,11 +1018,7 @@ impl AuthorizationDecisionRecord {
     /// Returns the SQL decision label.
     #[must_use]
     pub const fn decision_label(&self) -> &'static str {
-        if self.allowed {
-            "allowed"
-        } else {
-            "denied"
-        }
+        if self.allowed { "allowed" } else { "denied" }
     }
 }
 
@@ -1210,9 +1206,9 @@ mod tests {
     use std::collections::HashSet;
 
     use crate::action::{
-        authorize_item_list, authorize_with_evidence, ActionGrant, AuthorizableItem,
-        AuthorizationEngine, AuthorizationRequest, BuiltInRole, FoundationAuthorizationEngine,
-        GatewayAction, ResourceRef,
+        ActionGrant, AuthorizableItem, AuthorizationEngine, AuthorizationRequest, BuiltInRole,
+        FoundationAuthorizationEngine, GatewayAction, ResourceRef, authorize_item_list,
+        authorize_with_evidence,
     };
     use crate::domain::{ActorKind, AuthenticatedActor, CredentialKind};
     use crate::storage::InMemoryGatewayStore;

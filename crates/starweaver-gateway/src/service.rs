@@ -5,59 +5,61 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::{to_bytes, Body};
-use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
-use axum::http::{header, Extensions, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::body::{Body, to_bytes};
+use axum::extract::{DefaultBodyLimit, Path, Query, Request, State, WebSocketUpgrade, ws::Message};
+use axum::http::{Extensions, HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use chrono::Datelike;
+use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
 use jsonwebtoken::jwk::{Jwk, JwkSet, PublicKeyUse};
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use rand_core::{OsRng, RngCore};
 use secrecy::{ExposeSecret, SecretString};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpStream;
 use url::Url;
 
 use crate::action::{
-    authorize_item_list, ActionGrant, AuthorizableItem, AuthorizationEngine, BuiltInRole,
-    FoundationAuthorizationEngine, GatewayAction,
+    ActionGrant, AuthorizableItem, AuthorizationEngine, BuiltInRole, FoundationAuthorizationEngine,
+    GatewayAction, authorize_item_list,
 };
 use crate::auth::{
-    constant_time_eq, create_api_key, create_auth_session, key_prefix, resolve_user_session_actor,
+    CreateApiKeyRequest, CreateAuthSessionRequest, ResolveUserSessionRequest, constant_time_eq,
+    create_api_key, create_auth_session, key_prefix, resolve_user_session_actor,
     rotate_api_key_secret, session_token_hash, verify_api_key, verify_secret, verify_session_token,
-    CreateApiKeyRequest, CreateAuthSessionRequest, ResolveUserSessionRequest,
 };
 use crate::catalog::{GatewayCatalogSnapshot, RoutePlanOutcome, RoutePlanRequest, RouteSelection};
 use crate::config::{
+    PublishConfigSnapshotRequest, ResourceVersion,
     publish_config_snapshot as publish_config_snapshot_document,
     rollback_config_snapshot as rollback_config_snapshot_document,
-    validate_config_snapshot_payload, PublishConfigSnapshotRequest, ResourceVersion,
+    validate_config_snapshot_payload,
 };
 use crate::domain::{
-    new_prefixed_id, ActorKind, ActorScope, ApiKeyRecord, ApiKeyStatus, AuditEventRecord,
-    AuthSessionRecord, AuthenticatedActor, BudgetPolicyRecord, CatalogImportRecord,
-    CodexOAuthConnectionRecord, CodexOAuthConnectionStatus, CodexOAuthRefreshStatusRecord,
-    CodexOAuthSessionRecord, ConfigPublicationPointerRecord, ConfigSnapshot,
-    ConfigWorkerReloadRecord, DirectoryStatus, EmergencyOperationRecord, ExportJobRecord,
-    ExportManifestRecord, ExternalIdentityRecord, LedgerBucketRecord, LoginAttemptRecord,
-    LoginProviderRecord, MaintenanceWindowRecord, MembershipStatus, ModelAliasRecord,
-    ModelTargetRecord, NotificationDeliveryAttemptRecord, NotificationOutboxEventRecord,
-    NotificationSinkRecord, NotificationSubscriptionRecord, OrganizationInvitationRecord,
-    OrganizationMembershipRecord, OrganizationRecord, OtelExportConfigRecord,
-    OtelExporterHealthRecord, OtelHeaderRef, OtelResourceAttribute, PricingSkuRecord,
-    ProjectMembershipRecord, ProjectRecord, ProviderEndpoint, ProviderEndpointRecord,
-    ProviderGrantRecord, QuotaPolicyRecord, ResourceStatus, RoutePolicyRecord, RoutingGroupRecord,
-    RoutingGroupTargetRecord, RuntimeBudgetLeaseRecord, SecretRefRecord, SecretRefStatus,
-    ServiceAccountRecord, UpstreamCredentialRecord, UpstreamCredentialStatus, UsageEventRecord,
-    ValidationDiagnosticRecord,
+    ActorKind, ActorScope, ApiKeyRecord, ApiKeyStatus, AuditEventRecord, AuthSessionRecord,
+    AuthenticatedActor, BudgetPolicyRecord, CatalogImportRecord, CodexOAuthConnectionRecord,
+    CodexOAuthConnectionStatus, CodexOAuthRefreshStatusRecord, CodexOAuthSessionRecord,
+    ConfigPublicationPointerRecord, ConfigSnapshot, ConfigWorkerReloadRecord, DirectoryStatus,
+    EmergencyOperationRecord, ExportJobRecord, ExportManifestRecord, ExternalIdentityRecord,
+    LedgerBucketRecord, LoginAttemptRecord, LoginProviderRecord, MaintenanceWindowRecord,
+    MembershipStatus, ModelAliasRecord, ModelTargetRecord, NotificationDeliveryAttemptRecord,
+    NotificationOutboxEventRecord, NotificationSinkRecord, NotificationSubscriptionRecord,
+    OrganizationInvitationRecord, OrganizationMembershipRecord, OrganizationRecord,
+    OtelExportConfigRecord, OtelExporterHealthRecord, OtelHeaderRef, OtelResourceAttribute,
+    PricingSkuRecord, ProjectMembershipRecord, ProjectRecord, ProviderEndpoint,
+    ProviderEndpointRecord, ProviderGrantRecord, QuotaPolicyRecord, ResourceStatus,
+    RoutePolicyRecord, RoutingGroupRecord, RoutingGroupTargetRecord, RuntimeBudgetLeaseRecord,
+    SecretRefRecord, SecretRefStatus, ServiceAccountRecord, UpstreamCredentialRecord,
+    UpstreamCredentialStatus, UsageEventRecord, ValidationDiagnosticRecord, new_prefixed_id,
 };
 use crate::error::{GatewayError, Result};
 use crate::hot_state::{
@@ -66,18 +68,20 @@ use crate::hot_state::{
 use crate::migrations;
 use crate::policy::CedarAuthorizationEngine;
 use crate::redis_hot_state::RedisRuntimePolicyRepository;
-use crate::replay::{foundation_route_replay_cases, GatewayReplayCase};
-use crate::route::{authorize_route_with_evidence, foundation_routes, RouteMetadata};
+use crate::replay::{GatewayReplayCase, foundation_route_replay_cases};
+use crate::responses_websocket::{
+    UpstreamResponsesMessage, UpstreamResponsesWebSocket, http_url_to_ws_url,
+};
+use crate::route::{RouteMetadata, authorize_route_with_evidence, foundation_routes};
 use crate::routing::{
     RouteAttemptRecord, RouteAttemptStatus, RouteDecisionRecord, RouteDecisionRequest,
     RouteDecisionStatus, RouteEvidenceSink, SelectedRouteEvidence,
 };
 use crate::runtime::{
-    authorize_fake_provider_replay_target, build_provider_adapter_request,
-    fake_provider_response_for_authorization, FakeProviderAuthorization,
-    FakeProviderReplayEvidence, FakeProviderReplayTarget, ProviderAdapterCredential,
-    ProviderAdapterRequest, ProviderAdapterRequestMetadata, ProviderAdapterTarget,
-    RuntimeIngressResponse,
+    FakeProviderAuthorization, FakeProviderReplayEvidence, FakeProviderReplayTarget,
+    ProviderAdapterCredential, ProviderAdapterRequest, ProviderAdapterRequestMetadata,
+    ProviderAdapterTarget, RuntimeIngressResponse, authorize_fake_provider_replay_target,
+    build_provider_adapter_request, fake_provider_response_for_authorization,
 };
 use crate::storage::{
     ApiKeyRepository, AuthSessionRepository, BootstrapDefaultProjectRequest,
@@ -707,15 +711,15 @@ impl GatewayConfig {
         if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_REDIS_URL") {
             config.redis_url = non_empty_env(&value);
         }
-        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_HOT_STATE_BACKEND") {
-            if let Some(value) = non_empty_env(&value) {
-                config.hot_state_backend_profile = value.to_ascii_lowercase();
-            }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_HOT_STATE_BACKEND")
+            && let Some(value) = non_empty_env(&value)
+        {
+            config.hot_state_backend_profile = value.to_ascii_lowercase();
         }
-        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_RUNTIME_STORE") {
-            if let Some(value) = non_empty_env(&value) {
-                config.runtime_store_profile = value.to_ascii_lowercase();
-            }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_RUNTIME_STORE")
+            && let Some(value) = non_empty_env(&value)
+        {
+            config.runtime_store_profile = value.to_ascii_lowercase();
         }
         if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_PUBLIC_BASE_URL") {
             config.public_base_url = non_empty_env(&value);
@@ -723,50 +727,49 @@ impl GatewayConfig {
         if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_CORS_ALLOWED_ORIGINS") {
             config.cors_allowed_origins = parse_csv_env(&value);
         }
-        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_SECRET_BACKEND") {
-            if let Some(value) = non_empty_env(&value) {
-                config.secret_backend_profile = value.to_ascii_lowercase();
-            }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_SECRET_BACKEND")
+            && let Some(value) = non_empty_env(&value)
+        {
+            config.secret_backend_profile = value.to_ascii_lowercase();
         }
         if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_SECRET_BACKEND_FILE_DIR") {
             config.secret_backend_file_dir = non_empty_env(&value);
         }
-        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_TELEMETRY") {
-            if let Some(value) = non_empty_env(&value) {
-                config.telemetry_profile = value;
-            }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_TELEMETRY")
+            && let Some(value) = non_empty_env(&value)
+        {
+            config.telemetry_profile = value;
         }
-        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_SESSION_COOKIE_SECURE") {
-            if let Some(value) = parse_bool_env(&value) {
-                config.session_cookie_secure = value;
-            }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_SESSION_COOKIE_SECURE")
+            && let Some(value) = parse_bool_env(&value)
+        {
+            config.session_cookie_secure = value;
         }
-        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_SESSION_COOKIE_HTTP_ONLY") {
-            if let Some(value) = parse_bool_env(&value) {
-                config.session_cookie_http_only = value;
-            }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_SESSION_COOKIE_HTTP_ONLY")
+            && let Some(value) = parse_bool_env(&value)
+        {
+            config.session_cookie_http_only = value;
         }
-        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_SESSION_COOKIE_SAME_SITE") {
-            if let Some(value) = non_empty_env(&value) {
-                config.session_cookie_same_site = value.to_ascii_lowercase();
-            }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_SESSION_COOKIE_SAME_SITE")
+            && let Some(value) = non_empty_env(&value)
+        {
+            config.session_cookie_same_site = value.to_ascii_lowercase();
         }
-        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_MAX_BODY_BYTES") {
-            if let Ok(parsed) = value.parse::<usize>() {
-                config.max_body_bytes = parsed;
-            }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_MAX_BODY_BYTES")
+            && let Ok(parsed) = value.parse::<usize>()
+        {
+            config.max_body_bytes = parsed;
         }
-        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_REQUEST_TIMEOUT_MS") {
-            if let Ok(parsed) = value.parse::<u64>() {
-                if (MIN_REQUEST_TIMEOUT_MS..=MAX_REQUEST_TIMEOUT_MS).contains(&parsed) {
-                    config.request_timeout_ms = parsed;
-                }
-            }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_REQUEST_TIMEOUT_MS")
+            && let Ok(parsed) = value.parse::<u64>()
+            && (MIN_REQUEST_TIMEOUT_MS..=MAX_REQUEST_TIMEOUT_MS).contains(&parsed)
+        {
+            config.request_timeout_ms = parsed;
         }
-        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_PROVIDER_TRANSPORT") {
-            if let Some(mode) = parse_provider_transport_mode(&value) {
-                config.provider_transport_mode = mode;
-            }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_PROVIDER_TRANSPORT")
+            && let Some(mode) = parse_provider_transport_mode(&value)
+        {
+            config.provider_transport_mode = mode;
         }
         if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_REQUIRE_SNAPSHOT") {
             config.require_published_snapshot = matches!(value.as_str(), "1" | "true" | "yes");
@@ -777,17 +780,16 @@ impl GatewayConfig {
         config.export_object_storage = export_object_storage_from_env();
         apply_background_worker_env(&mut config);
         config.dependency_probe_mode = default_dependency_probe_mode(&config);
-        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_DEPENDENCY_PROBE_MODE") {
-            if let Some(mode) = parse_dependency_probe_mode(&value) {
-                config.dependency_probe_mode = mode;
-            }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_DEPENDENCY_PROBE_MODE")
+            && let Some(mode) = parse_dependency_probe_mode(&value)
+        {
+            config.dependency_probe_mode = mode;
         }
-        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_READINESS_PROBE_TIMEOUT_MS") {
-            if let Ok(parsed) = value.parse::<u64>() {
-                if (50..=5_000).contains(&parsed) {
-                    config.readiness_probe_timeout_ms = parsed;
-                }
-            }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_READINESS_PROBE_TIMEOUT_MS")
+            && let Ok(parsed) = value.parse::<u64>()
+            && (50..=5_000).contains(&parsed)
+        {
+            config.readiness_probe_timeout_ms = parsed;
         }
         config.single_user_auth = single_user_auth_from_env();
         config
@@ -816,31 +818,29 @@ fn export_object_storage_from_env() -> Option<ExportObjectStorageHttpConfig> {
 }
 
 fn apply_background_worker_env(config: &mut GatewayConfig) {
-    if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_BACKGROUND_WORKERS") {
-        if let Some(value) = parse_bool_env(&value) {
-            config.background_worker_mode = if value {
-                BackgroundWorkerMode::Enabled
-            } else {
-                BackgroundWorkerMode::Disabled
-            };
-        }
+    if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_BACKGROUND_WORKERS")
+        && let Some(value) = parse_bool_env(&value)
+    {
+        config.background_worker_mode = if value {
+            BackgroundWorkerMode::Enabled
+        } else {
+            BackgroundWorkerMode::Disabled
+        };
     }
     if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_WORKER_ID") {
         config.worker_id = parse_worker_id_env(&value);
     }
-    if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_WORKER_TICK_INTERVAL_SECONDS") {
-        if let Ok(parsed) = value.parse::<u64>() {
-            if (1..=3_600).contains(&parsed) {
-                config.worker_tick_interval_seconds = parsed;
-            }
-        }
+    if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_WORKER_TICK_INTERVAL_SECONDS")
+        && let Ok(parsed) = value.parse::<u64>()
+        && (1..=3_600).contains(&parsed)
+    {
+        config.worker_tick_interval_seconds = parsed;
     }
-    if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_NOTIFICATION_WORKER_BATCH_LIMIT") {
-        if let Ok(parsed) = value.parse::<usize>() {
-            if (1..=1_000).contains(&parsed) {
-                config.notification_worker_batch_limit = parsed;
-            }
-        }
+    if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_NOTIFICATION_WORKER_BATCH_LIMIT")
+        && let Ok(parsed) = value.parse::<usize>()
+        && (1..=1_000).contains(&parsed)
+    {
+        config.notification_worker_batch_limit = parsed;
     }
 }
 
@@ -1177,17 +1177,16 @@ fn single_user_auth_from_env() -> Option<SingleUserAuthConfig> {
     if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_SINGLE_USER_EMAIL") {
         config.user_primary_email = non_empty_env(&value);
     }
-    if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_SINGLE_USER_DISPLAY_NAME") {
-        if let Some(value) = non_empty_env(&value) {
-            config.user_display_name = value;
-        }
+    if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_SINGLE_USER_DISPLAY_NAME")
+        && let Some(value) = non_empty_env(&value)
+    {
+        config.user_display_name = value;
     }
-    if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_SINGLE_USER_SESSION_TTL_SECONDS") {
-        if let Ok(parsed) = value.parse::<i64>() {
-            if (300..=86_400).contains(&parsed) {
-                config.session_ttl_seconds = parsed;
-            }
-        }
+    if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_SINGLE_USER_SESSION_TTL_SECONDS")
+        && let Ok(parsed) = value.parse::<i64>()
+        && (300..=86_400).contains(&parsed)
+    {
+        config.session_ttl_seconds = parsed;
     }
     Some(config)
 }
@@ -1415,7 +1414,10 @@ async fn api_not_found() -> GatewayError {
 
 fn model_routes(state: &AppState) -> Router<AppState> {
     Router::new()
-        .route("/v1/responses", post(model_ingress))
+        .route(
+            "/v1/responses",
+            post(model_ingress).get(responses_websocket_ingress),
+        )
         .route("/v1/chat/completions", post(model_ingress))
         .route("/v1/messages", post(model_ingress))
         .route(
@@ -3628,11 +3630,7 @@ fn telemetry_readiness_status(config: &GatewayConfig) -> &'static str {
 }
 
 const fn configured_status(configured: bool) -> &'static str {
-    if configured {
-        "configured"
-    } else {
-        "missing"
-    }
+    if configured { "configured" } else { "missing" }
 }
 
 fn otel_exporter_readiness_status(state: &AppState) -> &'static str {
@@ -11264,11 +11262,7 @@ fn observed_lag_seconds(
 }
 
 const fn average_i64(sum: i64, count: i64) -> i64 {
-    if count == 0 {
-        0
-    } else {
-        sum / count
-    }
+    if count == 0 { 0 } else { sum / count }
 }
 
 fn otel_resource_attributes(config: &OtelExportConfigRecord) -> Vec<Value> {
@@ -12295,10 +12289,9 @@ async fn list_auth_login_providers(
                 .as_ref()
                 .is_some_and(|config| config.tenant_id == tenant_id)
         })
+        && let Some(config) = state.config.single_user_auth.as_ref()
     {
-        if let Some(config) = state.config.single_user_auth.as_ref() {
-            resources.push(single_user_auth_provider_resource_body(config));
-        }
+        resources.push(single_user_auth_provider_resource_body(config));
     }
     if let Some(tenant_id) = query.tenant_id {
         resources.extend(
@@ -12888,13 +12881,12 @@ fn select_session_project_for_organization(
     {
         candidate_ids.push(project_id.to_owned());
     }
-    if let Some(project_id) = session.active_project_id.as_deref() {
-        if !candidate_ids
+    if let Some(project_id) = session.active_project_id.as_deref()
+        && !candidate_ids
             .iter()
             .any(|candidate| candidate == project_id)
-        {
-            candidate_ids.push(project_id.to_owned());
-        }
+    {
+        candidate_ids.push(project_id.to_owned());
     }
     for membership in state
         .store
@@ -14019,6 +14011,736 @@ async fn model_ingress(
     .await?;
     release_runtime_policy_reservations(&state, &preflight).await;
     Ok(Json(response))
+}
+
+const RESPONSES_WS_IDLE_TIMEOUT: Duration = Duration::from_mins(5);
+const RESPONSES_WS_MAX_CONNECTION: Duration = Duration::from_hours(1);
+
+async fn responses_websocket_ingress(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Result<Response> {
+    let max_message_size = state.config.max_body_bytes;
+    Ok(ws
+        .max_message_size(max_message_size)
+        .on_upgrade(move |socket| async move {
+            Box::pin(ResponsesWebSocketSession::new(state, headers, actor).run(socket)).await;
+        })
+        .into_response())
+}
+
+struct ResponsesWebSocketSession {
+    state: AppState,
+    headers: HeaderMap,
+    actor: AuthenticatedActor,
+    pinned: Option<PinnedResponsesWebSocketState>,
+    opened_at: std::time::Instant,
+}
+
+struct PinnedResponsesWebSocketState {
+    model_alias: String,
+    route_target: RuntimeRouteTarget,
+    upstream: Option<UpstreamResponsesWebSocket>,
+}
+
+struct ResponseCreateFrame {
+    raw_body: Value,
+    model_alias: String,
+}
+
+struct ResponsesWebSocketTurnOutcome {
+    response: Option<RuntimeIngressResponse>,
+    success: bool,
+    client_disconnected: bool,
+    close_connection: bool,
+}
+
+impl ResponsesWebSocketSession {
+    fn new(state: AppState, headers: HeaderMap, actor: AuthenticatedActor) -> Self {
+        Self {
+            state,
+            headers,
+            actor,
+            pinned: None,
+            opened_at: std::time::Instant::now(),
+        }
+    }
+
+    async fn run(mut self, socket: axum::extract::ws::WebSocket) {
+        let (mut downstream_tx, mut downstream_rx) = socket.split();
+        while self.opened_at.elapsed() <= RESPONSES_WS_MAX_CONNECTION {
+            let next = tokio::time::timeout(RESPONSES_WS_IDLE_TIMEOUT, downstream_rx.next()).await;
+            let Some(frame_result) = (match next {
+                Ok(Some(result)) => Some(result),
+                Ok(None) => None,
+                Err(_) => {
+                    let _ = send_responses_websocket_error(
+                        &mut downstream_tx,
+                        "idle_timeout",
+                        "Responses WebSocket idle timeout exceeded.",
+                    )
+                    .await;
+                    break;
+                }
+            }) else {
+                break;
+            };
+
+            let frame = match frame_result {
+                Ok(Message::Text(text)) => match parse_response_create_frame(&text) {
+                    Ok(frame) => frame,
+                    Err((code, message)) => {
+                        let _ =
+                            send_responses_websocket_error(&mut downstream_tx, code, message).await;
+                        continue;
+                    }
+                },
+                Ok(Message::Ping(payload)) => {
+                    if downstream_tx.send(Message::Pong(payload)).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                Ok(Message::Pong(_)) => continue,
+                Ok(Message::Binary(_)) => {
+                    let _ = send_responses_websocket_error(
+                        &mut downstream_tx,
+                        "unsupported_frame_type",
+                        "Responses WebSocket only supports JSON text frames.",
+                    )
+                    .await;
+                    continue;
+                }
+                Ok(Message::Close(_)) | Err(_) => break,
+            };
+
+            match self
+                .handle_response_create(frame, &mut downstream_tx, &mut downstream_rx)
+                .await
+            {
+                Ok(outcome) if outcome.close_connection => break,
+                Ok(_) => {}
+                Err(error) => {
+                    let _ =
+                        send_responses_websocket_gateway_error(&mut downstream_tx, &error).await;
+                    break;
+                }
+            }
+        }
+
+        if let Some(mut pinned) = self.pinned.take()
+            && let Some(upstream) = pinned.upstream.as_mut()
+        {
+            upstream.close().await;
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn handle_response_create(
+        &mut self,
+        frame: ResponseCreateFrame,
+        downstream_tx: &mut SplitSink<axum::extract::ws::WebSocket, Message>,
+        downstream_rx: &mut SplitStream<axum::extract::ws::WebSocket>,
+    ) -> Result<ResponsesWebSocketTurnOutcome> {
+        if let Some(pinned) = self.pinned.as_ref()
+            && pinned.model_alias != frame.model_alias
+        {
+            send_responses_websocket_error(
+                downstream_tx,
+                "model_switch_not_supported",
+                "Responses WebSocket connection is pinned to the first model alias. Open a new WebSocket connection to use another model.",
+            )
+            .await?;
+            return Ok(ResponsesWebSocketTurnOutcome::continue_without_accounting());
+        }
+
+        let replay_case = responses_websocket_replay_case()?;
+        self.actor =
+            match authenticate_request(&self.state, &self.headers, chrono::Utc::now()).await {
+                Ok(actor) => actor,
+                Err(error) => {
+                    send_responses_websocket_gateway_error(downstream_tx, &error).await?;
+                    return Ok(ResponsesWebSocketTurnOutcome {
+                        response: None,
+                        success: false,
+                        client_disconnected: false,
+                        close_connection: matches!(error, GatewayError::Authentication),
+                    });
+                }
+            };
+
+        let route_target = if let Some(pinned) = self.pinned.as_ref() {
+            pinned.route_target.clone()
+        } else {
+            let route_affinity_hash =
+                responses_websocket_route_affinity_hash(&self.headers, &self.actor);
+            runtime_route_target(
+                &self.state,
+                &self.actor,
+                replay_case,
+                &frame.model_alias,
+                route_affinity_hash.as_deref(),
+            )
+            .await?
+        };
+
+        let provider_target = FakeProviderReplayTarget {
+            alias_resource_id: route_target.authorization_resource_id.clone(),
+            upstream_model_id: route_target.upstream_model_id.clone(),
+        };
+        let authorization = authorize_runtime_provider_target(
+            &self.state,
+            &self.actor,
+            replay_case,
+            &provider_target,
+        )
+        .await?;
+        if !authorization.authorization.allowed {
+            send_responses_websocket_error(
+                downstream_tx,
+                "authorization_denied",
+                "Responses WebSocket model authorization denied.",
+            )
+            .await?;
+            return Ok(ResponsesWebSocketTurnOutcome::continue_without_accounting());
+        }
+
+        let request_body_bytes =
+            serde_json::to_vec(&frame.raw_body).map_or(usize::MAX, |bytes| bytes.len());
+        let preflight = match enforce_runtime_policy_preflight(
+            &self.state,
+            &self.actor,
+            replay_case,
+            route_target.selected_route.as_ref(),
+            request_body_bytes,
+            chrono::Utc::now(),
+        )
+        .await
+        {
+            Ok(preflight) => preflight,
+            Err(error) => {
+                record_runtime_policy_block_decision(
+                    &self.state,
+                    &self.actor,
+                    replay_case,
+                    &frame.model_alias,
+                    &route_target,
+                    &error,
+                )
+                .await?;
+                send_responses_websocket_gateway_error(downstream_tx, &error).await?;
+                return Ok(ResponsesWebSocketTurnOutcome::continue_without_accounting());
+            }
+        };
+
+        if self.pinned.is_none() {
+            let upstream = match self.state.config.provider_transport_mode {
+                ProviderTransportMode::Fake => None,
+                ProviderTransportMode::Http => match connect_responses_websocket_upstream(
+                    &self.state,
+                    &self.headers,
+                    &self.actor,
+                    &route_target,
+                    &frame.raw_body,
+                )
+                .await
+                {
+                    Ok(upstream) => Some(upstream),
+                    Err(error) => {
+                        record_failed_route_attempt_for_target(
+                            &self.state,
+                            &route_target,
+                            chrono::Utc::now(),
+                            chrono::Utc::now(),
+                        )
+                        .await?;
+                        release_runtime_policy_reservations(&self.state, &preflight).await;
+                        send_responses_websocket_gateway_error(downstream_tx, &error).await?;
+                        return Ok(ResponsesWebSocketTurnOutcome::continue_without_accounting());
+                    }
+                },
+            };
+            self.pinned = Some(PinnedResponsesWebSocketState {
+                model_alias: frame.model_alias.clone(),
+                route_target: route_target.clone(),
+                upstream,
+            });
+        }
+
+        let attempt_started_at = chrono::Utc::now();
+        let outcome = match self.state.config.provider_transport_mode {
+            ProviderTransportMode::Fake => {
+                run_fake_responses_websocket_turn(
+                    downstream_tx,
+                    &authorization,
+                    &provider_target,
+                    &frame.raw_body,
+                )
+                .await
+            }
+            ProviderTransportMode::Http => {
+                self.proxy_live_responses_websocket_turn(
+                    downstream_tx,
+                    downstream_rx,
+                    &authorization,
+                    &route_target,
+                    &frame.raw_body,
+                )
+                .await
+            }
+        };
+
+        match &outcome {
+            Ok(turn) if turn.success => {
+                if let Some(response) = turn.response.as_ref() {
+                    record_successful_runtime_attempt(
+                        &self.state,
+                        &self.actor,
+                        replay_case,
+                        &frame.model_alias,
+                        &route_target,
+                        response,
+                        attempt_started_at,
+                    )
+                    .await?;
+                }
+            }
+            Ok(turn) if turn.client_disconnected => {
+                record_client_disconnected_route_attempt_for_target(
+                    &self.state,
+                    &route_target,
+                    attempt_started_at,
+                    chrono::Utc::now(),
+                )
+                .await?;
+            }
+            Ok(_) | Err(_) => {
+                record_failed_route_attempt_for_target(
+                    &self.state,
+                    &route_target,
+                    attempt_started_at,
+                    chrono::Utc::now(),
+                )
+                .await?;
+            }
+        }
+
+        release_runtime_policy_reservations(&self.state, &preflight).await;
+        outcome
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn proxy_live_responses_websocket_turn(
+        &mut self,
+        downstream_tx: &mut SplitSink<axum::extract::ws::WebSocket, Message>,
+        downstream_rx: &mut SplitStream<axum::extract::ws::WebSocket>,
+        authorization: &FakeProviderAuthorization,
+        route_target: &RuntimeRouteTarget,
+        raw_body: &Value,
+    ) -> Result<ResponsesWebSocketTurnOutcome> {
+        let provider_request = responses_websocket_provider_request(
+            &self.state,
+            &self.headers,
+            &self.actor,
+            route_target,
+            raw_body,
+        )?;
+        let adapted_text = serde_json::to_string(&provider_request.body).map_err(|error| {
+            GatewayError::Internal {
+                message: format!("failed to encode adapted responses websocket frame: {error}"),
+            }
+        })?;
+        let Some(upstream) = self
+            .pinned
+            .as_mut()
+            .and_then(|pinned| pinned.upstream.as_mut())
+        else {
+            return Err(GatewayError::Upstream {
+                reason: "responses_websocket_upstream_missing",
+            });
+        };
+        upstream.send_text(adapted_text).await?;
+
+        loop {
+            tokio::select! {
+                upstream_message = upstream.next_message() => {
+                    let Some(upstream_message) = upstream_message? else {
+                        return Ok(ResponsesWebSocketTurnOutcome::failed_and_close());
+                    };
+                    match upstream_message {
+                        UpstreamResponsesMessage::Text(text) => {
+                            let response_body = responses_websocket_completed_response_body(&text);
+                            let terminal_success = response_body.is_some();
+                            let terminal_error = responses_websocket_terminal_error(&text);
+                            if downstream_tx.send(Message::Text(text.into())).await.is_err() {
+                                return Ok(ResponsesWebSocketTurnOutcome::client_disconnected());
+                            }
+                            if let Some(body) = response_body {
+                                return Ok(ResponsesWebSocketTurnOutcome {
+                                    response: Some(RuntimeIngressResponse {
+                                        protocol_family: ProtocolFamily::OpenAiResponses,
+                                        authorization: authorization.authorization.clone(),
+                                        body,
+                                        streaming: true,
+                                    }),
+                                    success: true,
+                                    client_disconnected: false,
+                                    close_connection: false,
+                                });
+                            }
+                            if terminal_success || terminal_error {
+                                return Ok(ResponsesWebSocketTurnOutcome::failed_continue());
+                            }
+                        }
+                        UpstreamResponsesMessage::Close => {
+                            return Ok(ResponsesWebSocketTurnOutcome::failed_and_close());
+                        }
+                    }
+                }
+                downstream_message = downstream_rx.next() => {
+                    match downstream_message {
+                        Some(Ok(Message::Ping(payload))) => {
+                            if downstream_tx.send(Message::Pong(payload)).await.is_err() {
+                                return Ok(ResponsesWebSocketTurnOutcome::client_disconnected());
+                            }
+                        }
+                        Some(Ok(Message::Pong(_))) => {}
+                        Some(Ok(Message::Close(_)) | Err(_)) | None => {
+                            return Ok(ResponsesWebSocketTurnOutcome::client_disconnected());
+                        }
+                        Some(Ok(Message::Text(_))) => {
+                            send_responses_websocket_error(
+                                downstream_tx,
+                                "concurrent_turn_not_supported",
+                                "Responses WebSocket does not support concurrent response.create frames. Wait for the current turn to finish before sending another frame.",
+                            )
+                            .await?;
+                        }
+                        Some(Ok(Message::Binary(_))) => {
+                            send_responses_websocket_error(
+                                downstream_tx,
+                                "unsupported_frame_type",
+                                "Responses WebSocket only supports JSON text frames.",
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                () = tokio::time::sleep(RESPONSES_WS_IDLE_TIMEOUT) => {
+                    send_responses_websocket_error(
+                        downstream_tx,
+                        "upstream_timeout",
+                        "Timed out waiting for upstream Responses WebSocket event.",
+                    )
+                    .await?;
+                    return Ok(ResponsesWebSocketTurnOutcome::failed_and_close());
+                }
+            }
+        }
+    }
+}
+
+impl ResponsesWebSocketTurnOutcome {
+    const fn continue_without_accounting() -> Self {
+        Self {
+            response: None,
+            success: false,
+            client_disconnected: false,
+            close_connection: false,
+        }
+    }
+
+    const fn failed_continue() -> Self {
+        Self {
+            response: None,
+            success: false,
+            client_disconnected: false,
+            close_connection: false,
+        }
+    }
+
+    const fn failed_and_close() -> Self {
+        Self {
+            response: None,
+            success: false,
+            client_disconnected: false,
+            close_connection: true,
+        }
+    }
+
+    const fn client_disconnected() -> Self {
+        Self {
+            response: None,
+            success: false,
+            client_disconnected: true,
+            close_connection: true,
+        }
+    }
+}
+
+async fn connect_responses_websocket_upstream(
+    state: &AppState,
+    headers: &HeaderMap,
+    actor: &AuthenticatedActor,
+    route_target: &RuntimeRouteTarget,
+    raw_body: &Value,
+) -> Result<UpstreamResponsesWebSocket> {
+    let provider_request =
+        responses_websocket_provider_request(state, headers, actor, route_target, raw_body)?;
+    let ws_url = http_url_to_ws_url(&provider_request.url)?;
+    let headers = provider_request_header_map(&provider_request, actor, headers)?;
+    UpstreamResponsesWebSocket::connect(&ws_url, &headers).await
+}
+
+fn responses_websocket_provider_request(
+    state: &AppState,
+    headers: &HeaderMap,
+    actor: &AuthenticatedActor,
+    route_target: &RuntimeRouteTarget,
+    raw_body: &Value,
+) -> Result<ProviderAdapterRequest> {
+    let provider_kind = route_target
+        .provider_endpoint
+        .as_ref()
+        .map(|endpoint| endpoint.provider_kind.as_str())
+        .ok_or(GatewayError::NoRoute {
+            reason: "provider_route_required",
+        })?;
+    if !matches!(provider_kind, "openai" | "codex") {
+        return Err(GatewayError::NoRoute {
+            reason: "responses_websocket_provider_unsupported",
+        });
+    }
+
+    let mut body = raw_body.clone();
+    inject_responses_websocket_prompt_cache_key(
+        &mut body,
+        &responses_websocket_session_id(headers, actor),
+    );
+    let Some(provider_request) = runtime_provider_adapter_request(
+        state,
+        responses_websocket_replay_case()?,
+        route_target,
+        &body,
+    )?
+    else {
+        return Err(GatewayError::NoRoute {
+            reason: "provider_route_required",
+        });
+    };
+    Ok(provider_request)
+}
+
+fn provider_request_header_map(
+    provider_request: &ProviderAdapterRequest,
+    actor: &AuthenticatedActor,
+    headers: &HeaderMap,
+) -> Result<HeaderMap> {
+    let mut header_map = HeaderMap::new();
+    for provider_header in &provider_request.headers {
+        header_map.insert(
+            provider_header.name,
+            HeaderValue::from_str(provider_header.value.expose_secret()).map_err(|error| {
+                GatewayError::Internal {
+                    message: format!("invalid provider header value: {error}"),
+                }
+            })?,
+        );
+    }
+    if provider_request.safe_metadata.provider_kind == "codex" {
+        let session_id = responses_websocket_session_id(headers, actor);
+        let session_value =
+            HeaderValue::from_str(&session_id).map_err(|error| GatewayError::Internal {
+                message: format!("invalid responses websocket session header: {error}"),
+            })?;
+        header_map.insert("session_id", session_value.clone());
+        header_map.insert("x-client-request-id", session_value);
+    }
+    Ok(header_map)
+}
+
+async fn run_fake_responses_websocket_turn(
+    downstream_tx: &mut SplitSink<axum::extract::ws::WebSocket, Message>,
+    authorization: &FakeProviderAuthorization,
+    provider_target: &FakeProviderReplayTarget,
+    raw_body: &Value,
+) -> Result<ResponsesWebSocketTurnOutcome> {
+    let response =
+        fake_provider_response_for_authorization(authorization, provider_target, raw_body);
+    let event = json!({
+        "type": "response.completed",
+        "response": response.body
+    });
+    downstream_tx
+        .send(Message::Text(event.to_string().into()))
+        .await
+        .map_err(|_| GatewayError::Upstream {
+            reason: "responses_websocket_downstream_send_failed",
+        })?;
+    Ok(ResponsesWebSocketTurnOutcome {
+        response: Some(response),
+        success: true,
+        client_disconnected: false,
+        close_connection: false,
+    })
+}
+
+fn parse_response_create_frame(
+    text: &str,
+) -> std::result::Result<ResponseCreateFrame, (&'static str, &'static str)> {
+    let value: Value = serde_json::from_str(text)
+        .map_err(|_| ("invalid_json", "Text frame is not valid JSON."))?;
+    let object = value
+        .as_object()
+        .ok_or(("invalid_json", "Text frame must be a JSON object."))?;
+    if object.get("type").and_then(Value::as_str) != Some("response.create") {
+        return Err((
+            "unsupported_event_type",
+            "Only response.create frames are supported by Responses WebSocket proxy.",
+        ));
+    }
+    let model_alias = object
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|model| !model.is_empty())
+        .ok_or(("missing_model", "response.create.model is required."))?
+        .to_owned();
+    Ok(ResponseCreateFrame {
+        raw_body: value,
+        model_alias,
+    })
+}
+
+fn responses_websocket_completed_response_body(text: &str) -> Option<Value> {
+    let value = serde_json::from_str::<Value>(text).ok()?;
+    (value.get("type").and_then(Value::as_str) == Some("response.completed"))
+        .then(|| value.get("response").cloned().unwrap_or(value))
+}
+
+fn responses_websocket_terminal_error(text: &str) -> bool {
+    matches!(
+        serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_owned))
+            .as_deref(),
+        Some("response.failed" | "response.incomplete" | "error")
+    )
+}
+
+fn responses_websocket_replay_case() -> Result<&'static GatewayReplayCase> {
+    foundation_route_replay_cases()
+        .iter()
+        .find(|case| {
+            case.protocol_family == ProtocolFamily::OpenAiResponses
+                && case.ingress_path == "/v1/responses"
+        })
+        .ok_or_else(|| GatewayError::Internal {
+            message: "openai responses replay case missing".to_owned(),
+        })
+}
+
+fn responses_websocket_route_affinity_hash(
+    headers: &HeaderMap,
+    actor: &AuthenticatedActor,
+) -> Option<String> {
+    route_affinity_hash_from_headers(headers).or_else(|| {
+        actor
+            .api_key_id
+            .as_deref()
+            .or(Some(actor.actor_id.as_str()))
+            .map(route_affinity_hash)
+    })
+}
+
+fn responses_websocket_session_id(headers: &HeaderMap, actor: &AuthenticatedActor) -> String {
+    headers
+        .get(GATEWAY_SESSION_ID_HEADER)
+        .or_else(|| headers.get(SESSION_ID_HEADER))
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| is_safe_route_affinity_key(value))
+        .map_or_else(
+            || {
+                actor
+                    .api_key_id
+                    .clone()
+                    .unwrap_or_else(|| actor.actor_id.clone())
+            },
+            ToOwned::to_owned,
+        )
+}
+
+fn inject_responses_websocket_prompt_cache_key(body: &mut Value, session_id: &str) {
+    if let Some(object) = body.as_object_mut() {
+        object.insert("prompt_cache_key".to_owned(), json!(session_id));
+    }
+}
+
+async fn record_client_disconnected_route_attempt_for_target(
+    state: &AppState,
+    route_target: &RuntimeRouteTarget,
+    attempt_started_at: chrono::DateTime<chrono::Utc>,
+    attempt_ended_at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    if let (Some(route_decision_id), Some(selected)) = (
+        route_target.route_decision_id.as_deref(),
+        route_target.selected_route.as_ref(),
+    ) {
+        record_route_attempt_evidence(
+            state,
+            RouteAttemptRecord::client_disconnected(
+                route_decision_id,
+                0,
+                selected,
+                attempt_started_at,
+                attempt_ended_at,
+            ),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn send_responses_websocket_gateway_error(
+    downstream_tx: &mut SplitSink<axum::extract::ws::WebSocket, Message>,
+    error: &GatewayError,
+) -> Result<()> {
+    let code = match error {
+        GatewayError::Authentication => "authentication_failed",
+        GatewayError::Authorization { .. } => "authorization_denied",
+        GatewayError::BadRequest { .. } => "invalid_request",
+        GatewayError::NoRoute { .. } => "no_route",
+        GatewayError::BudgetExceeded { .. } => "budget_exceeded",
+        GatewayError::QuotaExceeded { .. } => "quota_exceeded",
+        GatewayError::Upstream { .. } => "upstream_error",
+        GatewayError::NotFound { .. } => "not_found",
+        GatewayError::RequestTimeout => "request_timeout",
+        GatewayError::NotReady => "not_ready",
+        GatewayError::Internal { .. } => "internal_error",
+    };
+    send_responses_websocket_error(downstream_tx, code, &error.to_string()).await
+}
+
+async fn send_responses_websocket_error(
+    downstream_tx: &mut SplitSink<axum::extract::ws::WebSocket, Message>,
+    code: &str,
+    message: &str,
+) -> Result<()> {
+    let body = json!({
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "code": code,
+            "message": message
+        }
+    });
+    downstream_tx
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .map_err(|_| GatewayError::Upstream {
+            reason: "responses_websocket_downstream_send_failed",
+        })
 }
 
 fn canonical_gateway_api_path(path: &str) -> &str {
@@ -16178,15 +16900,15 @@ fn notification_subscription_filter_matches(
             return false;
         }
     }
-    if let Some(filter_scope_kind) = filter.get("scope_kind").and_then(Value::as_str) {
-        if filter_scope_kind != scope_kind {
-            return false;
-        }
+    if let Some(filter_scope_kind) = filter.get("scope_kind").and_then(Value::as_str)
+        && filter_scope_kind != scope_kind
+    {
+        return false;
     }
-    if let Some(filter_scope_id) = filter.get("scope_id").and_then(Value::as_str) {
-        if filter_scope_id != scope_id {
-            return false;
-        }
+    if let Some(filter_scope_id) = filter.get("scope_id").and_then(Value::as_str)
+        && filter_scope_id != scope_id
+    {
+        return false;
     }
     true
 }
@@ -18604,10 +19326,10 @@ fn maintenance_window_validation_errors(
     if request.ends_at <= now {
         errors.push(validation_error("ends_at", "must_be_future"));
     }
-    if let Some(organization_id) = request.organization_id.as_deref() {
-        if organization_for_actor(state, actor, organization_id).is_err() {
-            errors.push(validation_error("organization_id", "unknown_organization"));
-        }
+    if let Some(organization_id) = request.organization_id.as_deref()
+        && organization_for_actor(state, actor, organization_id).is_err()
+    {
+        errors.push(validation_error("organization_id", "unknown_organization"));
     }
     if let Some(project_id) = request.project_id.as_deref() {
         match project_for_actor(state, actor, project_id) {
@@ -18660,10 +19382,10 @@ fn provider_endpoint_validation_errors(
             "invalid_http_base_url",
         ));
     }
-    if let Some(organization_id) = request.organization_id.as_deref() {
-        if organization_for_actor(state, actor, organization_id).is_err() {
-            errors.push(validation_error("organization_id", "unknown_organization"));
-        }
+    if let Some(organization_id) = request.organization_id.as_deref()
+        && organization_for_actor(state, actor, organization_id).is_err()
+    {
+        errors.push(validation_error("organization_id", "unknown_organization"));
     }
     errors
 }
@@ -18696,10 +19418,10 @@ fn catalog_import_validation_errors(
     if request.import_mode != "draft" {
         errors.push(validation_error("import_mode", "unsupported_mode"));
     }
-    if let Some(organization_id) = request.organization_id.as_deref() {
-        if organization_for_actor(state, actor, organization_id).is_err() {
-            errors.push(validation_error("organization_id", "unknown_organization"));
-        }
+    if let Some(organization_id) = request.organization_id.as_deref()
+        && organization_for_actor(state, actor, organization_id).is_err()
+    {
+        errors.push(validation_error("organization_id", "unknown_organization"));
     }
     if let Some(project_id) = request.project_id.as_deref() {
         match project_for_actor(state, actor, project_id) {
@@ -18896,10 +19618,10 @@ fn upstream_credential_validation_errors(
             "unknown_provider_endpoint",
         )),
     }
-    if let Some(organization_id) = request.organization_id.as_deref() {
-        if organization_for_actor(state, actor, organization_id).is_err() {
-            errors.push(validation_error("organization_id", "unknown_organization"));
-        }
+    if let Some(organization_id) = request.organization_id.as_deref()
+        && organization_for_actor(state, actor, organization_id).is_err()
+    {
+        errors.push(validation_error("organization_id", "unknown_organization"));
     }
     errors
 }
@@ -19015,10 +19737,10 @@ fn model_target_validation_errors(
             None => errors.push(validation_error("pricing_sku_id", "unknown_pricing_sku")),
         }
     }
-    if let Some(organization_id) = request.organization_id.as_deref() {
-        if organization_for_actor(state, actor, organization_id).is_err() {
-            errors.push(validation_error("organization_id", "unknown_organization"));
-        }
+    if let Some(organization_id) = request.organization_id.as_deref()
+        && organization_for_actor(state, actor, organization_id).is_err()
+    {
+        errors.push(validation_error("organization_id", "unknown_organization"));
     }
     errors
 }
@@ -19051,10 +19773,10 @@ fn model_alias_validation_errors(
     {
         errors.push(validation_error("alias_name", "duplicate_name"));
     }
-    if let Some(organization_id) = request.organization_id.as_deref() {
-        if organization_for_actor(state, actor, organization_id).is_err() {
-            errors.push(validation_error("organization_id", "unknown_organization"));
-        }
+    if let Some(organization_id) = request.organization_id.as_deref()
+        && organization_for_actor(state, actor, organization_id).is_err()
+    {
+        errors.push(validation_error("organization_id", "unknown_organization"));
     }
     if let Some(project_id) = request.project_id.as_deref() {
         match project_for_actor(state, actor, project_id) {
@@ -19142,10 +19864,10 @@ fn pricing_sku_validation_errors(
         ));
     }
     let effective_from = request.effective_from.unwrap_or(now);
-    if let Some(effective_until) = request.effective_until {
-        if effective_until <= effective_from {
-            errors.push(validation_error("effective_until", "invalid_window"));
-        }
+    if let Some(effective_until) = request.effective_until
+        && effective_until <= effective_from
+    {
+        errors.push(validation_error("effective_until", "invalid_window"));
     }
     pricing_document_validation_errors(
         &request.pricing_document,
@@ -19153,10 +19875,10 @@ fn pricing_sku_validation_errors(
         &request.unit,
         &mut errors,
     );
-    if let Some(organization_id) = request.organization_id.as_deref() {
-        if organization_for_actor(state, actor, organization_id).is_err() {
-            errors.push(validation_error("organization_id", "unknown_organization"));
-        }
+    if let Some(organization_id) = request.organization_id.as_deref()
+        && organization_for_actor(state, actor, organization_id).is_err()
+    {
+        errors.push(validation_error("organization_id", "unknown_organization"));
     }
     if state
         .store
@@ -19361,10 +20083,10 @@ fn validate_budget_limit_fields(request: &AdminCreateBudgetPolicyRequest, errors
     {
         errors.push(validation_error("limit", "positive_required"));
     }
-    if let (Some(soft_limit), Some(hard_limit)) = (request.soft_limit, request.hard_limit) {
-        if soft_limit > hard_limit {
-            errors.push(validation_error("soft_limit", "exceeds_hard_limit"));
-        }
+    if let (Some(soft_limit), Some(hard_limit)) = (request.soft_limit, request.hard_limit)
+        && soft_limit > hard_limit
+    {
+        errors.push(validation_error("soft_limit", "exceeds_hard_limit"));
     }
     if request.hard_limit.is_some()
         && request.overage_mode == "notify_only"
@@ -19588,10 +20310,10 @@ fn validate_otel_export_scope_fields(
     request: &AdminCreateOtelExportConfigRequest,
     errors: &mut Vec<Value>,
 ) {
-    if let Some(organization_id) = request.organization_id.as_deref() {
-        if organization_for_actor(state, actor, organization_id).is_err() {
-            errors.push(validation_error("organization_id", "unknown_organization"));
-        }
+    if let Some(organization_id) = request.organization_id.as_deref()
+        && organization_for_actor(state, actor, organization_id).is_err()
+    {
+        errors.push(validation_error("organization_id", "unknown_organization"));
     }
     if let Some(project_id) = request.project_id.as_deref() {
         let Some(project) = state.store.project(project_id) else {
@@ -20024,20 +20746,19 @@ fn notification_sink_validation_errors_with_excluded_id(
         request.organization_id.as_deref(),
         request.project_id.as_deref(),
     );
-    if request.sink_kind == "webhook" {
-        if let Some(signing_secret_ref_id) = request.signing_secret_ref_id.as_deref() {
-            if valid_secret_ref_id(signing_secret_ref_id) {
-                validate_secret_ref_scope_fields(
-                    state,
-                    actor,
-                    "signing_secret_ref_id",
-                    signing_secret_ref_id,
-                    inferred_organization_id.as_deref(),
-                    request.project_id.as_deref(),
-                    &mut errors,
-                );
-            }
-        }
+    if request.sink_kind == "webhook"
+        && let Some(signing_secret_ref_id) = request.signing_secret_ref_id.as_deref()
+        && valid_secret_ref_id(signing_secret_ref_id)
+    {
+        validate_secret_ref_scope_fields(
+            state,
+            actor,
+            "signing_secret_ref_id",
+            signing_secret_ref_id,
+            inferred_organization_id.as_deref(),
+            request.project_id.as_deref(),
+            &mut errors,
+        );
     }
     if state
         .store
@@ -20064,10 +20785,10 @@ fn validate_notification_scope_fields(
     project_id: Option<&str>,
     errors: &mut Vec<Value>,
 ) {
-    if let Some(organization_id) = organization_id {
-        if organization_for_actor(state, actor, organization_id).is_err() {
-            errors.push(validation_error("organization_id", "unknown_organization"));
-        }
+    if let Some(organization_id) = organization_id
+        && organization_for_actor(state, actor, organization_id).is_err()
+    {
+        errors.push(validation_error("organization_id", "unknown_organization"));
     }
     if let Some(project_id) = project_id {
         let Some(project) = state.store.project(project_id) else {
@@ -20126,13 +20847,13 @@ fn validate_webhook_notification_sink_fields(
         Some(_) => errors.push(validation_error("endpoint_config.url", "invalid_url")),
         None => errors.push(validation_error("endpoint_config.url", "required")),
     }
-    if let Some(timeout_seconds) = object.get("timeout_seconds").and_then(Value::as_u64) {
-        if !(1..=NOTIFICATION_WEBHOOK_MAX_TIMEOUT_SECONDS).contains(&timeout_seconds) {
-            errors.push(validation_error(
-                "endpoint_config.timeout_seconds",
-                "invalid_timeout",
-            ));
-        }
+    if let Some(timeout_seconds) = object.get("timeout_seconds").and_then(Value::as_u64)
+        && !(1..=NOTIFICATION_WEBHOOK_MAX_TIMEOUT_SECONDS).contains(&timeout_seconds)
+    {
+        errors.push(validation_error(
+            "endpoint_config.timeout_seconds",
+            "invalid_timeout",
+        ));
     }
     if let Some(retry_policy) = object.get("retry_policy") {
         validate_notification_retry_policy(retry_policy, errors);
@@ -20157,21 +20878,21 @@ fn validate_notification_retry_policy(retry_policy: &Value, errors: &mut Vec<Val
         ));
         return;
     };
-    if let Some(max_attempts) = policy.get("max_attempts").and_then(Value::as_i64) {
-        if !(1..=i64::from(NOTIFICATION_WEBHOOK_MAX_RETRY_ATTEMPTS)).contains(&max_attempts) {
-            errors.push(validation_error(
-                "endpoint_config.retry_policy.max_attempts",
-                "invalid_max_attempts",
-            ));
-        }
+    if let Some(max_attempts) = policy.get("max_attempts").and_then(Value::as_i64)
+        && !(1..=i64::from(NOTIFICATION_WEBHOOK_MAX_RETRY_ATTEMPTS)).contains(&max_attempts)
+    {
+        errors.push(validation_error(
+            "endpoint_config.retry_policy.max_attempts",
+            "invalid_max_attempts",
+        ));
     }
-    if let Some(max_duration_seconds) = policy.get("max_duration_seconds").and_then(Value::as_i64) {
-        if !(60..=86_400).contains(&max_duration_seconds) {
-            errors.push(validation_error(
-                "endpoint_config.retry_policy.max_duration_seconds",
-                "invalid_max_duration",
-            ));
-        }
+    if let Some(max_duration_seconds) = policy.get("max_duration_seconds").and_then(Value::as_i64)
+        && !(60..=86_400).contains(&max_duration_seconds)
+    {
+        errors.push(validation_error(
+            "endpoint_config.retry_policy.max_duration_seconds",
+            "invalid_max_duration",
+        ));
     }
 }
 
@@ -20609,39 +21330,40 @@ fn route_policy_validation_errors(
             "unknown_routing_group",
         )),
     }
-    if let (Some(alias), Some(group)) = (&alias, &group) {
-        if alias.tenant_id == actor.tenant_id && group.tenant_id == actor.tenant_id {
-            if alias.protocol_family != group.protocol_family {
-                errors.push(validation_error(
-                    "routing_group_id",
-                    "protocol_family_mismatch",
-                ));
-            }
-            if alias.organization_id.is_some()
-                && group.organization_id.is_some()
-                && alias.organization_id != group.organization_id
-            {
-                errors.push(validation_error(
-                    "routing_group_id",
-                    "organization_mismatch",
-                ));
-            }
-            let organization_id = alias
-                .organization_id
-                .clone()
-                .or_else(|| group.organization_id.clone());
-            if state
-                .store
-                .route_policies_for_tenant(&actor.tenant_id)
-                .iter()
-                .any(|policy| {
-                    policy.organization_id == organization_id
-                        && policy.name == request.name.trim()
-                        && policy.status != ResourceStatus::Deleted
-                })
-            {
-                errors.push(validation_error("name", "duplicate_name"));
-            }
+    if let (Some(alias), Some(group)) = (&alias, &group)
+        && alias.tenant_id == actor.tenant_id
+        && group.tenant_id == actor.tenant_id
+    {
+        if alias.protocol_family != group.protocol_family {
+            errors.push(validation_error(
+                "routing_group_id",
+                "protocol_family_mismatch",
+            ));
+        }
+        if alias.organization_id.is_some()
+            && group.organization_id.is_some()
+            && alias.organization_id != group.organization_id
+        {
+            errors.push(validation_error(
+                "routing_group_id",
+                "organization_mismatch",
+            ));
+        }
+        let organization_id = alias
+            .organization_id
+            .clone()
+            .or_else(|| group.organization_id.clone());
+        if state
+            .store
+            .route_policies_for_tenant(&actor.tenant_id)
+            .iter()
+            .any(|policy| {
+                policy.organization_id == organization_id
+                    && policy.name == request.name.trim()
+                    && policy.status != ResourceStatus::Deleted
+            })
+        {
+            errors.push(validation_error("name", "duplicate_name"));
         }
     }
     errors
@@ -20778,10 +21500,10 @@ fn routing_group_validation_errors(
     {
         errors.push(validation_error("name", "duplicate_name"));
     }
-    if let Some(organization_id) = request.organization_id.as_deref() {
-        if organization_for_actor(state, actor, organization_id).is_err() {
-            errors.push(validation_error("organization_id", "unknown_organization"));
-        }
+    if let Some(organization_id) = request.organization_id.as_deref()
+        && organization_for_actor(state, actor, organization_id).is_err()
+    {
+        errors.push(validation_error("organization_id", "unknown_organization"));
     }
     errors
 }
@@ -25968,46 +26690,52 @@ fn latest_snapshot_for_actor_in_memory(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{mpsc, Arc, Mutex};
+    use std::sync::{Arc, Mutex, mpsc};
 
-    use axum::body::{to_bytes, Body, Bytes};
-    use axum::http::{header, HeaderMap, HeaderValue, Request, Response, StatusCode, Uri};
+    use axum::body::{Body, Bytes, to_bytes};
+    use axum::extract::{WebSocketUpgrade, ws::Message as AxumWsMessage};
+    use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode, Uri, header};
     use axum::routing::{get, post, put};
     use axum::{Json, Router};
     use chrono::Duration;
+    use futures_util::{SinkExt, StreamExt};
     use jsonwebtoken::jwk::{Jwk, PublicKeyUse};
-    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     use secrecy::{ExposeSecret, SecretString};
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
+    use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
     use tower::ServiceExt;
 
     use super::{
+        ADMIN_ROUTE_ATTEMPT_LIST_PATH, ADMIN_ROUTE_DECISION_LIST_PATH,
+        ADMIN_ROUTE_SIMULATION_LIST_PATH, AppState, BackgroundWorkerMode, CODEX_API_BASE_URL,
+        CSRF_TOKEN_HEADER, CreatePricingSkuRequest, DependencyProbeMode,
+        ExportObjectStorageHttpConfig, GATEWAY_SESSION_ID_HEADER, GatewayConfig,
+        NotificationDeliveryTransport, OtelExporterTransport, PROJECT_ID_HEADER,
+        ProviderTransportMode, REQUEST_ID_HEADER, RUNTIME_BUDGET_LEASE_TTL_SECONDS,
+        RuntimePolicyReconciliationSummary, SESSION_TOKEN_PREFIX, SINGLE_USER_ID,
+        SINGLE_USER_ORGANIZATION_ID, SINGLE_USER_PROJECT_ID, SINGLE_USER_PROVIDER_ID,
+        SINGLE_USER_TENANT_ID, SingleUserAuthConfig, TRACE_ID_HEADER, TRACEPARENT_HEADER,
         auth_session_csrf_token, authenticate_request, build_app_state, deliver_due_notifications,
         deliver_due_notifications_with_transport, enforce_runtime_policy_preflight,
         export_payload_checksum, notification_signature, release_runtime_policy_reservations,
         route_affinity_hash, router, run_background_worker_tick_once, run_otel_exporter_once,
         run_otel_exporter_once_with_transport, run_runtime_policy_reconciler_once,
         runtime_budget_reservation_key, runtime_quota_counter_key,
-        runtime_quota_loss_allowance_key, runtime_route_target, validate_gateway_config, AppState,
-        BackgroundWorkerMode, CreatePricingSkuRequest, DependencyProbeMode,
-        ExportObjectStorageHttpConfig, GatewayConfig, NotificationDeliveryTransport,
-        OtelExporterTransport, ProviderTransportMode, RuntimePolicyReconciliationSummary,
-        SingleUserAuthConfig, ADMIN_ROUTE_ATTEMPT_LIST_PATH, ADMIN_ROUTE_DECISION_LIST_PATH,
-        ADMIN_ROUTE_SIMULATION_LIST_PATH, CODEX_API_BASE_URL, CSRF_TOKEN_HEADER,
-        GATEWAY_SESSION_ID_HEADER, PROJECT_ID_HEADER, REQUEST_ID_HEADER,
-        RUNTIME_BUDGET_LEASE_TTL_SECONDS, SESSION_TOKEN_PREFIX, SINGLE_USER_ID,
-        SINGLE_USER_ORGANIZATION_ID, SINGLE_USER_PROJECT_ID, SINGLE_USER_PROVIDER_ID,
-        SINGLE_USER_TENANT_ID, TRACEPARENT_HEADER, TRACE_ID_HEADER,
+        runtime_quota_loss_allowance_key, runtime_route_target, validate_gateway_config,
     };
+    use crate::ProtocolFamily;
     use crate::action::{ActionGrant, BuiltInRole};
     use crate::auth::{
-        create_auth_session, verify_api_key, verify_session_token, CreateAuthSessionRequest,
+        CreateAuthSessionRequest, create_auth_session, verify_api_key, verify_session_token,
     };
-    use crate::config::{publish_config_snapshot, PublishConfigSnapshotRequest};
+    use crate::config::{PublishConfigSnapshotRequest, publish_config_snapshot};
     use crate::domain::{
-        new_prefixed_id, ActorKind, DirectoryStatus, ExternalIdentityRecord, MembershipStatus,
+        ActorKind, DirectoryStatus, ExternalIdentityRecord, MembershipStatus,
         NotificationDeliveryAttemptRecord, ResourceStatus, RuntimeBudgetLeaseRecord,
-        UpstreamCredentialStatus, UsageEventRecord, ValidationDiagnosticRecord,
+        UpstreamCredentialStatus, UsageEventRecord, ValidationDiagnosticRecord, new_prefixed_id,
     };
     use crate::error::GatewayError;
     use crate::fixtures::{
@@ -26017,7 +26745,7 @@ mod tests {
         EndpointDrainRecord, EndpointHealthRecord, EndpointHealthState, RouteHotState,
         StickyRouteRecord,
     };
-    use crate::replay::{foundation_route_replay_cases, GatewayReplayCase};
+    use crate::replay::{GatewayReplayCase, foundation_route_replay_cases};
     use crate::route::foundation_routes;
     use crate::routing::{
         RouteAttemptRecord, RouteAttemptStatus, RouteDecisionRecord, RouteDecisionStatus,
@@ -26033,7 +26761,6 @@ mod tests {
         SecretRefAdminRepository, ServiceAccountAdminRepository, TenancyBootstrapRepository,
         TenancyRepository, UsageAccountingRepository, ValidationDiagnosticRepository,
     };
-    use crate::ProtocolFamily;
 
     static ENV_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -26120,36 +26847,23 @@ mod tests {
             panic!("invalid PostgreSQL URL should fail startup");
         };
 
-        assert!(error
-            .to_string()
-            .contains("failed to connect gateway PostgreSQL route evidence store"));
+        assert!(
+            error
+                .to_string()
+                .contains("failed to connect gateway PostgreSQL route evidence store")
+        );
     }
 
-    struct EnvRestore {
-        values: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    fn with_unset_env<R>(keys: &[&'static str], f: impl FnOnce() -> R) -> R {
+        temp_env::with_vars_unset(keys, f)
     }
 
-    impl EnvRestore {
-        fn capture(keys: &[&'static str]) -> Self {
-            Self {
-                values: keys
-                    .iter()
-                    .map(|key| (*key, std::env::var_os(key)))
-                    .collect(),
-            }
-        }
-    }
-
-    impl Drop for EnvRestore {
-        fn drop(&mut self) {
-            for (key, value) in &self.values {
-                if let Some(value) = value {
-                    std::env::set_var(key, value);
-                } else {
-                    std::env::remove_var(key);
-                }
-            }
-        }
+    fn with_env<R>(values: &[(&'static str, &'static str)], f: impl FnOnce() -> R) -> R {
+        let vars = values
+            .iter()
+            .map(|(key, value)| (*key, Some(*value)))
+            .collect::<Vec<_>>();
+        temp_env::with_vars(vars, f)
     }
 
     #[tokio::test]
@@ -26258,6 +26972,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn gateway_config_from_env_enables_single_user_only_with_required_credentials() {
         const KEYS: &[&str] = &[
             "STARWEAVER_GATEWAY_DATABASE_URL",
@@ -26290,61 +27005,82 @@ mod tests {
         let _lock = ENV_TEST_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _restore = EnvRestore::capture(KEYS);
-        for key in KEYS {
-            std::env::remove_var(key);
-        }
-
-        assert!(GatewayConfig::from_env().single_user_auth.is_none());
-
-        std::env::set_var("STARWEAVER_GATEWAY_SINGLE_USER_USERNAME", "admin");
-        assert!(GatewayConfig::from_env().single_user_auth.is_none());
-
-        std::env::set_var("STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD", " ");
-        assert!(GatewayConfig::from_env().single_user_auth.is_none());
-
-        std::env::set_var("STARWEAVER_GATEWAY_SINGLE_USER_USERNAME", " ");
-        std::env::set_var("STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD", "secret");
-        assert!(GatewayConfig::from_env().single_user_auth.is_none());
-
-        std::env::set_var("STARWEAVER_GATEWAY_SINGLE_USER_USERNAME", " admin ");
-        std::env::set_var("STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD", " secret ");
-        std::env::set_var(
-            "STARWEAVER_GATEWAY_SINGLE_USER_EMAIL",
-            " admin@example.com ",
-        );
-        std::env::set_var("STARWEAVER_GATEWAY_SINGLE_USER_DISPLAY_NAME", " Admin ");
-        std::env::set_var("STARWEAVER_GATEWAY_SINGLE_USER_SESSION_TTL_SECONDS", "600");
         let export_dir = std::env::temp_dir().join("starweaver-gateway-exports");
         let export_dir_text = export_dir.to_string_lossy().to_string();
-        std::env::set_var(
-            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_DIR",
-            &export_dir_text,
-        );
+        with_unset_env(KEYS, || {
+            assert!(GatewayConfig::from_env().single_user_auth.is_none());
 
-        let config = GatewayConfig::from_env();
-        let single_user = config
-            .single_user_auth
-            .unwrap_or_else(|| panic!("single-user config should be enabled"));
+            with_env(
+                &[("STARWEAVER_GATEWAY_SINGLE_USER_USERNAME", "admin")],
+                || {
+                    assert!(GatewayConfig::from_env().single_user_auth.is_none());
+                },
+            );
+            with_env(
+                &[
+                    ("STARWEAVER_GATEWAY_SINGLE_USER_USERNAME", "admin"),
+                    ("STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD", " "),
+                ],
+                || {
+                    assert!(GatewayConfig::from_env().single_user_auth.is_none());
+                },
+            );
+            with_env(
+                &[
+                    ("STARWEAVER_GATEWAY_SINGLE_USER_USERNAME", " "),
+                    ("STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD", "secret"),
+                ],
+                || {
+                    assert!(GatewayConfig::from_env().single_user_auth.is_none());
+                },
+            );
 
-        assert_eq!(single_user.username, "admin");
-        assert_eq!(single_user.password, "secret");
-        assert_eq!(
-            config.dependency_probe_mode,
-            DependencyProbeMode::Configured
-        );
-        assert_eq!(config.hot_state_backend_profile, "memory");
-        assert_eq!(config.runtime_store_profile, "memory");
-        assert_eq!(
-            single_user.user_primary_email.as_deref(),
-            Some("admin@example.com")
-        );
-        assert_eq!(single_user.user_display_name, "Admin");
-        assert_eq!(single_user.session_ttl_seconds, 600);
-        assert_eq!(
-            config.export_object_storage_dir.as_deref(),
-            Some(export_dir_text.as_str())
-        );
+            let vars = vec![
+                ("STARWEAVER_GATEWAY_SINGLE_USER_USERNAME", Some(" admin ")),
+                ("STARWEAVER_GATEWAY_SINGLE_USER_PASSWORD", Some(" secret ")),
+                (
+                    "STARWEAVER_GATEWAY_SINGLE_USER_EMAIL",
+                    Some(" admin@example.com "),
+                ),
+                (
+                    "STARWEAVER_GATEWAY_SINGLE_USER_DISPLAY_NAME",
+                    Some(" Admin "),
+                ),
+                (
+                    "STARWEAVER_GATEWAY_SINGLE_USER_SESSION_TTL_SECONDS",
+                    Some("600"),
+                ),
+                (
+                    "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_DIR",
+                    Some(export_dir_text.as_str()),
+                ),
+            ];
+            temp_env::with_vars(vars, || {
+                let config = GatewayConfig::from_env();
+                let single_user = config
+                    .single_user_auth
+                    .unwrap_or_else(|| panic!("single-user config should be enabled"));
+
+                assert_eq!(single_user.username, "admin");
+                assert_eq!(single_user.password, "secret");
+                assert_eq!(
+                    config.dependency_probe_mode,
+                    DependencyProbeMode::Configured
+                );
+                assert_eq!(config.hot_state_backend_profile, "memory");
+                assert_eq!(config.runtime_store_profile, "memory");
+                assert_eq!(
+                    single_user.user_primary_email.as_deref(),
+                    Some("admin@example.com")
+                );
+                assert_eq!(single_user.user_display_name, "Admin");
+                assert_eq!(single_user.session_ttl_seconds, 600);
+                assert_eq!(
+                    config.export_object_storage_dir.as_deref(),
+                    Some(export_dir_text.as_str())
+                );
+            });
+        });
     }
 
     #[test]
@@ -26354,21 +27090,21 @@ mod tests {
         let _lock = ENV_TEST_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _restore = EnvRestore::capture(KEYS);
-        for key in KEYS {
-            std::env::remove_var(key);
-        }
-
-        assert_eq!(GatewayConfig::from_env().request_timeout_ms, 30_000);
-
-        std::env::set_var("STARWEAVER_GATEWAY_REQUEST_TIMEOUT_MS", "2500");
-        assert_eq!(GatewayConfig::from_env().request_timeout_ms, 2500);
-
-        std::env::set_var("STARWEAVER_GATEWAY_REQUEST_TIMEOUT_MS", "99");
-        assert_eq!(GatewayConfig::from_env().request_timeout_ms, 30_000);
-
-        std::env::set_var("STARWEAVER_GATEWAY_REQUEST_TIMEOUT_MS", "300001");
-        assert_eq!(GatewayConfig::from_env().request_timeout_ms, 30_000);
+        with_unset_env(KEYS, || {
+            assert_eq!(GatewayConfig::from_env().request_timeout_ms, 30_000);
+            with_env(&[("STARWEAVER_GATEWAY_REQUEST_TIMEOUT_MS", "2500")], || {
+                assert_eq!(GatewayConfig::from_env().request_timeout_ms, 2500);
+            });
+            with_env(&[("STARWEAVER_GATEWAY_REQUEST_TIMEOUT_MS", "99")], || {
+                assert_eq!(GatewayConfig::from_env().request_timeout_ms, 30_000);
+            });
+            with_env(
+                &[("STARWEAVER_GATEWAY_REQUEST_TIMEOUT_MS", "300001")],
+                || {
+                    assert_eq!(GatewayConfig::from_env().request_timeout_ms, 30_000);
+                },
+            );
+        });
     }
 
     #[test]
@@ -26378,27 +27114,30 @@ mod tests {
         let _lock = ENV_TEST_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _restore = EnvRestore::capture(KEYS);
-        for key in KEYS {
-            std::env::remove_var(key);
-        }
-
-        assert_eq!(
-            GatewayConfig::from_env().provider_transport_mode,
-            ProviderTransportMode::Fake
-        );
-
-        std::env::set_var("STARWEAVER_GATEWAY_PROVIDER_TRANSPORT", " http ");
-        assert_eq!(
-            GatewayConfig::from_env().provider_transport_mode,
-            ProviderTransportMode::Http
-        );
-
-        std::env::set_var("STARWEAVER_GATEWAY_PROVIDER_TRANSPORT", "unexpected");
-        assert_eq!(
-            GatewayConfig::from_env().provider_transport_mode,
-            ProviderTransportMode::Fake
-        );
+        with_unset_env(KEYS, || {
+            assert_eq!(
+                GatewayConfig::from_env().provider_transport_mode,
+                ProviderTransportMode::Fake
+            );
+            with_env(
+                &[("STARWEAVER_GATEWAY_PROVIDER_TRANSPORT", " http ")],
+                || {
+                    assert_eq!(
+                        GatewayConfig::from_env().provider_transport_mode,
+                        ProviderTransportMode::Http
+                    );
+                },
+            );
+            with_env(
+                &[("STARWEAVER_GATEWAY_PROVIDER_TRANSPORT", "unexpected")],
+                || {
+                    assert_eq!(
+                        GatewayConfig::from_env().provider_transport_mode,
+                        ProviderTransportMode::Fake
+                    );
+                },
+            );
+        });
     }
 
     #[test]
@@ -26411,22 +27150,25 @@ mod tests {
         let _lock = ENV_TEST_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _restore = EnvRestore::capture(KEYS);
-        for key in KEYS {
-            std::env::remove_var(key);
-        }
-
-        std::env::set_var("STARWEAVER_GATEWAY_SECRET_BACKEND", " File ");
-        std::env::set_var(
-            "STARWEAVER_GATEWAY_SECRET_BACKEND_FILE_DIR",
-            " /var/lib/starweaver-gateway/secrets ",
-        );
-        let config = GatewayConfig::from_env();
-        assert_eq!(config.secret_backend_profile, "file");
-        assert_eq!(
-            config.secret_backend_file_dir.as_deref(),
-            Some("/var/lib/starweaver-gateway/secrets")
-        );
+        with_unset_env(KEYS, || {
+            with_env(
+                &[
+                    ("STARWEAVER_GATEWAY_SECRET_BACKEND", " File "),
+                    (
+                        "STARWEAVER_GATEWAY_SECRET_BACKEND_FILE_DIR",
+                        " /var/lib/starweaver-gateway/secrets ",
+                    ),
+                ],
+                || {
+                    let config = GatewayConfig::from_env();
+                    assert_eq!(config.secret_backend_profile, "file");
+                    assert_eq!(
+                        config.secret_backend_file_dir.as_deref(),
+                        Some("/var/lib/starweaver-gateway/secrets")
+                    );
+                },
+            );
+        });
 
         let missing_dir = match validate_gateway_config(&GatewayConfig {
             environment: "production".to_owned(),
@@ -26445,9 +27187,11 @@ mod tests {
             Ok(()) => panic!("file secret backend should require a file directory"),
             Err(error) => error,
         };
-        assert!(missing_dir
-            .to_string()
-            .contains("secret_backend_file_dir_required"));
+        assert!(
+            missing_dir
+                .to_string()
+                .contains("secret_backend_file_dir_required")
+        );
 
         let unsupported_profile = match validate_gateway_config(&GatewayConfig {
             secret_backend_profile: "gcp-secret-manager".to_owned(),
@@ -26456,9 +27200,11 @@ mod tests {
             Ok(()) => panic!("unsupported secret backend profile should be rejected"),
             Err(error) => error,
         };
-        assert!(unsupported_profile
-            .to_string()
-            .contains("secret_backend_profile_unsupported"));
+        assert!(
+            unsupported_profile
+                .to_string()
+                .contains("secret_backend_profile_unsupported")
+        );
     }
 
     #[test]
@@ -26472,53 +27218,65 @@ mod tests {
         let _lock = ENV_TEST_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _restore = EnvRestore::capture(KEYS);
-        for key in KEYS {
-            std::env::remove_var(key);
-        }
+        with_unset_env(KEYS, || {
+            assert!(GatewayConfig::from_env().export_object_storage.is_none());
 
-        assert!(GatewayConfig::from_env().export_object_storage.is_none());
-
-        std::env::set_var(
-            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_URL",
-            " https://objects.example/gateway-exports ",
-        );
-        std::env::set_var(
-            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_AUTHORIZATION",
-            " Bearer export-object-token ",
-        );
-        std::env::set_var(
-            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_TIMEOUT_SECONDS",
-            "5",
-        );
-        let config = GatewayConfig::from_env();
-        let object_storage = config
-            .export_object_storage
-            .as_ref()
-            .unwrap_or_else(|| panic!("object storage config should be enabled"));
-        let debug_text = format!("{object_storage:?}");
-        assert_eq!(
-            object_storage.base_url,
-            "https://objects.example/gateway-exports"
-        );
-        assert_eq!(
-            object_storage
-                .authorization_header
-                .as_ref()
-                .map(secrecy::ExposeSecret::expose_secret),
-            Some("Bearer export-object-token")
-        );
-        assert_eq!(object_storage.timeout_seconds, 5);
-        assert!(!debug_text.contains("export-object-token"));
-
-        std::env::set_var(
-            "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_TIMEOUT_SECONDS",
-            "999",
-        );
-        let fallback = GatewayConfig::from_env()
-            .export_object_storage
-            .unwrap_or_else(|| panic!("object storage config should remain enabled"));
-        assert_eq!(fallback.timeout_seconds, 10);
+            with_env(
+                &[
+                    (
+                        "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_URL",
+                        " https://objects.example/gateway-exports ",
+                    ),
+                    (
+                        "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_AUTHORIZATION",
+                        " Bearer export-object-token ",
+                    ),
+                    (
+                        "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_TIMEOUT_SECONDS",
+                        "5",
+                    ),
+                ],
+                || {
+                    let config = GatewayConfig::from_env();
+                    let object_storage = config
+                        .export_object_storage
+                        .as_ref()
+                        .unwrap_or_else(|| panic!("object storage config should be enabled"));
+                    let debug_text = format!("{object_storage:?}");
+                    assert_eq!(
+                        object_storage.base_url,
+                        "https://objects.example/gateway-exports"
+                    );
+                    assert_eq!(
+                        object_storage
+                            .authorization_header
+                            .as_ref()
+                            .map(secrecy::ExposeSecret::expose_secret),
+                        Some("Bearer export-object-token")
+                    );
+                    assert_eq!(object_storage.timeout_seconds, 5);
+                    assert!(!debug_text.contains("export-object-token"));
+                },
+            );
+            with_env(
+                &[
+                    (
+                        "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_URL",
+                        " https://objects.example/gateway-exports ",
+                    ),
+                    (
+                        "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_TIMEOUT_SECONDS",
+                        "999",
+                    ),
+                ],
+                || {
+                    let fallback = GatewayConfig::from_env()
+                        .export_object_storage
+                        .unwrap_or_else(|| panic!("object storage config should remain enabled"));
+                    assert_eq!(fallback.timeout_seconds, 10);
+                },
+            );
+        });
 
         let invalid_production = GatewayConfig {
             environment: "production".to_owned(),
@@ -26543,9 +27301,11 @@ mod tests {
             Ok(()) => panic!("unsafe production object storage URL should be rejected"),
             Err(error) => error,
         };
-        assert!(error
-            .to_string()
-            .contains("export_object_storage_url_invalid"));
+        assert!(
+            error
+                .to_string()
+                .contains("export_object_storage_url_invalid")
+        );
     }
 
     #[test]
@@ -26560,40 +27320,48 @@ mod tests {
         let _lock = ENV_TEST_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _restore = EnvRestore::capture(KEYS);
-        for key in KEYS {
-            std::env::remove_var(key);
-        }
+        with_unset_env(KEYS, || {
+            let defaults = GatewayConfig::from_env();
+            assert_eq!(
+                defaults.background_worker_mode,
+                BackgroundWorkerMode::Enabled
+            );
+            assert_eq!(defaults.worker_id, None);
+            assert_eq!(defaults.worker_tick_interval_seconds, 30);
+            assert_eq!(defaults.notification_worker_batch_limit, 100);
 
-        let defaults = GatewayConfig::from_env();
-        assert_eq!(
-            defaults.background_worker_mode,
-            BackgroundWorkerMode::Enabled
-        );
-        assert_eq!(defaults.worker_id, None);
-        assert_eq!(defaults.worker_tick_interval_seconds, 30);
-        assert_eq!(defaults.notification_worker_batch_limit, 100);
-
-        std::env::set_var("STARWEAVER_GATEWAY_BACKGROUND_WORKERS", "off");
-        std::env::set_var("STARWEAVER_GATEWAY_WORKER_ID", " gateway-worker-a ");
-        std::env::set_var("STARWEAVER_GATEWAY_WORKER_TICK_INTERVAL_SECONDS", "5");
-        std::env::set_var("STARWEAVER_GATEWAY_NOTIFICATION_WORKER_BATCH_LIMIT", "25");
-        let configured = GatewayConfig::from_env();
-        assert_eq!(
-            configured.background_worker_mode,
-            BackgroundWorkerMode::Disabled
-        );
-        assert_eq!(configured.worker_id.as_deref(), Some("gateway-worker-a"));
-        assert_eq!(configured.worker_tick_interval_seconds, 5);
-        assert_eq!(configured.notification_worker_batch_limit, 25);
-
-        std::env::set_var("STARWEAVER_GATEWAY_WORKER_ID", "bad/id");
-        std::env::set_var("STARWEAVER_GATEWAY_WORKER_TICK_INTERVAL_SECONDS", "0");
-        std::env::set_var("STARWEAVER_GATEWAY_NOTIFICATION_WORKER_BATCH_LIMIT", "0");
-        let invalid = GatewayConfig::from_env();
-        assert_eq!(invalid.worker_id, None);
-        assert_eq!(invalid.worker_tick_interval_seconds, 30);
-        assert_eq!(invalid.notification_worker_batch_limit, 100);
+            with_env(
+                &[
+                    ("STARWEAVER_GATEWAY_BACKGROUND_WORKERS", "off"),
+                    ("STARWEAVER_GATEWAY_WORKER_ID", " gateway-worker-a "),
+                    ("STARWEAVER_GATEWAY_WORKER_TICK_INTERVAL_SECONDS", "5"),
+                    ("STARWEAVER_GATEWAY_NOTIFICATION_WORKER_BATCH_LIMIT", "25"),
+                ],
+                || {
+                    let configured = GatewayConfig::from_env();
+                    assert_eq!(
+                        configured.background_worker_mode,
+                        BackgroundWorkerMode::Disabled
+                    );
+                    assert_eq!(configured.worker_id.as_deref(), Some("gateway-worker-a"));
+                    assert_eq!(configured.worker_tick_interval_seconds, 5);
+                    assert_eq!(configured.notification_worker_batch_limit, 25);
+                },
+            );
+            with_env(
+                &[
+                    ("STARWEAVER_GATEWAY_WORKER_ID", "bad/id"),
+                    ("STARWEAVER_GATEWAY_WORKER_TICK_INTERVAL_SECONDS", "0"),
+                    ("STARWEAVER_GATEWAY_NOTIFICATION_WORKER_BATCH_LIMIT", "0"),
+                ],
+                || {
+                    let invalid = GatewayConfig::from_env();
+                    assert_eq!(invalid.worker_id, None);
+                    assert_eq!(invalid.worker_tick_interval_seconds, 30);
+                    assert_eq!(invalid.notification_worker_batch_limit, 100);
+                },
+            );
+        });
     }
 
     #[test]
@@ -26623,44 +27391,51 @@ mod tests {
         let _lock = ENV_TEST_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _restore = EnvRestore::capture(KEYS);
-        for key in KEYS {
-            std::env::remove_var(key);
-        }
-
-        assert_eq!(
-            GatewayConfig::from_env().dependency_probe_mode,
-            DependencyProbeMode::Configured
-        );
-
-        std::env::set_var(
-            "STARWEAVER_GATEWAY_DATABASE_URL",
-            "postgres://gateway.example/starweaver",
-        );
-        assert_eq!(
-            GatewayConfig::from_env().dependency_probe_mode,
-            DependencyProbeMode::Live
-        );
-
-        std::env::set_var("STARWEAVER_GATEWAY_DEPENDENCY_PROBE_MODE", "configured");
-        std::env::set_var("STARWEAVER_GATEWAY_READINESS_PROBE_TIMEOUT_MS", "50");
-        let config = GatewayConfig::from_env();
-        assert_eq!(
-            config.dependency_probe_mode,
-            DependencyProbeMode::Configured
-        );
-        assert_eq!(config.readiness_probe_timeout_ms, 50);
-
-        std::env::remove_var("STARWEAVER_GATEWAY_DATABASE_URL");
-        std::env::remove_var("STARWEAVER_GATEWAY_DEPENDENCY_PROBE_MODE");
-        std::env::set_var("STARWEAVER_GATEWAY_ENV", "production");
-        assert_eq!(
-            GatewayConfig::from_env().dependency_probe_mode,
-            DependencyProbeMode::Live
-        );
-
-        std::env::set_var("STARWEAVER_GATEWAY_RUNTIME_STORE", "Postgres");
-        assert_eq!(GatewayConfig::from_env().runtime_store_profile, "postgres");
+        with_unset_env(KEYS, || {
+            assert_eq!(
+                GatewayConfig::from_env().dependency_probe_mode,
+                DependencyProbeMode::Configured
+            );
+            with_env(
+                &[(
+                    "STARWEAVER_GATEWAY_DATABASE_URL",
+                    "postgres://gateway.example/starweaver",
+                )],
+                || {
+                    assert_eq!(
+                        GatewayConfig::from_env().dependency_probe_mode,
+                        DependencyProbeMode::Live
+                    );
+                },
+            );
+            with_env(
+                &[
+                    (
+                        "STARWEAVER_GATEWAY_DATABASE_URL",
+                        "postgres://gateway.example/starweaver",
+                    ),
+                    ("STARWEAVER_GATEWAY_DEPENDENCY_PROBE_MODE", "configured"),
+                    ("STARWEAVER_GATEWAY_READINESS_PROBE_TIMEOUT_MS", "50"),
+                ],
+                || {
+                    let config = GatewayConfig::from_env();
+                    assert_eq!(
+                        config.dependency_probe_mode,
+                        DependencyProbeMode::Configured
+                    );
+                    assert_eq!(config.readiness_probe_timeout_ms, 50);
+                },
+            );
+            with_env(&[("STARWEAVER_GATEWAY_ENV", "production")], || {
+                assert_eq!(
+                    GatewayConfig::from_env().dependency_probe_mode,
+                    DependencyProbeMode::Live
+                );
+            });
+            with_env(&[("STARWEAVER_GATEWAY_RUNTIME_STORE", "Postgres")], || {
+                assert_eq!(GatewayConfig::from_env().runtime_store_profile, "postgres");
+            });
+        });
     }
 
     #[test]
@@ -26692,58 +27467,61 @@ mod tests {
         let _lock = ENV_TEST_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _restore = EnvRestore::capture(KEYS);
-        for key in KEYS {
-            std::env::remove_var(key);
-        }
+        with_unset_env(KEYS, || {
+            with_env(
+                &[
+                    ("STARWEAVER_GATEWAY_ENV", "production"),
+                    ("STARWEAVER_GATEWAY_RUNTIME_STORE", "postgres"),
+                    (
+                        "STARWEAVER_GATEWAY_DATABASE_URL",
+                        "postgres://gateway.example/starweaver",
+                    ),
+                    ("STARWEAVER_GATEWAY_REDIS_URL", "rediss://redis.example/0"),
+                    ("STARWEAVER_GATEWAY_HOT_STATE_BACKEND", "Redis"),
+                    ("STARWEAVER_GATEWAY_SECRET_BACKEND", "file"),
+                    (
+                        "STARWEAVER_GATEWAY_SECRET_BACKEND_FILE_DIR",
+                        "/var/lib/starweaver-gateway/secrets",
+                    ),
+                    ("STARWEAVER_GATEWAY_TELEMETRY", "otlp"),
+                    ("STARWEAVER_GATEWAY_REQUIRE_SNAPSHOT", "true"),
+                    (
+                        "STARWEAVER_GATEWAY_PUBLIC_BASE_URL",
+                        "https://gateway.example.com",
+                    ),
+                    (
+                        "STARWEAVER_GATEWAY_CORS_ALLOWED_ORIGINS",
+                        " https://app.example.com,https://admin.example.com/ ",
+                    ),
+                    ("STARWEAVER_GATEWAY_SESSION_COOKIE_SECURE", "true"),
+                    ("STARWEAVER_GATEWAY_SESSION_COOKIE_HTTP_ONLY", "true"),
+                    ("STARWEAVER_GATEWAY_SESSION_COOKIE_SAME_SITE", "Strict"),
+                ],
+                || {
+                    let config = GatewayConfig::from_env();
 
-        std::env::set_var("STARWEAVER_GATEWAY_ENV", "production");
-        std::env::set_var("STARWEAVER_GATEWAY_RUNTIME_STORE", "postgres");
-        std::env::set_var(
-            "STARWEAVER_GATEWAY_DATABASE_URL",
-            "postgres://gateway.example/starweaver",
-        );
-        std::env::set_var("STARWEAVER_GATEWAY_REDIS_URL", "rediss://redis.example/0");
-        std::env::set_var("STARWEAVER_GATEWAY_HOT_STATE_BACKEND", "Redis");
-        std::env::set_var("STARWEAVER_GATEWAY_SECRET_BACKEND", "file");
-        std::env::set_var(
-            "STARWEAVER_GATEWAY_SECRET_BACKEND_FILE_DIR",
-            "/var/lib/starweaver-gateway/secrets",
-        );
-        std::env::set_var("STARWEAVER_GATEWAY_TELEMETRY", "otlp");
-        std::env::set_var("STARWEAVER_GATEWAY_REQUIRE_SNAPSHOT", "true");
-        std::env::set_var(
-            "STARWEAVER_GATEWAY_PUBLIC_BASE_URL",
-            "https://gateway.example.com",
-        );
-        std::env::set_var(
-            "STARWEAVER_GATEWAY_CORS_ALLOWED_ORIGINS",
-            " https://app.example.com,https://admin.example.com/ ",
-        );
-        std::env::set_var("STARWEAVER_GATEWAY_SESSION_COOKIE_SECURE", "true");
-        std::env::set_var("STARWEAVER_GATEWAY_SESSION_COOKIE_HTTP_ONLY", "true");
-        std::env::set_var("STARWEAVER_GATEWAY_SESSION_COOKIE_SAME_SITE", "Strict");
-        let config = GatewayConfig::from_env();
-
-        assert_eq!(
-            config.public_base_url.as_deref(),
-            Some("https://gateway.example.com")
-        );
-        assert_eq!(
-            config.cors_allowed_origins,
-            vec![
-                "https://app.example.com".to_owned(),
-                "https://admin.example.com/".to_owned()
-            ]
-        );
-        assert!(config.session_cookie_secure);
-        assert!(config.session_cookie_http_only);
-        assert_eq!(config.session_cookie_same_site, "strict");
-        assert_eq!(config.runtime_store_profile, "postgres");
-        assert_eq!(config.hot_state_backend_profile, "redis");
-        if let Err(error) = validate_gateway_config(&config) {
-            panic!("secure production profile should pass validation: {error}");
-        }
+                    assert_eq!(
+                        config.public_base_url.as_deref(),
+                        Some("https://gateway.example.com")
+                    );
+                    assert_eq!(
+                        config.cors_allowed_origins,
+                        vec![
+                            "https://app.example.com".to_owned(),
+                            "https://admin.example.com/".to_owned()
+                        ]
+                    );
+                    assert!(config.session_cookie_secure);
+                    assert!(config.session_cookie_http_only);
+                    assert_eq!(config.session_cookie_same_site, "strict");
+                    assert_eq!(config.runtime_store_profile, "postgres");
+                    assert_eq!(config.hot_state_backend_profile, "redis");
+                    if let Err(error) = validate_gateway_config(&config) {
+                        panic!("secure production profile should pass validation: {error}");
+                    }
+                },
+            );
+        });
     }
 
     #[tokio::test]
@@ -26811,6 +27589,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn production_profile_rejects_unsafe_startup_config() {
         let error = match validate_gateway_config(&GatewayConfig {
             environment: "production".to_owned(),
@@ -26820,16 +27599,22 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(error
-            .to_string()
-            .contains("database_url_required,redis_url_required"));
+        assert!(
+            error
+                .to_string()
+                .contains("database_url_required,redis_url_required")
+        );
         assert!(error.to_string().contains("durable_runtime_store_required"));
-        assert!(error
-            .to_string()
-            .contains("durable_hot_state_backend_required"));
-        assert!(error
-            .to_string()
-            .contains("durable_secret_backend_required"));
+        assert!(
+            error
+                .to_string()
+                .contains("durable_hot_state_backend_required")
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("durable_secret_backend_required")
+        );
         assert!(error.to_string().contains("telemetry_required"));
         assert!(error.to_string().contains("public_base_url_https_required"));
         assert!(error.to_string().contains("cors_allowed_origins_required"));
@@ -26858,18 +27643,26 @@ mod tests {
             Ok(()) => panic!("invalid production security profile should be rejected"),
             Err(error) => error,
         };
-        assert!(invalid_security
-            .to_string()
-            .contains("public_base_url_https_required"));
-        assert!(invalid_security
-            .to_string()
-            .contains("cors_allowed_origins_invalid"));
-        assert!(invalid_security
-            .to_string()
-            .contains("http_only_session_cookie_required"));
-        assert!(invalid_security
-            .to_string()
-            .contains("session_cookie_same_site_invalid"));
+        assert!(
+            invalid_security
+                .to_string()
+                .contains("public_base_url_https_required")
+        );
+        assert!(
+            invalid_security
+                .to_string()
+                .contains("cors_allowed_origins_invalid")
+        );
+        assert!(
+            invalid_security
+                .to_string()
+                .contains("http_only_session_cookie_required")
+        );
+        assert!(
+            invalid_security
+                .to_string()
+                .contains("session_cookie_same_site_invalid")
+        );
 
         let missing_postgres_url = match validate_gateway_config(&GatewayConfig {
             runtime_store_profile: "postgres".to_owned(),
@@ -26878,9 +27671,11 @@ mod tests {
             Ok(()) => panic!("postgres runtime store should require a database URL"),
             Err(error) => error,
         };
-        assert!(missing_postgres_url
-            .to_string()
-            .contains("postgres_runtime_store_database_url_required"));
+        assert!(
+            missing_postgres_url
+                .to_string()
+                .contains("postgres_runtime_store_database_url_required")
+        );
 
         let unsupported_store = match validate_gateway_config(&GatewayConfig {
             runtime_store_profile: "sqlite".to_owned(),
@@ -26889,9 +27684,11 @@ mod tests {
             Ok(()) => panic!("unsupported runtime store should be rejected"),
             Err(error) => error,
         };
-        assert!(unsupported_store
-            .to_string()
-            .contains("runtime_store_profile_unsupported"));
+        assert!(
+            unsupported_store
+                .to_string()
+                .contains("runtime_store_profile_unsupported")
+        );
 
         let unsupported_hot_state = match validate_gateway_config(&GatewayConfig {
             hot_state_backend_profile: "dynamodb".to_owned(),
@@ -26900,9 +27697,11 @@ mod tests {
             Ok(()) => panic!("unsupported hot-state backend should be rejected"),
             Err(error) => error,
         };
-        assert!(unsupported_hot_state
-            .to_string()
-            .contains("hot_state_backend_profile_unsupported"));
+        assert!(
+            unsupported_hot_state
+                .to_string()
+                .contains("hot_state_backend_profile_unsupported")
+        );
 
         let unsupported_secret_backend = match validate_gateway_config(&GatewayConfig {
             secret_backend_profile: "gcp-secret-manager".to_owned(),
@@ -26911,9 +27710,11 @@ mod tests {
             Ok(()) => panic!("unsupported secret backend profile should be rejected"),
             Err(error) => error,
         };
-        assert!(unsupported_secret_backend
-            .to_string()
-            .contains("secret_backend_profile_unsupported"));
+        assert!(
+            unsupported_secret_backend
+                .to_string()
+                .contains("secret_backend_profile_unsupported")
+        );
     }
 
     #[tokio::test]
@@ -27627,9 +28428,11 @@ mod tests {
             decision_list_body["route_decisions"][0]["provider_endpoint_id"],
             endpoint_id
         );
-        assert!(decision_list_body["route_decisions"][0]["request_id"]
-            .as_str()
-            .is_some_and(|request_id| request_id.starts_with("req_")));
+        assert!(
+            decision_list_body["route_decisions"][0]["request_id"]
+                .as_str()
+                .is_some_and(|request_id| request_id.starts_with("req_"))
+        );
         assert_ne!(
             decision_list_body["route_decisions"][0]["route_decision_id"],
             "rd_cross_tenant_dashboard_scope"
@@ -27697,11 +28500,11 @@ mod tests {
             attempt_list_body["route_attempts"][0]["route_decision_id"],
             route_decision_id
         );
-        let route_attempt_event_id = attempt_list_body["route_attempts"][0]
-            ["route_attempt_event_id"]
-            .as_str()
-            .unwrap_or_else(|| panic!("route attempt id should be present"))
-            .to_owned();
+        let route_attempt_event_id =
+            attempt_list_body["route_attempts"][0]["route_attempt_event_id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("route attempt id should be present"))
+                .to_owned();
 
         let attempt_get_response = get_admin(
             store,
@@ -27879,9 +28682,11 @@ mod tests {
         assert!(request_id_header.starts_with("req_"));
         assert_ne!(request_id_header, "bad request id");
         assert_eq!(body["error"]["request_id"], request_id_header);
-        assert!(body["error"]["trace_id"]
-            .as_str()
-            .is_some_and(|trace_id| trace_id.starts_with("tr_")));
+        assert!(
+            body["error"]["trace_id"]
+                .as_str()
+                .is_some_and(|trace_id| trace_id.starts_with("tr_"))
+        );
     }
 
     #[tokio::test]
@@ -28157,9 +28962,11 @@ mod tests {
         assert_eq!(body["selected"]["model_target_id"], "mt_openai");
         assert_eq!(body["selected"]["provider_endpoint_id"], "pep_openai");
         assert_eq!(body["upstream_call"], false);
-        assert!(body["filtered_summary"]
-            .as_array()
-            .is_some_and(Vec::is_empty));
+        assert!(
+            body["filtered_summary"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+        );
         assert!(store.route_decisions().is_empty());
         assert!(store.route_attempts().is_empty());
         assert!(store.usage_events_for_tenant(TEST_TENANT_ID).is_empty());
@@ -28268,9 +29075,11 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body:?}");
         assert_eq!(body["valid"], false);
         assert_eq!(body["schema"], "gateway.admin.catalog_import_validation.v1");
-        assert!(body["errors"].as_array().is_some_and(|errors| errors
-            .iter()
-            .any(|error| error["reason"] == "raw_secret_material_forbidden")));
+        assert!(body["errors"].as_array().is_some_and(|errors| {
+            errors
+                .iter()
+                .any(|error| error["reason"] == "raw_secret_material_forbidden")
+        }));
         let diagnostics = store.validation_diagnostics_for_tenant(TEST_TENANT_ID);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].resource_kind, "CatalogImport");
@@ -28295,12 +29104,16 @@ mod tests {
         assert_eq!(create_status, StatusCode::OK, "{create_body:?}");
         assert_eq!(create_body["resource"]["status"], "active");
         assert_eq!(create_body["resource"]["resource_count"], 2);
-        assert!(create_body["resource"]["document_checksum"]
-            .as_str()
-            .is_some_and(|checksum| checksum.starts_with("sha256:")));
-        assert!(create_body["resource"]["validation_id"]
-            .as_str()
-            .is_some_and(|validation_id| validation_id.starts_with("vdiag_")));
+        assert!(
+            create_body["resource"]["document_checksum"]
+                .as_str()
+                .is_some_and(|checksum| checksum.starts_with("sha256:"))
+        );
+        assert!(
+            create_body["resource"]["validation_id"]
+                .as_str()
+                .is_some_and(|validation_id| validation_id.starts_with("vdiag_"))
+        );
         let import_id = create_body["resource"]["id"]
             .as_str()
             .unwrap_or_else(|| panic!("catalog import id should be present"))
@@ -28570,6 +29383,183 @@ mod tests {
                 .sum::<i64>(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn responses_websocket_fake_transport_records_route_attempt_and_usage() {
+        let (store, raw_key) = gateway_store_with_runtime_access(true);
+        publish_catalog_snapshot(&store, catalog_payload());
+        let (gateway_url, gateway_handle) = spawn_gateway_for_websocket_test(AppState::new(
+            GatewayConfig::default(),
+            store.clone(),
+        ))
+        .await;
+        let mut socket = connect_gateway_responses_websocket(&gateway_url, &raw_key, None).await;
+
+        socket
+            .send(TungsteniteMessage::Text(
+                json!({
+                    "type": "response.create",
+                    "model": "gpt-test",
+                    "input": "hello"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("websocket request should send: {error}"));
+        let event = next_client_websocket_json(&mut socket).await;
+        let _ = socket.send(TungsteniteMessage::Close(None)).await;
+        wait_for_runtime_accounting(&store, 1, 1).await;
+        gateway_handle.abort();
+
+        let route_decisions = store.route_decisions();
+        let route_attempts = store.route_attempts();
+        let usage_events = store.usage_events_for_tenant(TEST_TENANT_ID);
+        assert_eq!(event["type"], "response.completed");
+        assert_eq!(event["response"]["model"], "gpt-4.1-mini");
+        assert_eq!(route_decisions.len(), 1);
+        assert_eq!(route_decisions[0].status, RouteDecisionStatus::Selected);
+        assert_eq!(route_attempts.len(), 1);
+        assert_eq!(
+            route_attempts[0].route_decision_id,
+            route_decisions[0].route_decision_id
+        );
+        assert_eq!(route_attempts[0].status, RouteAttemptStatus::Completed);
+        assert_eq!(usage_events.len(), 1);
+        assert_eq!(
+            usage_events[0].route_decision_id.as_deref(),
+            Some(route_decisions[0].route_decision_id.as_str())
+        );
+        assert_eq!(usage_events[0].usage_payload["input_tokens"], 1);
+        assert_eq!(usage_events[0].usage_payload["output_tokens"], 2);
+    }
+
+    #[tokio::test]
+    async fn responses_websocket_rejects_model_switch_after_pin() {
+        let (store, raw_key) = gateway_store_with_runtime_access(true);
+        publish_catalog_snapshot(&store, catalog_payload());
+        let (gateway_url, gateway_handle) = spawn_gateway_for_websocket_test(AppState::new(
+            GatewayConfig::default(),
+            store.clone(),
+        ))
+        .await;
+        let mut socket = connect_gateway_responses_websocket(&gateway_url, &raw_key, None).await;
+
+        socket
+            .send(TungsteniteMessage::Text(
+                json!({
+                    "type": "response.create",
+                    "model": "gpt-test",
+                    "input": "first"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("first websocket request should send: {error}"));
+        let completed = next_client_websocket_json(&mut socket).await;
+        assert_eq!(completed["type"], "response.completed");
+
+        socket
+            .send(TungsteniteMessage::Text(
+                json!({
+                    "type": "response.create",
+                    "model": "other-model",
+                    "input": "second"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("second websocket request should send: {error}"));
+        let error = next_client_websocket_json(&mut socket).await;
+        let _ = socket.send(TungsteniteMessage::Close(None)).await;
+        wait_for_runtime_accounting(&store, 1, 1).await;
+        gateway_handle.abort();
+
+        assert_eq!(error["type"], "error");
+        assert_eq!(error["error"]["code"], "model_switch_not_supported");
+        assert_eq!(store.route_attempts().len(), 1);
+        assert_eq!(store.usage_events_for_tenant(TEST_TENANT_ID).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn responses_websocket_http_transport_proxies_upstream_text_frames() {
+        let (store, raw_key) = gateway_store_with_runtime_access(true);
+        let secret_ref_id = seed_secret_ref_for_test(
+            &store,
+            Some(TEST_ORGANIZATION_ID),
+            Some(TEST_PROJECT_ID),
+            "live responses websocket provider authorization",
+            "openai-live-secret",
+        );
+        let (provider_url, captured_requests, provider_handle) =
+            spawn_local_responses_websocket_provider().await;
+        let mut payload = catalog_payload();
+        payload["provider_endpoints"][0]["upstream_base_url"] = json!(provider_url);
+        payload["upstream_credentials"][0]["secret_ref_id"] = json!(secret_ref_id);
+        publish_catalog_snapshot(&store, payload);
+        let state = AppState::new(
+            GatewayConfig {
+                provider_transport_mode: ProviderTransportMode::Http,
+                ..GatewayConfig::default()
+            },
+            store.clone(),
+        );
+        let (gateway_url, gateway_handle) = spawn_gateway_for_websocket_test(state).await;
+        let mut socket =
+            connect_gateway_responses_websocket(&gateway_url, &raw_key, Some("session-ws")).await;
+
+        socket
+            .send(TungsteniteMessage::Text(
+                json!({
+                    "type": "response.create",
+                    "model": "gpt-test",
+                    "input": "hello upstream",
+                    "prompt_cache_key": "client-value"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("websocket request should send: {error}"));
+        let delta = next_client_websocket_json(&mut socket).await;
+        let completed = next_client_websocket_json(&mut socket).await;
+        let captured = captured_requests
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap_or_else(|error| panic!("provider should capture websocket frame: {error}"));
+        let _ = socket.send(TungsteniteMessage::Close(None)).await;
+        wait_for_runtime_accounting(&store, 1, 1).await;
+        gateway_handle.abort();
+        provider_handle.abort();
+
+        let upstream_body: Value = serde_json::from_slice(&captured.body)
+            .unwrap_or_else(|error| panic!("captured websocket body should be json: {error}"));
+        let route_attempts = store.route_attempts();
+        let usage_events = store.usage_events_for_tenant(TEST_TENANT_ID);
+        assert_eq!(delta["type"], "response.output_text.delta");
+        assert_eq!(delta["delta"], "live");
+        assert_eq!(completed["type"], "response.completed");
+        assert_eq!(completed["response"]["id"], "resp_ws_live");
+        assert_eq!(completed["response"]["usage"]["input_tokens"], 7);
+        assert_eq!(completed["response"]["usage"]["output_tokens"], 11);
+        assert_eq!(upstream_body["type"], "response.create");
+        assert_eq!(upstream_body["model"], "gpt-4.1-mini");
+        assert_eq!(upstream_body["input"], "hello upstream");
+        assert_eq!(upstream_body["prompt_cache_key"], "session-ws");
+        assert_eq!(
+            captured
+                .headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer openai-live-secret")
+        );
+        assert_eq!(route_attempts.len(), 1);
+        assert_eq!(route_attempts[0].status, RouteAttemptStatus::Completed);
+        assert_eq!(usage_events.len(), 1);
+        assert_eq!(usage_events[0].usage_payload["input_tokens"], 7);
+        assert_eq!(usage_events[0].usage_payload["output_tokens"], 11);
     }
 
     #[tokio::test]
@@ -28945,9 +29935,11 @@ mod tests {
             events_body["events"][0]["protocol_family"],
             "openai_responses"
         );
-        assert!(events_body["events"][0]
-            .as_object()
-            .is_some_and(|event| !event.contains_key("upstream_credential_id")));
+        assert!(
+            events_body["events"][0]
+                .as_object()
+                .is_some_and(|event| !event.contains_key("upstream_credential_id"))
+        );
         assert_eq!(by_project_body["rows"][0]["group_id"], "prj_test");
         assert_eq!(by_project_member_body["rows"][0]["group_id"], "pm_test");
         assert_eq!(by_model_body["rows"][0]["group_kind"], "model_alias");
@@ -29079,9 +30071,11 @@ mod tests {
         assert_eq!(body["resource"]["status"], "failed");
         assert_eq!(body["resource"]["storage_backend"], "object_storage");
         assert_eq!(body["manifest"]["record_count"], 0);
-        assert!(body["manifest"]["object_ref"]
-            .as_str()
-            .is_some_and(|object_ref| object_ref.starts_with("object-storage://unavailable/")));
+        assert!(
+            body["manifest"]["object_ref"]
+                .as_str()
+                .is_some_and(|object_ref| object_ref.starts_with("object-storage://unavailable/"))
+        );
         assert_eq!(body["manifest"]["manifest"]["status"], "failed");
         assert_eq!(
             body["manifest"]["manifest"]["object"]["backend"],
@@ -29174,9 +30168,11 @@ mod tests {
         assert_eq!(body["resource"]["status"], "completed");
         assert_eq!(body["resource"]["storage_backend"], "file_object_storage");
         assert_eq!(body["manifest"]["record_count"], 1);
-        assert!(body["manifest"]["object_ref"]
-            .as_str()
-            .is_some_and(|object_ref| object_ref.starts_with("file-object://gateway-exports/")));
+        assert!(
+            body["manifest"]["object_ref"]
+                .as_str()
+                .is_some_and(|object_ref| object_ref.starts_with("file-object://gateway-exports/"))
+        );
         assert_eq!(body["manifest"]["manifest"]["status"], "completed");
         assert_eq!(
             body["manifest"]["manifest"]["object"]["backend"],
@@ -29394,9 +30390,11 @@ mod tests {
         assert_eq!(audit_status, StatusCode::OK, "{audit_body:?}");
         assert_eq!(audit_body["resource"]["export_kind"], "audit");
         assert!(audit_body["manifest"]["record_count"].as_i64().unwrap_or(0) >= 1);
-        assert!(audit_body["manifest"]["manifest"]["rows"]
-            .as_array()
-            .is_some_and(|rows| rows.iter().any(|row| row["kind"] == "audit_event")));
+        assert!(
+            audit_body["manifest"]["manifest"]["rows"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|row| row["kind"] == "audit_event"))
+        );
         let audit_text = audit_body.to_string();
         assert!(!audit_text.contains("sec_openai"));
     }
@@ -29754,9 +30752,11 @@ mod tests {
         let blocked_status = blocked.status();
         let blocked_body = response_json(blocked).await;
         assert_eq!(blocked_status, StatusCode::BAD_REQUEST, "{blocked_body:?}");
-        assert!(blocked_body["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("config_frozen")));
+        assert!(
+            blocked_body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("config_frozen"))
+        );
 
         let emergency_after_freeze = post_admin_json(
             store.clone(),
@@ -29964,9 +30964,11 @@ mod tests {
 
         assert_eq!(blocked_status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(blocked_body["error"]["code"], "gateway.budget.exceeded");
-        assert!(blocked_body["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("emergency_force_budget_block")));
+        assert!(
+            blocked_body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("emergency_force_budget_block"))
+        );
         assert!(store.usage_events_for_tenant(TEST_TENANT_ID).is_empty());
         assert!(store.route_attempts().is_empty());
         assert!(store.route_decisions().iter().any(|decision| {
@@ -30793,9 +31795,11 @@ mod tests {
 
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(body["error"]["code"], "gateway.budget.exceeded");
-        assert!(body["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("budget_hot_state_unavailable")));
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("budget_hot_state_unavailable"))
+        );
         assert!(store.usage_events_for_tenant(TEST_TENANT_ID).is_empty());
         assert!(store.route_attempts().is_empty());
         assert!(store.route_decisions().iter().any(|decision| {
@@ -30823,9 +31827,11 @@ mod tests {
 
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(body["error"]["code"], "gateway.quota.exceeded");
-        assert!(body["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("hot_state_unavailable")));
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("hot_state_unavailable"))
+        );
         assert!(store.usage_events_for_tenant(TEST_TENANT_ID).is_empty());
         assert!(store.route_attempts().is_empty());
         assert!(store.route_decisions().iter().any(|decision| {
@@ -30885,9 +31891,11 @@ mod tests {
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(second_status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(second_body["error"]["code"], "gateway.quota.exceeded");
-        assert!(second_body["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("fail_limited_allowance_exhausted")));
+        assert!(
+            second_body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("fail_limited_allowance_exhausted"))
+        );
         assert_eq!(store.usage_events_for_tenant(TEST_TENANT_ID).len(), 1);
         assert_eq!(
             store
@@ -30986,9 +31994,11 @@ mod tests {
         let status = response.status();
         let body = response_json(response).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("protocol_mismatch")));
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("protocol_mismatch"))
+        );
         assert!(store.authorization_decisions().is_empty());
         assert!(store.route_decisions().is_empty());
         assert!(store.route_attempts().is_empty());
@@ -31226,10 +32236,12 @@ mod tests {
             route_decisions[0].sticky_miss_reason.as_deref(),
             Some("endpoint_health_blocked")
         );
-        assert!(route_decisions[0]
-            .filtered_summary
-            .iter()
-            .any(|summary| summary.reason == RouteFilterReason::EndpointHealthBlocked));
+        assert!(
+            route_decisions[0]
+                .filtered_summary
+                .iter()
+                .any(|summary| summary.reason == RouteFilterReason::EndpointHealthBlocked)
+        );
         let sticky_routes = store.sticky_routes();
         assert_eq!(sticky_routes.len(), 1);
         assert_eq!(sticky_routes[0].model_target_id, "mt_openai");
@@ -31354,10 +32366,12 @@ mod tests {
         assert_eq!(store.audit_events().len(), 1);
         assert_eq!(store.audit_events()[0].event_type, "gateway.config.publish");
         assert_eq!(store.authorization_decisions().len(), 2);
-        assert!(store
-            .authorization_decisions()
-            .iter()
-            .all(|decision| decision.allowed));
+        assert!(
+            store
+                .authorization_decisions()
+                .iter()
+                .all(|decision| decision.allowed)
+        );
     }
 
     #[tokio::test]
@@ -31425,9 +32439,11 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["valid"], false);
-        assert!(body["validation_id"]
-            .as_str()
-            .is_some_and(|validation_id| validation_id.starts_with("vdiag_")));
+        assert!(
+            body["validation_id"]
+                .as_str()
+                .is_some_and(|validation_id| validation_id.starts_with("vdiag_"))
+        );
         assert_eq!(body["errors"].as_array().map_or(0, Vec::len), 1);
         let validation_id = body["validation_id"]
             .as_str()
@@ -32012,14 +33028,16 @@ mod tests {
         assert!(!get_text.contains(raw_key.as_str()));
         assert_eq!(get_body["resource"]["id"], api_key_id);
         assert_eq!(get_body["resource"]["status"], "active");
-        assert!(verify_api_key(
-            &store,
-            &raw_key,
-            "req_api_key_created".to_owned(),
-            "trace_api_key_created".to_owned(),
-            chrono::Utc::now(),
-        )
-        .is_ok());
+        assert!(
+            verify_api_key(
+                &store,
+                &raw_key,
+                "req_api_key_created".to_owned(),
+                "trace_api_key_created".to_owned(),
+                chrono::Utc::now(),
+            )
+            .is_ok()
+        );
 
         let replay =
             create_project_api_key_request(store.clone(), &raw_session, "idem_api_key_create")
@@ -32066,22 +33084,26 @@ mod tests {
         assert_eq!(rotate_body["resource"]["id"], api_key_id);
         assert_eq!(rotate_body["one_time_secret_available"], true);
         assert_ne!(rotated_raw_key, raw_key);
-        assert!(verify_api_key(
-            &store,
-            &raw_key,
-            "req_api_key_old".to_owned(),
-            "trace_api_key_old".to_owned(),
-            chrono::Utc::now(),
-        )
-        .is_err());
-        assert!(verify_api_key(
-            &store,
-            &rotated_raw_key,
-            "req_api_key_rotated".to_owned(),
-            "trace_api_key_rotated".to_owned(),
-            chrono::Utc::now(),
-        )
-        .is_ok());
+        assert!(
+            verify_api_key(
+                &store,
+                &raw_key,
+                "req_api_key_old".to_owned(),
+                "trace_api_key_old".to_owned(),
+                chrono::Utc::now(),
+            )
+            .is_err()
+        );
+        assert!(
+            verify_api_key(
+                &store,
+                &rotated_raw_key,
+                "req_api_key_rotated".to_owned(),
+                "trace_api_key_rotated".to_owned(),
+                chrono::Utc::now(),
+            )
+            .is_ok()
+        );
 
         let disable = post_admin_json(
             store.clone(),
@@ -32097,14 +33119,16 @@ mod tests {
         let disable_body = response_json(disable).await;
         assert_eq!(disable_status, StatusCode::OK, "{disable_body:?}");
         assert_eq!(disable_body["resource"]["status"], "disabled");
-        assert!(verify_api_key(
-            &store,
-            &rotated_raw_key,
-            "req_api_key_disabled".to_owned(),
-            "trace_api_key_disabled".to_owned(),
-            chrono::Utc::now(),
-        )
-        .is_err());
+        assert!(
+            verify_api_key(
+                &store,
+                &rotated_raw_key,
+                "req_api_key_disabled".to_owned(),
+                "trace_api_key_disabled".to_owned(),
+                chrono::Utc::now(),
+            )
+            .is_err()
+        );
         assert_eq!(store.audit_events().len(), 3);
         assert_eq!(store.audit_events()[0].event_type, "gateway.api_key.create");
         assert_eq!(store.audit_events()[1].event_type, "gateway.api_key.rotate");
@@ -32179,9 +33203,11 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["valid"], false);
         assert_eq!(body["errors"].as_array().map_or(0, Vec::len), 2);
-        assert!(store
-            .provider_endpoints_for_tenant(TEST_TENANT_ID)
-            .is_empty());
+        assert!(
+            store
+                .provider_endpoints_for_tenant(TEST_TENANT_ID)
+                .is_empty()
+        );
         assert!(store.audit_events().is_empty());
     }
 
@@ -32231,10 +33257,12 @@ mod tests {
             store.audit_events()[0].event_type,
             "gateway.provider_endpoint.create"
         );
-        assert!(!store.audit_events()[0].redacted_diff["upstream_base_url"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("token="));
+        assert!(
+            !store.audit_events()[0].redacted_diff["upstream_base_url"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("token=")
+        );
     }
 
     #[tokio::test]
@@ -32339,9 +33367,11 @@ mod tests {
         assert!(secret_ref_id.starts_with("sec_"));
         assert_eq!(first_body["resource"]["kind"], "secret_ref");
         assert_eq!(first_body["resource"]["display_mask"], "****1234");
-        assert!(first_body["resource"]["fingerprint"]
-            .as_str()
-            .is_some_and(|fingerprint| fingerprint.starts_with("sha256:")));
+        assert!(
+            first_body["resource"]["fingerprint"]
+                .as_str()
+                .is_some_and(|fingerprint| fingerprint.starts_with("sha256:"))
+        );
         assert!(first_body["resource"].get("secret_value").is_none());
         assert!(first_body["resource"].get("backend_locator").is_none());
         assert_eq!(second_body["idempotency_replayed"], true);
@@ -32351,9 +33381,11 @@ mod tests {
         assert_eq!(locator_status, StatusCode::OK);
         assert_eq!(locator_body["resource"]["id"], secret_ref_id);
         assert_eq!(locator_body["resource"]["backend_kind"], "memory");
-        assert!(locator_body["resource"]["backend_locator"]
-            .as_str()
-            .is_some_and(|locator| locator.starts_with("memory://gateway-secrets/sec_")));
+        assert!(
+            locator_body["resource"]["backend_locator"]
+                .as_str()
+                .is_some_and(|locator| locator.starts_with("memory://gateway-secrets/sec_"))
+        );
         assert!(locator_body["resource"].get("secret_value").is_none());
         assert_eq!(api_key_locator.status(), StatusCode::FORBIDDEN);
         assert_eq!(store.secret_refs_for_tenant(TEST_TENANT_ID).len(), 1);
@@ -32402,9 +33434,11 @@ mod tests {
         assert_eq!(body["resource"]["backend_kind"], "file");
         assert!(body["resource"].get("secret_value").is_none());
         assert!(body["resource"].get("backend_locator").is_none());
-        assert!(locator_body["resource"]["backend_locator"]
-            .as_str()
-            .is_some_and(|locator| locator.starts_with("file://")));
+        assert!(
+            locator_body["resource"]["backend_locator"]
+                .as_str()
+                .is_some_and(|locator| locator.starts_with("file://"))
+        );
         assert_eq!(
             store
                 .secret_value(&secret_ref_id)
@@ -32556,9 +33590,11 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["valid"], false);
         assert_eq!(body["errors"].as_array().map_or(0, Vec::len), 3);
-        assert!(store
-            .upstream_credentials_for_tenant(TEST_TENANT_ID)
-            .is_empty());
+        assert!(
+            store
+                .upstream_credentials_for_tenant(TEST_TENANT_ID)
+                .is_empty()
+        );
         assert!(store.audit_events().is_empty());
     }
 
@@ -32597,9 +33633,11 @@ mod tests {
             })
         }));
         assert_eq!(create.status(), StatusCode::BAD_REQUEST);
-        assert!(store
-            .upstream_credentials_for_tenant(TEST_TENANT_ID)
-            .is_empty());
+        assert!(
+            store
+                .upstream_credentials_for_tenant(TEST_TENANT_ID)
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -32702,9 +33740,11 @@ mod tests {
             rejected_body["error"]["message"],
             "bad request: codex_oauth_requires_codex_provider_endpoint"
         );
-        assert!(store
-            .codex_oauth_connections_for_tenant(TEST_TENANT_ID)
-            .is_empty());
+        assert!(
+            store
+                .codex_oauth_connections_for_tenant(TEST_TENANT_ID)
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -32790,9 +33830,11 @@ mod tests {
             "unauthenticated"
         );
         assert_eq!(revoke_body["resource"]["status"], "revoked");
-        assert!(connection_body["resource"]["fixed_profile"]["api_base_url"]
-            .as_str()
-            .is_some_and(|url| url == CODEX_API_BASE_URL));
+        assert!(
+            connection_body["resource"]["fixed_profile"]["api_base_url"]
+                .as_str()
+                .is_some_and(|url| url == CODEX_API_BASE_URL)
+        );
         assert!(!combined_text.contains("codex-access-token"));
         assert!(!combined_text.contains("codex-refresh-token"));
         assert!(!combined_text.contains(&token_secret_ref_id));
@@ -32891,11 +33933,13 @@ mod tests {
             first_body["events"][0]["id"],
             second_body["events"][0]["id"]
         );
-        assert!(filtered_body["events"]
-            .as_array()
-            .unwrap_or_else(|| panic!("events should be an array"))
-            .iter()
-            .all(|event| event["resource_kind"] == "ProviderEndpoint"));
+        assert!(
+            filtered_body["events"]
+                .as_array()
+                .unwrap_or_else(|| panic!("events should be an array"))
+                .iter()
+                .all(|event| event["resource_kind"] == "ProviderEndpoint")
+        );
     }
 
     #[tokio::test]
@@ -33403,9 +34447,11 @@ mod tests {
         assert!(errors.iter().any(|error| {
             error["field"] == "scope_id" && error["reason"] == "unknown_endpoint"
         }));
-        assert!(errors
-            .iter()
-            .any(|error| { error["field"] == "limit" && error["reason"] == "positive_required" }));
+        assert!(
+            errors.iter().any(|error| {
+                error["field"] == "limit" && error["reason"] == "positive_required"
+            })
+        );
         assert!(errors.iter().any(|error| {
             error["field"] == "scope_kind" && error["reason"] == "unsupported_counter_scope"
         }));
@@ -33590,9 +34636,11 @@ mod tests {
         assert!(errors.iter().any(|error| {
             error["field"] == "timeout_seconds" && error["reason"] == "invalid_timeout"
         }));
-        assert!(store
-            .otel_export_configs_for_tenant(TEST_TENANT_ID)
-            .is_empty());
+        assert!(
+            store
+                .otel_export_configs_for_tenant(TEST_TENANT_ID)
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -33631,20 +34679,24 @@ mod tests {
 
         assert_eq!(validation_status, StatusCode::OK);
         assert_eq!(validation_body["valid"], false);
-        assert!(validation_body["errors"]
-            .as_array()
-            .is_some_and(|errors| errors.iter().any(|error| {
-                error["field"] == "protocol" && error["reason"] == "unsupported_protocol"
-            })));
+        assert!(
+            validation_body["errors"]
+                .as_array()
+                .is_some_and(|errors| errors.iter().any(|error| {
+                    error["field"] == "protocol" && error["reason"] == "unsupported_protocol"
+                }))
+        );
         assert_eq!(create_status, StatusCode::BAD_REQUEST);
         assert_eq!(create_body["error"]["code"], "gateway.request.invalid");
         assert_eq!(
             create_body["error"]["message"],
             "bad request: validation_failed"
         );
-        assert!(store
-            .otel_export_configs_for_tenant(TEST_TENANT_ID)
-            .is_empty());
+        assert!(
+            store
+                .otel_export_configs_for_tenant(TEST_TENANT_ID)
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -33682,11 +34734,14 @@ mod tests {
             })
         }));
         assert_eq!(notification_body["valid"], false);
-        assert!(notification_body["errors"]
-            .as_array()
-            .is_some_and(|errors| errors.iter().any(|error| {
-                error["field"] == "signing_secret_ref_id" && error["reason"] == "unknown_secret_ref"
-            })));
+        assert!(
+            notification_body["errors"]
+                .as_array()
+                .is_some_and(|errors| errors.iter().any(|error| {
+                    error["field"] == "signing_secret_ref_id"
+                        && error["reason"] == "unknown_secret_ref"
+                }))
+        );
     }
 
     #[tokio::test]
@@ -33898,9 +34953,11 @@ mod tests {
         assert_eq!(get_status, StatusCode::OK);
         assert_eq!(get_body["resource"]["exporter_health_status"], "succeeded");
         assert_eq!(get_body["resource"]["exporter_failure_count"], 0);
-        assert!(get_body["resource"]["exported_metric_count"]
-            .as_i64()
-            .is_some_and(|count| count > 0));
+        assert!(
+            get_body["resource"]["exported_metric_count"]
+                .as_i64()
+                .is_some_and(|count| count > 0)
+        );
         assert_ne!(
             get_body["resource"]["last_successful_export_at"],
             serde_json::Value::Null
@@ -33968,9 +35025,11 @@ mod tests {
             "retryable_failed"
         );
         assert_eq!(get_body["resource"]["exporter_failure_count"], 1);
-        assert!(get_body["resource"]["dropped_metric_count"]
-            .as_i64()
-            .is_some_and(|count| count > 0));
+        assert!(
+            get_body["resource"]["dropped_metric_count"]
+                .as_i64()
+                .is_some_and(|count| count > 0)
+        );
         assert_eq!(
             get_body["resource"]["last_export_error"],
             "collector_unavailable"
@@ -34148,9 +35207,11 @@ mod tests {
             .unwrap_or_else(|| panic!("validation errors should be an array"));
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["valid"], false);
-        assert!(errors
-            .iter()
-            .any(|error| error["field"] == "name" && error["reason"] == "invalid_name"));
+        assert!(
+            errors
+                .iter()
+                .any(|error| error["field"] == "name" && error["reason"] == "invalid_name")
+        );
         assert!(errors.iter().any(|error| {
             error["field"] == "endpoint_config" && error["reason"] == "sensitive_endpoint_config"
         }));
@@ -34160,9 +35221,11 @@ mod tests {
         assert!(errors.iter().any(|error| {
             error["field"] == "signing_secret_ref_id" && error["reason"] == "required_secret_ref"
         }));
-        assert!(store
-            .notification_sinks_for_tenant(TEST_TENANT_ID)
-            .is_empty());
+        assert!(
+            store
+                .notification_sinks_for_tenant(TEST_TENANT_ID)
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -34429,9 +35492,11 @@ mod tests {
         assert!(errors.iter().any(|error| {
             error["field"] == "config_document.issuer" && error["reason"] == "invalid_issuer"
         }));
-        assert!(!errors
-            .iter()
-            .any(|error| error["field"] == "config_document.authorization_url"));
+        assert!(
+            !errors
+                .iter()
+                .any(|error| error["field"] == "config_document.authorization_url")
+        );
         assert!(errors.iter().any(|error| {
             error["field"] == "config_document.scopes" && error["reason"] == "invalid_scopes"
         }));
@@ -34604,9 +35669,11 @@ mod tests {
             csrf_token
         );
         assert_eq!(callback_body_json["created_user"], true);
-        assert!(callback_body_json["user"]["id"]
-            .as_str()
-            .is_some_and(|user_id| user_id.starts_with("usr_")));
+        assert!(
+            callback_body_json["user"]["id"]
+                .as_str()
+                .is_some_and(|user_id| user_id.starts_with("usr_"))
+        );
         assert_eq!(
             callback_body_json["user"]["default_organization_id"],
             serde_json::Value::Null
@@ -34615,9 +35682,11 @@ mod tests {
             callback_body_json["external_identity"]["provider_kind"],
             "oidc"
         );
-        assert!(callback_body_json["external_identity"]["email_hash"]
-            .as_str()
-            .is_some_and(|hash| hash.starts_with("sha256:")));
+        assert!(
+            callback_body_json["external_identity"]["email_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
         assert_eq!(
             session_body["organization_memberships"]
                 .as_array()
@@ -34760,9 +35829,11 @@ mod tests {
         assert_eq!(callback_status, StatusCode::OK, "{callback_body:?}");
         assert_eq!(callback_body["external_identity"]["provider_kind"], "oidc");
         assert_eq!(callback_body["created_user"], true);
-        assert!(callback_body["session"]["session_token"]
-            .as_str()
-            .is_some_and(|token| token.starts_with(SESSION_TOKEN_PREFIX)));
+        assert!(
+            callback_body["session"]["session_token"]
+                .as_str()
+                .is_some_and(|token| token.starts_with(SESSION_TOKEN_PREFIX))
+        );
         assert!(!callback_text.contains("oidc_authorization_code"));
         assert!(!callback_text.contains("id_token"));
         assert!(!callback_text.contains("access_token"));
@@ -34832,14 +35903,18 @@ mod tests {
                 .len(),
             session_count_before
         );
-        assert!(store
-            .external_identities_for_principal(TEST_TENANT_ID, TEST_USER_ID)
-            .is_empty());
+        assert!(
+            store
+                .external_identities_for_principal(TEST_TENANT_ID, TEST_USER_ID)
+                .is_empty()
+        );
         assert_eq!(store.audit_events().len(), audit_count_before);
-        assert!(!store
-            .audit_events()
-            .iter()
-            .any(|event| event.event_type == "gateway.auth.external_login"));
+        assert!(
+            !store
+                .audit_events()
+                .iter()
+                .any(|event| event.event_type == "gateway.auth.external_login")
+        );
     }
 
     #[tokio::test]
@@ -35015,6 +36090,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn organization_invitation_create_preview_and_accept_are_redacted() {
         let (store, raw_session) = gateway_store_with_admin_session();
         let created_body = create_organization_invitation_over_http(
@@ -35110,9 +36186,11 @@ mod tests {
         );
         assert!(!combined_text.contains(&invitation_token));
         assert!(!combined_text.contains("invitation_token_hash"));
-        assert!(store
-            .project_membership(TEST_USER_ID, TEST_PROJECT_ID)
-            .is_some());
+        assert!(
+            store
+                .project_membership(TEST_USER_ID, TEST_PROJECT_ID)
+                .is_some()
+        );
         assert!(store.audit_events().iter().any(|event| {
             event.event_type == "gateway.organization_invite.accept"
                 && event.resource_id == invitation_id
@@ -35345,9 +36423,11 @@ mod tests {
         );
         assert_eq!(get_body["resource"]["id"], external_identity_id);
         assert_eq!(get_body["resource"]["email_verified"], true);
-        assert!(get_body["resource"]["email_hash"]
-            .as_str()
-            .is_some_and(|hash| hash.starts_with("sha256:")));
+        assert!(
+            get_body["resource"]["email_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
         assert!(!list_text.contains("Admin@Example.COM"));
         assert!(!list_text.contains("admin@example.com"));
         assert!(!get_text.contains("Admin@Example.COM"));
@@ -35483,9 +36563,11 @@ mod tests {
         assert_eq!(success_body["project"]["id"], SINGLE_USER_PROJECT_ID);
         assert!(!success_text.contains("correct horse battery staple"));
         assert!(!success_text.contains("session_hash"));
-        assert!(store
-            .project_membership(SINGLE_USER_ID, SINGLE_USER_PROJECT_ID)
-            .is_some());
+        assert!(
+            store
+                .project_membership(SINGLE_USER_ID, SINGLE_USER_PROJECT_ID)
+                .is_some()
+        );
         assert!(store.action_grants().iter().any(|grant| {
             grant.tenant_id == SINGLE_USER_TENANT_ID && grant.principal_id == SINGLE_USER_ID
         }));
@@ -35687,12 +36769,16 @@ mod tests {
             default_organization_body["user"]["default_project_id"],
             SINGLE_USER_PROJECT_ID
         );
-        assert!(!default_organization_body
-            .to_string()
-            .contains(&session_token));
-        assert!(!default_organization_body
-            .to_string()
-            .contains("session_hash"));
+        assert!(
+            !default_organization_body
+                .to_string()
+                .contains(&session_token)
+        );
+        assert!(
+            !default_organization_body
+                .to_string()
+                .contains("session_hash")
+        );
     }
 
     #[tokio::test]
@@ -35711,17 +36797,21 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["provider"]["provider_kind"], "oidc");
-        assert!(body["authorization"]["nonce"]
-            .as_str()
-            .is_some_and(|nonce| nonce.starts_with("gwnc_")));
-        assert!(body["authorization"]["authorization_url"]
-            .as_str()
-            .is_some_and(|url| {
-                url.starts_with("https://login.example/oauth2/v1/authorize?")
-                    && url.contains("scope=openid%20email%20profile")
-                    && url.contains("nonce=gwnc_")
-                    && url.contains("code_challenge_method=S256")
-            }));
+        assert!(
+            body["authorization"]["nonce"]
+                .as_str()
+                .is_some_and(|nonce| nonce.starts_with("gwnc_"))
+        );
+        assert!(
+            body["authorization"]["authorization_url"]
+                .as_str()
+                .is_some_and(|url| {
+                    url.starts_with("https://login.example/oauth2/v1/authorize?")
+                        && url.contains("scope=openid%20email%20profile")
+                        && url.contains("nonce=gwnc_")
+                        && url.contains("code_challenge_method=S256")
+                })
+        );
         assert!(!body.to_string().contains("sec_login_oidc_secret"));
     }
 
@@ -35955,18 +37045,21 @@ mod tests {
         assert_eq!(dead_lettered[0].status, "dead_lettered");
         assert_eq!(dead_lettered[0].attempt_count, 3);
         assert!(dead_lettered[0].next_attempt_at.is_none());
-        assert!(deliver_due_notifications_with_transport(
-            &AppState::new(GatewayConfig::default(), store.clone()),
-            TEST_TENANT_ID,
-            third_due_at + chrono::Duration::seconds(60),
-            10,
-            NotificationDeliveryTransport::Synthetic,
-        )
-        .await
-        .is_empty());
+        assert!(
+            deliver_due_notifications_with_transport(
+                &AppState::new(GatewayConfig::default(), store.clone()),
+                TEST_TENANT_ID,
+                third_due_at + chrono::Duration::seconds(60),
+                10,
+                NotificationDeliveryTransport::Synthetic,
+            )
+            .await
+            .is_empty()
+        );
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn notification_dead_letter_replay_is_idempotent_and_resets_retry_budget() {
         let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
         let notification_sink_id = create_webhook_notification_sink_over_http(
@@ -36032,9 +37125,11 @@ mod tests {
             api_key_denied_body["error"]["code"],
             "gateway.auth.authorization_denied"
         );
-        assert!(api_key_denied_body["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("api_key_not_allowed_for_route")));
+        assert!(
+            api_key_denied_body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("api_key_not_allowed_for_route"))
+        );
         assert_eq!(replay_status, StatusCode::OK);
         assert_eq!(
             replay_body["schema"],
@@ -36100,9 +37195,11 @@ mod tests {
 
         assert_eq!(replay_status, StatusCode::BAD_REQUEST);
         assert_eq!(replay_body["error"]["code"], "gateway.request.invalid");
-        assert!(replay_body["error"]["message"].as_str().is_some_and(
-            |message| message.contains("notification_replay_requires_dead_lettered_event")
-        ));
+        assert!(
+            replay_body["error"]["message"].as_str().is_some_and(
+                |message| message.contains("notification_replay_requires_dead_lettered_event")
+            )
+        );
         assert_eq!(event.status, "pending");
         assert_eq!(event.attempt_count, 0);
         assert!(event.next_attempt_at.is_none());
@@ -36382,15 +37479,17 @@ mod tests {
         assert_eq!(events[0].status, "permanent_failed");
         assert_eq!(events[0].attempt_count, 1);
         assert!(events[0].next_attempt_at.is_none());
-        assert!(deliver_due_notifications_with_transport(
-            &AppState::new(GatewayConfig::default(), store.clone()),
-            TEST_TENANT_ID,
-            chrono::Utc::now() + Duration::seconds(60),
-            10,
-            NotificationDeliveryTransport::Synthetic,
-        )
-        .await
-        .is_empty());
+        assert!(
+            deliver_due_notifications_with_transport(
+                &AppState::new(GatewayConfig::default(), store.clone()),
+                TEST_TENANT_ID,
+                chrono::Utc::now() + Duration::seconds(60),
+                10,
+                NotificationDeliveryTransport::Synthetic,
+            )
+            .await
+            .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -36802,9 +37901,11 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["valid"], false);
         assert_eq!(body["errors"].as_array().map_or(0, Vec::len), 2);
-        assert!(store
-            .routing_group_targets_for_group(TEST_TENANT_ID, &routing_group_id)
-            .is_empty());
+        assert!(
+            store
+                .routing_group_targets_for_group(TEST_TENANT_ID, &routing_group_id)
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -36890,8 +37991,8 @@ mod tests {
         (store, raw_session)
     }
 
-    fn gateway_store_with_admin_session_and_runtime_access(
-    ) -> (InMemoryGatewayStore, String, String) {
+    fn gateway_store_with_admin_session_and_runtime_access()
+    -> (InMemoryGatewayStore, String, String) {
         let fixture = FoundationTestFixture::runtime_access(true);
         let store = fixture.store;
         let raw_key = fixture.raw_api_key;
@@ -37349,15 +38450,21 @@ mod tests {
         assert_eq!(body["resource"]["record_count"], 1);
         assert_eq!(body["manifest"]["record_count"], 1);
         assert_eq!(body["manifest"]["manifest"]["status"], "completed");
-        assert!(body["manifest"]["checksum"]
-            .as_str()
-            .is_some_and(|checksum| checksum.starts_with("sha256:")));
-        assert!(body["manifest"]["object_ref"]
-            .as_str()
-            .is_some_and(|object_ref| object_ref.starts_with("memory://gateway-exports/")));
-        assert!(body["manifest"]["manifest"]["next_cursor"]
-            .as_str()
-            .is_some());
+        assert!(
+            body["manifest"]["checksum"]
+                .as_str()
+                .is_some_and(|checksum| checksum.starts_with("sha256:"))
+        );
+        assert!(
+            body["manifest"]["object_ref"]
+                .as_str()
+                .is_some_and(|object_ref| object_ref.starts_with("memory://gateway-exports/"))
+        );
+        assert!(
+            body["manifest"]["manifest"]["next_cursor"]
+                .as_str()
+                .is_some()
+        );
         assert_eq!(
             body["manifest"]["manifest"]["object"]["object_storage_connected"],
             false
@@ -37366,9 +38473,11 @@ mod tests {
             body["manifest"]["manifest"]["redaction"]["secret_material_included"],
             false
         );
-        assert!(body["manifest"]["manifest"]["rows"][0]
-            .as_object()
-            .is_some_and(|row| !row.contains_key("upstream_credential_id")));
+        assert!(
+            body["manifest"]["manifest"]["rows"][0]
+                .as_object()
+                .is_some_and(|row| !row.contains_key("upstream_credential_id"))
+        );
         let response_text = body.to_string();
         assert!(!response_text.contains("prompt text"));
         assert!(!response_text.contains("sec_openai"));
@@ -37376,27 +38485,34 @@ mod tests {
 
     fn assert_oidc_login_start_response(body: &serde_json::Value, login_provider_id: &str) {
         assert_eq!(body["provider"]["id"], login_provider_id);
-        assert!(body["authorization"]["nonce"]
-            .as_str()
-            .is_some_and(|nonce| nonce.starts_with("gwnc_")));
+        assert!(
+            body["authorization"]["nonce"]
+                .as_str()
+                .is_some_and(|nonce| nonce.starts_with("gwnc_"))
+        );
         assert_eq!(
             body["authorization"]["pkce"]["code_challenge_method"],
             "S256"
         );
-        assert!(body["authorization"]["state"]
-            .as_str()
-            .is_some_and(|state| state.starts_with("gwst_")));
-        assert!(body["authorization"]["authorization_url"]
-            .as_str()
-            .is_some_and(|url| {
-                url.starts_with("https://login.example/oauth2/v1/authorize?")
-                    && url.contains("client_id=oidc_client")
-                    && url
-                        .contains("redirect_uri=https%3A%2F%2Fapp.example%2Fauth%2Foidc%2Fcallback")
-                    && url.contains("scope=openid%20email%20profile")
-                    && url.contains("code_challenge_method=S256")
-                    && url.contains("nonce=gwnc_")
-            }));
+        assert!(
+            body["authorization"]["state"]
+                .as_str()
+                .is_some_and(|state| state.starts_with("gwst_"))
+        );
+        assert!(
+            body["authorization"]["authorization_url"]
+                .as_str()
+                .is_some_and(|url| {
+                    url.starts_with("https://login.example/oauth2/v1/authorize?")
+                        && url.contains("client_id=oidc_client")
+                        && url.contains(
+                            "redirect_uri=https%3A%2F%2Fapp.example%2Fauth%2Foidc%2Fcallback",
+                        )
+                        && url.contains("scope=openid%20email%20profile")
+                        && url.contains("code_challenge_method=S256")
+                        && url.contains("nonce=gwnc_")
+                })
+        );
     }
 
     fn insert_admin_session(store: &InMemoryGatewayStore) -> String {
@@ -38809,6 +39925,8 @@ mod tests {
         body: Vec<u8>,
     }
 
+    type TestClientWebSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
     fn assert_captured_webhook_request(
         captured: &CapturedWebhookRequest,
         event_id: &str,
@@ -38873,9 +39991,11 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some(collector_secret)
         );
-        assert!(body["resourceMetrics"]
-            .as_array()
-            .is_some_and(|items| !items.is_empty()));
+        assert!(
+            body["resourceMetrics"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+        );
         assert!(body_text.contains("gateway.export.metric_count"));
         assert!(body_text.contains("gateway.usage_event.count"));
         assert!(body_text.contains("gateway.route_decision.count"));
@@ -38976,10 +40096,12 @@ mod tests {
                     async move {
                         let body_text = String::from_utf8(body.to_vec())
                             .unwrap_or_else(|error| panic!("token body should be utf8: {error}"));
-                        assert!(headers
-                            .get(header::AUTHORIZATION)
-                            .and_then(|value| value.to_str().ok())
-                            .is_some_and(|value| value.starts_with("Basic ")));
+                        assert!(
+                            headers
+                                .get(header::AUTHORIZATION)
+                                .and_then(|value| value.to_str().ok())
+                                .is_some_and(|value| value.starts_with("Basic "))
+                        );
                         assert!(body_text.contains("grant_type=authorization_code"));
                         assert!(body_text.contains("code=oidc_authorization_code"));
                         assert!(body_text.contains("code_verifier="));
@@ -39155,6 +40277,177 @@ oFnGY0OFksX/ye0/XGpy2SFxYRwGU98HPYeBvAQQrVjdkzfy7BmXQQ==
         let handle = tokio::spawn(async move {
             if let Err(error) = axum::serve(listener, app).await {
                 panic!("provider receiver should serve requests: {error}");
+            }
+        });
+        (format!("http://{address}/gateway"), receiver, handle)
+    }
+
+    async fn spawn_gateway_for_websocket_test(
+        state: AppState,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("gateway websocket listener should bind: {error}"));
+        let address = listener.local_addr().unwrap_or_else(|error| {
+            panic!("gateway websocket listener address should resolve: {error}")
+        });
+        let handle = tokio::spawn(async move {
+            if let Err(error) = axum::serve(listener, router(state)).await {
+                panic!("gateway websocket server should serve requests: {error}");
+            }
+        });
+        (format!("ws://{address}"), handle)
+    }
+
+    async fn connect_gateway_responses_websocket(
+        gateway_url: &str,
+        raw_key: &str,
+        session_id: Option<&str>,
+    ) -> TestClientWebSocket {
+        let mut request = format!("{gateway_url}/v1/responses")
+            .into_client_request()
+            .unwrap_or_else(|error| panic!("websocket request should build: {error}"));
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {raw_key}"))
+                .unwrap_or_else(|error| panic!("authorization header should build: {error}")),
+        );
+        if let Some(session_id) = session_id {
+            request.headers_mut().insert(
+                GATEWAY_SESSION_ID_HEADER,
+                HeaderValue::from_str(session_id)
+                    .unwrap_or_else(|error| panic!("session header should build: {error}")),
+            );
+        }
+        let (socket, response) = tokio_tungstenite::connect_async(request)
+            .await
+            .unwrap_or_else(|error| panic!("gateway websocket should connect: {error}"));
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        socket
+    }
+
+    async fn next_client_websocket_json(socket: &mut TestClientWebSocket) -> Value {
+        let frame =
+            match tokio::time::timeout(std::time::Duration::from_secs(2), socket.next()).await {
+                Ok(Some(Ok(frame))) => frame,
+                Ok(Some(Err(error))) => panic!("websocket frame should read: {error}"),
+                Ok(None) => panic!("websocket should remain open"),
+                Err(error) => panic!("websocket frame should arrive before timeout: {error}"),
+            };
+        let TungsteniteMessage::Text(text) = frame else {
+            panic!("websocket frame should be text: {frame:?}");
+        };
+        serde_json::from_str(text.as_ref())
+            .unwrap_or_else(|error| panic!("websocket text should be json: {error}"))
+    }
+
+    async fn wait_for_runtime_accounting(
+        store: &InMemoryGatewayStore,
+        expected_route_attempts: usize,
+        expected_usage_events: usize,
+    ) {
+        for _ in 0..50 {
+            if store.route_attempts().len() >= expected_route_attempts
+                && store.usage_events_for_tenant(TEST_TENANT_ID).len() >= expected_usage_events
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!(
+            "runtime accounting did not reach expected counts: route_attempts={}, usage_events={}",
+            store.route_attempts().len(),
+            store.usage_events_for_tenant(TEST_TENANT_ID).len()
+        );
+    }
+
+    async fn spawn_local_responses_websocket_provider() -> (
+        String,
+        mpsc::Receiver<CapturedWebhookRequest>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (sender, receiver) = mpsc::channel();
+        let sender = Arc::new(Mutex::new(Some(sender)));
+        let app = Router::new().route(
+            "/gateway/responses",
+            get({
+                let sender = Arc::clone(&sender);
+                move |headers: HeaderMap, ws: WebSocketUpgrade| {
+                    let sender = Arc::clone(&sender);
+                    async move {
+                        ws.on_upgrade(move |mut socket| async move {
+                            let text = match socket.next().await {
+                                Some(Ok(AxumWsMessage::Text(text))) => text.to_string(),
+                                Some(Ok(frame)) => {
+                                    panic!("upstream websocket expected text frame: {frame:?}")
+                                }
+                                Some(Err(error)) => {
+                                    panic!("upstream websocket frame should read: {error}")
+                                }
+                                None => panic!("upstream websocket should receive a frame"),
+                            };
+                            {
+                                let mut sender = sender
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                if let Some(sender) = sender.take() {
+                                    let _ = sender.send(CapturedWebhookRequest {
+                                        headers,
+                                        body: text.as_bytes().to_vec(),
+                                    });
+                                }
+                            }
+                            let _ = socket
+                                .send(AxumWsMessage::Text(
+                                    json!({
+                                        "type": "response.output_text.delta",
+                                        "delta": "live"
+                                    })
+                                    .to_string()
+                                    .into(),
+                                ))
+                                .await;
+                            let _ = socket
+                                .send(AxumWsMessage::Text(
+                                    json!({
+                                        "type": "response.completed",
+                                        "response": {
+                                            "id": "resp_ws_live",
+                                            "object": "response",
+                                            "model": "gpt-4.1-mini",
+                                            "output": [{
+                                                "type": "message",
+                                                "role": "assistant",
+                                                "content": [{
+                                                    "type": "output_text",
+                                                    "text": "live"
+                                                }]
+                                            }],
+                                            "usage": {
+                                                "input_tokens": 7,
+                                                "output_tokens": 11,
+                                                "total_tokens": 18
+                                            }
+                                        }
+                                    })
+                                    .to_string()
+                                    .into(),
+                                ))
+                                .await;
+                        })
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("responses websocket provider should bind: {error}"));
+        let address = listener.local_addr().unwrap_or_else(|error| {
+            panic!("responses websocket provider address should resolve: {error}")
+        });
+        let handle = tokio::spawn(async move {
+            if let Err(error) = axum::serve(listener, app).await {
+                panic!("responses websocket provider should serve requests: {error}");
             }
         });
         (format!("http://{address}/gateway"), receiver, handle)
@@ -39360,18 +40653,24 @@ oFnGY0OFksX/ye0/XGpy2SFxYRwGU98HPYeBvAQQrVjdkzfy7BmXQQ==
         assert_eq!(attempt.status, "retryable_failed");
         assert_eq!(attempt.error_message.as_deref(), Some(error_message));
         assert_eq!(attempt.response_status, Some(503));
-        assert!(attempt
-            .request_body_sha256
-            .as_deref()
-            .is_some_and(|value| value.starts_with("sha256:")));
-        assert!(attempt
-            .signing_secret_ref_id
-            .as_deref()
-            .is_some_and(|value| value.starts_with("sec_")));
-        assert!(attempt
-            .signature_sha256
-            .as_deref()
-            .is_some_and(|value| value.starts_with("sha256:")));
+        assert!(
+            attempt
+                .request_body_sha256
+                .as_deref()
+                .is_some_and(|value| value.starts_with("sha256:"))
+        );
+        assert!(
+            attempt
+                .signing_secret_ref_id
+                .as_deref()
+                .is_some_and(|value| value.starts_with("sec_"))
+        );
+        assert!(
+            attempt
+                .signature_sha256
+                .as_deref()
+                .is_some_and(|value| value.starts_with("sha256:"))
+        );
     }
 
     fn assert_notification_subscription_audit_events(store: &InMemoryGatewayStore) {
@@ -39400,10 +40699,12 @@ oFnGY0OFksX/ye0/XGpy2SFxYRwGU98HPYeBvAQQrVjdkzfy7BmXQQ==
             attempt.signing_secret_ref_id.as_deref(),
             Some(expected_signing_secret_ref_id)
         );
-        assert!(attempt
-            .request_body_sha256
-            .as_deref()
-            .is_some_and(|value| value.starts_with("sha256:")));
+        assert!(
+            attempt
+                .request_body_sha256
+                .as_deref()
+                .is_some_and(|value| value.starts_with("sha256:"))
+        );
         assert!(signature_sha256.starts_with("sha256:"));
         assert!(delivery_headers.contains("hmac-sha256:***"));
         assert!(delivery_headers.contains("sec_***"));
@@ -40100,11 +41401,7 @@ oFnGY0OFksX/ye0/XGpy2SFxYRwGU98HPYeBvAQQrVjdkzfy7BmXQQ==
     }
 
     fn expected_protocol_replay_usage_confidence(case: &GatewayReplayCase) -> &'static str {
-        if case.streaming {
-            "missing"
-        } else {
-            "exact"
-        }
+        if case.streaming { "missing" } else { "exact" }
     }
 
     fn assert_provider_shape(protocol_family: ProtocolFamily, body: &serde_json::Value) {

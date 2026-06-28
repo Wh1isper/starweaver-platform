@@ -127,11 +127,11 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        migration_versions, missing_versions, CORE_SCHEMA_MIGRATION_VERSION, CORE_SCHEMA_SQL,
-        OIDC_LOGIN_ATTEMPTS_MIGRATION_VERSION, OIDC_LOGIN_ATTEMPTS_SQL,
-        ORGANIZATION_INVITATIONS_MIGRATION_VERSION, ORGANIZATION_INVITATIONS_SQL,
-        PLATFORM_AUDIT_EVENTS_MIGRATION_VERSION, PLATFORM_AUDIT_EVENTS_SQL,
-        SECRET_REFS_OIDC_AUTH_METHOD_MIGRATION_VERSION, SECRET_REFS_OIDC_AUTH_METHOD_SQL,
+        CORE_SCHEMA_MIGRATION_VERSION, CORE_SCHEMA_SQL, OIDC_LOGIN_ATTEMPTS_MIGRATION_VERSION,
+        OIDC_LOGIN_ATTEMPTS_SQL, ORGANIZATION_INVITATIONS_MIGRATION_VERSION,
+        ORGANIZATION_INVITATIONS_SQL, PLATFORM_AUDIT_EVENTS_MIGRATION_VERSION,
+        PLATFORM_AUDIT_EVENTS_SQL, SECRET_REFS_OIDC_AUTH_METHOD_MIGRATION_VERSION,
+        SECRET_REFS_OIDC_AUTH_METHOD_SQL, migration_versions, missing_versions,
     };
 
     #[test]
@@ -194,8 +194,10 @@ mod tests {
         assert!(CORE_SCHEMA_SQL.contains("provider_kind <> 'oidc' OR client_id IS NOT NULL"));
         assert!(CORE_SCHEMA_SQL.contains("provider_kind <> 'oidc' OR redirect_uri IS NOT NULL"));
         assert!(CORE_SCHEMA_SQL.contains("provider_kind <> 'oidc' OR requested_scopes ? 'openid'"));
-        assert!(CORE_SCHEMA_SQL
-            .contains("provider_kind <> 'oidc' OR jsonb_array_length(oidc_audiences) > 0"));
+        assert!(
+            CORE_SCHEMA_SQL
+                .contains("provider_kind <> 'oidc' OR jsonb_array_length(oidc_audiences) > 0")
+        );
         assert!(CORE_SCHEMA_SQL.contains("platform_identity_providers_tenant_kind_idx"));
     }
 

@@ -3,15 +3,15 @@
 use chrono::{DateTime, Utc};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use url::Url;
 
+use crate::ProtocolFamily;
 use crate::action::{AuthorizationDecision, AuthorizationEngine, AuthorizationEvidenceSink};
 use crate::domain::{AuthenticatedActor, ProviderEndpoint};
 use crate::error::{GatewayError, Result};
-use crate::replay::{classify_ingress, GatewayReplayCase};
-use crate::route::{authorize_route_with_evidence, foundation_routes, RouteMetadata};
-use crate::ProtocolFamily;
+use crate::replay::{GatewayReplayCase, classify_ingress};
+use crate::route::{RouteMetadata, authorize_route_with_evidence, foundation_routes};
 
 /// Runtime request used by protocol replay and fake-provider tests.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -613,6 +613,7 @@ mod tests {
     use secrecy::{ExposeSecret, SecretString};
     use serde_json::json;
 
+    use crate::ProtocolFamily;
     use crate::action::{ActionGrant, FoundationAuthorizationEngine};
     use crate::domain::{
         ActorKind, AuthenticatedActor, CredentialKind, ProviderEndpoint, ResourceStatus,
@@ -620,13 +621,12 @@ mod tests {
     use crate::replay::foundation_route_replay_cases;
     use crate::route::foundation_routes;
     use crate::runtime::{
+        FakeProviderReplayEvidence, FakeProviderReplayOutcome, FakeProviderReplayOutcomeRequest,
+        FakeProviderReplayTarget, ProviderAdapterCredential, ProviderAdapterTarget,
         build_provider_adapter_request, run_fake_provider_replay,
-        run_fake_provider_replay_for_target_with_outcome, FakeProviderReplayEvidence,
-        FakeProviderReplayOutcome, FakeProviderReplayOutcomeRequest, FakeProviderReplayTarget,
-        ProviderAdapterCredential, ProviderAdapterTarget,
+        run_fake_provider_replay_for_target_with_outcome,
     };
     use crate::storage::InMemoryGatewayStore;
-    use crate::ProtocolFamily;
 
     fn api_key_actor() -> AuthenticatedActor {
         AuthenticatedActor {
@@ -766,9 +766,11 @@ mod tests {
             assert_eq!(response.body["error"]["retryable"], outcome.retryable());
             assert_eq!(response.body["error"]["streaming"], true);
             assert_eq!(store.authorization_decisions().len(), 1);
-            assert!(store.authorization_decisions()[0]
-                .policy_snapshot_id
-                .is_some());
+            assert!(
+                store.authorization_decisions()[0]
+                    .policy_snapshot_id
+                    .is_some()
+            );
         }
     }
 
@@ -813,9 +815,11 @@ mod tests {
             Some("upc_openai")
         );
         assert!(!format!("{request:?}").contains("sk-test-secret"));
-        assert!(!serde_json::to_string(&request.safe_metadata)
-            .unwrap_or_else(|error| panic!("metadata should serialize: {error}"))
-            .contains("sk-test-secret"));
+        assert!(
+            !serde_json::to_string(&request.safe_metadata)
+                .unwrap_or_else(|error| panic!("metadata should serialize: {error}"))
+                .contains("sk-test-secret")
+        );
     }
 
     #[test]

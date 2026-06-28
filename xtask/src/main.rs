@@ -18,19 +18,20 @@ use std::{
 };
 
 use secrecy::{ExposeSecret, SecretString};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use starweaver_gateway::{
+    ProtocolFamily,
     action::{ActionGrant, FoundationAuthorizationEngine},
     config::{
-        publish_config_snapshot, PublishConfigSnapshotRequest, PublishedConfigSnapshot,
-        ResourceVersion,
+        PublishConfigSnapshotRequest, PublishedConfigSnapshot, ResourceVersion,
+        publish_config_snapshot,
     },
     domain::{
         ActorKind, AuditEventRecord, AuthenticatedActor, CredentialKind, SecretRefRecord,
         UsageEventRecord,
     },
-    replay::{foundation_route_replay_cases, GatewayReplayCase},
+    replay::{GatewayReplayCase, foundation_route_replay_cases},
     route::foundation_routes,
     runtime::run_fake_provider_replay,
     storage::{
@@ -38,10 +39,9 @@ use starweaver_gateway::{
         InMemoryGatewayStore, SecretRefAdminRepository, TenancyBootstrapRepository,
         UsageAccountingRepository,
     },
-    ProtocolFamily,
 };
 use starweaver_platform::route::{
-    foundation_routes as platform_foundation_routes, RouteAccess as PlatformRouteAccess,
+    RouteAccess as PlatformRouteAccess, foundation_routes as platform_foundation_routes,
 };
 
 const PAGES_PROJECT_NAME: &str = "starweaver-platform-docs";

@@ -4,12 +4,12 @@ use http::Method;
 
 use chrono::{DateTime, Utc};
 
+use crate::ProtocolFamily;
 use crate::action::{
     AuthorizationDecision, AuthorizationDecisionRecord, AuthorizationEngine,
     AuthorizationEvidenceSink, AuthorizationRequest, GatewayAction, ResourceRef,
 };
 use crate::domain::AuthenticatedActor;
-use crate::ProtocolFamily;
 
 /// Static route authorization metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]

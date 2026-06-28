@@ -426,8 +426,8 @@ fn write_lock<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_role_binding, InMemoryPlatformRoleBindingStore, PlatformRoleBindingError,
-        PlatformRoleBindingRecord, PlatformRoleBindingStatus, PlatformRoleBindingUpsert,
+        InMemoryPlatformRoleBindingStore, PlatformRoleBindingError, PlatformRoleBindingRecord,
+        PlatformRoleBindingStatus, PlatformRoleBindingUpsert, validate_role_binding,
     };
 
     #[test]
@@ -467,9 +467,11 @@ mod tests {
             store.delete_role_bindings_for_project_principal("ten_test", "prj_test", "usr_test"),
             1
         );
-        assert!(store
-            .active_role_bindings_for_principal("ten_test", "usr_test")
-            .is_empty());
+        assert!(
+            store
+                .active_role_bindings_for_principal("ten_test", "usr_test")
+                .is_empty()
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Redis-compatible route and runtime policy hot-state backend.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -10,14 +10,14 @@ use fred::prelude::{
     Builder, Client, Config, Error as FredError, Expiration, HashesInterface, KeysInterface,
     TcpConfig,
 };
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tokio::task::JoinHandle;
 
 use crate::domain::RuntimeBudgetLeaseRecord;
 use crate::hot_state::{
-    endpoint_drain_key, endpoint_health_key, sticky_route_key, EndpointDrainRecord,
-    EndpointHealthRecord, EndpointHealthState, RouteHotState, StickyRouteRecord,
+    EndpointDrainRecord, EndpointHealthRecord, EndpointHealthState, RouteHotState,
+    StickyRouteRecord, endpoint_drain_key, endpoint_health_key, sticky_route_key,
 };
 use crate::storage::{InMemoryGatewayStore, RuntimePolicyRepository, RuntimeQuotaCounterDecision};
 

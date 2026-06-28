@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use sqlx::postgres::PgPoolOptions;
 use starweaver_gateway::migrations;
-use starweaver_gateway::service::{run, GatewayConfig};
+use starweaver_gateway::service::{GatewayConfig, run};
 
 #[tokio::main]
 async fn main() -> ExitCode {

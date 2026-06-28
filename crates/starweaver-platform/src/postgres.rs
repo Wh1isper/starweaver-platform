@@ -7,28 +7,28 @@ use sqlx::{Postgres, Row, Transaction};
 
 use crate::action::{ActorKind, AuthenticatedActor, BuiltInRole};
 use crate::audit::{
-    validate_platform_audit_event_record, PlatformAuditError, PlatformAuditEventRecord,
+    PlatformAuditError, PlatformAuditEventRecord, validate_platform_audit_event_record,
 };
 use crate::auth::{
-    hash_bearer_credential_token, hash_session_token, AuthError, PlatformAuthSessionRecord,
-    PlatformAuthSessionStatus, PlatformBearerCredentialRecord, PlatformMtlsIdentityRecord,
+    AuthError, PlatformAuthSessionRecord, PlatformAuthSessionStatus,
+    PlatformBearerCredentialRecord, PlatformMtlsIdentityRecord, hash_bearer_credential_token,
+    hash_session_token,
 };
 use crate::identity::{
+    OidcLoginAttemptRecord, OidcLoginAttemptStatus, OidcLoginProviderRecord,
+    OidcLoginProviderStatus, OidcTokenEndpointAuthMethod, OidcValidationError,
+    PlatformExternalIdentityError, PlatformExternalIdentityRecord, PlatformExternalIdentityStatus,
     hash_oidc_login_state, validate_external_identity, validate_oidc_login_attempt_record,
-    validate_oidc_login_provider_base, OidcLoginAttemptRecord, OidcLoginAttemptStatus,
-    OidcLoginProviderRecord, OidcLoginProviderStatus, OidcTokenEndpointAuthMethod,
-    OidcValidationError, PlatformExternalIdentityError, PlatformExternalIdentityRecord,
-    PlatformExternalIdentityStatus,
+    validate_oidc_login_provider_base,
 };
 use crate::invitation::{
-    validate_organization_invitation, AcceptPlatformOrganizationInvitationRequest,
-    PlatformInvitationError, PlatformInvitationStatus, PlatformOrganizationInvitationRecord,
+    AcceptPlatformOrganizationInvitationRequest, PlatformInvitationError, PlatformInvitationStatus,
+    PlatformOrganizationInvitationRecord, validate_organization_invitation,
 };
 use crate::membership::{
-    validate_organization_member, validate_project_member, PlatformMembershipError,
-    PlatformMembershipStatus, PlatformOrganizationMembershipRecord,
+    PlatformMembershipError, PlatformMembershipStatus, PlatformOrganizationMembershipRecord,
     PlatformOrganizationMembershipUpsert, PlatformProjectMembershipRecord,
-    PlatformProjectMembershipUpsert,
+    PlatformProjectMembershipUpsert, validate_organization_member, validate_project_member,
 };
 use crate::resource::{
     ApprovalRecord, ConversationRecord, DeferredToolRecord, EnvironmentAttachmentRecord,
@@ -36,17 +36,17 @@ use crate::resource::{
     RunRecord,
 };
 use crate::role::{
-    validate_role_binding, PlatformRoleBindingError, PlatformRoleBindingRecord,
-    PlatformRoleBindingStatus, PlatformRoleBindingUpsert,
+    PlatformRoleBindingError, PlatformRoleBindingRecord, PlatformRoleBindingStatus,
+    PlatformRoleBindingUpsert, validate_role_binding,
 };
 use crate::secret::{
-    resolve_environment_secret, validate_secret_ref_record, PlatformSecretError,
-    PlatformSecretRefRecord, PlatformSecretRefStatus, PlatformSecretValue,
-    ENVIRONMENT_SECRET_BACKEND,
+    ENVIRONMENT_SECRET_BACKEND, PlatformSecretError, PlatformSecretRefRecord,
+    PlatformSecretRefStatus, PlatformSecretValue, resolve_environment_secret,
+    validate_secret_ref_record,
 };
 use crate::storage::{ResourceOwnerRecord, StoreError};
 use crate::user::{
-    validate_platform_user_record, PlatformUserError, PlatformUserRecord, PlatformUserStatus,
+    PlatformUserError, PlatformUserRecord, PlatformUserStatus, validate_platform_user_record,
 };
 
 /// Result type returned by `PostgreSQL` platform repository adapters.
@@ -4504,28 +4504,22 @@ const fn business_resource_table(data: &PlatformResourceData) -> &'static str {
 mod tests {
     use crate::action::{ActorKind, AuthenticatedActor};
     use crate::audit::{
-        validate_platform_audit_event_record, PlatformAuditError, PlatformAuditEventRecord,
-        PLATFORM_AUDIT_REDACTION_PROFILE,
+        PLATFORM_AUDIT_REDACTION_PROFILE, PlatformAuditError, PlatformAuditEventRecord,
+        validate_platform_audit_event_record,
     };
     use crate::auth::{
-        hash_bearer_credential_token, hash_session_token, AuthError, PlatformAuthSessionRecord,
-        PlatformAuthSessionStatus, PlatformBearerCredentialKind, PlatformBearerCredentialRecord,
+        AuthError, PlatformAuthSessionRecord, PlatformAuthSessionStatus,
+        PlatformBearerCredentialKind, PlatformBearerCredentialRecord,
         PlatformBearerCredentialStatus, PlatformMtlsIdentityRecord, PlatformMtlsIdentityStatus,
+        hash_bearer_credential_token, hash_session_token,
     };
     use crate::identity::{
-        hash_oidc_login_state, validate_oidc_login_attempt_record, OidcLoginAttemptRecord,
-        OidcLoginAttemptStart, OidcLoginAttemptStatus, OidcValidationError,
+        OidcLoginAttemptRecord, OidcLoginAttemptStart, OidcLoginAttemptStatus, OidcValidationError,
+        hash_oidc_login_state, validate_oidc_login_attempt_record,
     };
     use crate::postgres::{
-        actor_kind_as_str, actor_kind_from_str, bearer_credential_hash_for_lookup,
-        business_resource_table, mtls_subject_for_lookup, oidc_login_attempt_status_as_str,
-        oidc_login_attempt_status_from_str, oidc_state_hash_for_lookup, project_scope,
-        session_token_hash_for_lookup, validate_auth_session_record,
-        validate_bearer_credential_record, validate_mtls_identity_record,
-        validate_oidc_login_completion_record, validate_platform_resource_record,
-        OidcLoginCompletionRecord, PlatformRepositoryError, ACCEPT_ORGANIZATION_INVITATION_SQL,
-        ACTIVE_ROLE_BINDINGS_FOR_PRINCIPAL_SQL, BOOTSTRAP_SINGLE_USER_EXTERNAL_IDENTITY_SQL,
-        BOOTSTRAP_SINGLE_USER_IDENTITY_PROVIDER_SQL,
+        ACCEPT_ORGANIZATION_INVITATION_SQL, ACTIVE_ROLE_BINDINGS_FOR_PRINCIPAL_SQL,
+        BOOTSTRAP_SINGLE_USER_EXTERNAL_IDENTITY_SQL, BOOTSTRAP_SINGLE_USER_IDENTITY_PROVIDER_SQL,
         BOOTSTRAP_SINGLE_USER_ORGANIZATION_MEMBERSHIP_SQL, BOOTSTRAP_SINGLE_USER_ORGANIZATION_SQL,
         BOOTSTRAP_SINGLE_USER_PRINCIPAL_SQL, BOOTSTRAP_SINGLE_USER_PROJECT_MEMBERSHIP_SQL,
         BOOTSTRAP_SINGLE_USER_PROJECT_SQL, BOOTSTRAP_SINGLE_USER_ROLE_BINDING_SQL,
@@ -4538,17 +4532,18 @@ mod tests {
         LIST_ORGANIZATION_INVITATIONS_SQL, LIST_ORGANIZATION_MEMBERS_SQL,
         LIST_PLATFORM_AUDIT_EVENTS_FOR_TENANT_SQL, LIST_PLATFORM_USERS_SQL,
         LIST_PROJECT_MEMBERS_SQL, LIST_ROLE_BINDINGS_SQL, LIST_SECRET_REFS_SQL,
-        RECORD_AUTH_SESSION_SQL, RECORD_BEARER_CREDENTIAL_SQL, RECORD_MTLS_IDENTITY_SQL,
-        RECORD_OIDC_AUTH_SESSION_SQL, RECORD_OIDC_LOGIN_ATTEMPT_SQL,
-        RECORD_PLATFORM_AUDIT_EVENT_SQL, RECORD_RESOURCE_OWNER_SQL, REVOKE_AUTH_SESSION_BY_ID_SQL,
-        REVOKE_ORGANIZATION_INVITATION_SQL, SELECT_AUTH_SESSION_BY_ID_SQL,
-        SELECT_AUTH_SESSION_BY_TOKEN_SQL, SELECT_BEARER_CREDENTIAL_BY_TOKEN_SQL,
-        SELECT_EXTERNAL_IDENTITY_SQL, SELECT_MTLS_IDENTITY_BY_SUBJECT_SQL,
-        SELECT_OIDC_LOGIN_ATTEMPT_BY_STATE_SQL, SELECT_OIDC_LOGIN_PROVIDER_SQL,
-        SELECT_ORGANIZATION_INVITATION_BY_TOKEN_HASH_SQL, SELECT_ORGANIZATION_INVITATION_SQL,
-        SELECT_ORGANIZATION_MEMBER_SQL, SELECT_PLATFORM_USER_INCLUDING_DELETED_SQL,
-        SELECT_PLATFORM_USER_SQL, SELECT_PROJECT_MEMBER_SQL, SELECT_ROLE_BINDING_SQL,
-        SELECT_SECRET_REF_SQL, UNLINK_EXTERNAL_IDENTITY_SQL, UPDATE_ORGANIZATION_MEMBER_STATUS_SQL,
+        OidcLoginCompletionRecord, PlatformRepositoryError, RECORD_AUTH_SESSION_SQL,
+        RECORD_BEARER_CREDENTIAL_SQL, RECORD_MTLS_IDENTITY_SQL, RECORD_OIDC_AUTH_SESSION_SQL,
+        RECORD_OIDC_LOGIN_ATTEMPT_SQL, RECORD_PLATFORM_AUDIT_EVENT_SQL, RECORD_RESOURCE_OWNER_SQL,
+        REVOKE_AUTH_SESSION_BY_ID_SQL, REVOKE_ORGANIZATION_INVITATION_SQL,
+        SELECT_AUTH_SESSION_BY_ID_SQL, SELECT_AUTH_SESSION_BY_TOKEN_SQL,
+        SELECT_BEARER_CREDENTIAL_BY_TOKEN_SQL, SELECT_EXTERNAL_IDENTITY_SQL,
+        SELECT_MTLS_IDENTITY_BY_SUBJECT_SQL, SELECT_OIDC_LOGIN_ATTEMPT_BY_STATE_SQL,
+        SELECT_OIDC_LOGIN_PROVIDER_SQL, SELECT_ORGANIZATION_INVITATION_BY_TOKEN_HASH_SQL,
+        SELECT_ORGANIZATION_INVITATION_SQL, SELECT_ORGANIZATION_MEMBER_SQL,
+        SELECT_PLATFORM_USER_INCLUDING_DELETED_SQL, SELECT_PLATFORM_USER_SQL,
+        SELECT_PROJECT_MEMBER_SQL, SELECT_ROLE_BINDING_SQL, SELECT_SECRET_REF_SQL,
+        UNLINK_EXTERNAL_IDENTITY_SQL, UPDATE_ORGANIZATION_MEMBER_STATUS_SQL,
         UPDATE_PLATFORM_USER_STATUS_SQL, UPDATE_PROJECT_MEMBER_STATUS_SQL,
         UPDATE_ROLE_BINDING_STATUS_SQL, UPSERT_INVITED_ORGANIZATION_MEMBER_SQL,
         UPSERT_INVITED_PROJECT_MEMBER_SQL, UPSERT_OIDC_EXTERNAL_IDENTITY_SQL,
@@ -4556,7 +4551,13 @@ mod tests {
         UPSERT_OIDC_ORGANIZATION_MEMBERSHIP_SQL, UPSERT_OIDC_PROJECT_MEMBERSHIP_SQL,
         UPSERT_OIDC_USER_ORGANIZATION_SQL, UPSERT_OIDC_USER_PRINCIPAL_SQL,
         UPSERT_OIDC_USER_PROJECT_SQL, UPSERT_OIDC_USER_SQL, UPSERT_ROLE_BINDING_SQL,
-        UPSERT_SECRET_REF_SQL,
+        UPSERT_SECRET_REF_SQL, actor_kind_as_str, actor_kind_from_str,
+        bearer_credential_hash_for_lookup, business_resource_table, mtls_subject_for_lookup,
+        oidc_login_attempt_status_as_str, oidc_login_attempt_status_from_str,
+        oidc_state_hash_for_lookup, project_scope, session_token_hash_for_lookup,
+        validate_auth_session_record, validate_bearer_credential_record,
+        validate_mtls_identity_record, validate_oidc_login_completion_record,
+        validate_platform_resource_record,
     };
     use crate::resource::{
         ApprovalRecord, ConversationRecord, DeferredToolRecord, EnvironmentAttachmentRecord,
@@ -4786,7 +4787,9 @@ mod tests {
         assert!(UPDATE_ORGANIZATION_MEMBER_STATUS_SQL.contains("resource_version = $3"));
         assert!(UPDATE_PROJECT_MEMBER_STATUS_SQL.contains("resource_version = $3"));
         assert!(CASCADE_PROJECT_MEMBERS_FOR_ORGANIZATION_MEMBER_SQL.contains("status = 'active'"));
-        assert!(CASCADE_PROJECT_MEMBERS_FOR_ORGANIZATION_MEMBER_SQL.contains("status <> 'removed'"));
+        assert!(
+            CASCADE_PROJECT_MEMBERS_FOR_ORGANIZATION_MEMBER_SQL.contains("status <> 'removed'")
+        );
     }
 
     #[test]
@@ -4804,13 +4807,17 @@ mod tests {
             assert!(!query.contains("raw_token"));
             assert!(!query.contains("invitation_token text"));
         }
-        assert!(SELECT_ORGANIZATION_INVITATION_BY_TOKEN_HASH_SQL
-            .contains("WHERE invitation_token_hash = $1"));
+        assert!(
+            SELECT_ORGANIZATION_INVITATION_BY_TOKEN_HASH_SQL
+                .contains("WHERE invitation_token_hash = $1")
+        );
         assert!(REVOKE_ORGANIZATION_INVITATION_SQL.contains("resource_version = $2"));
         assert!(REVOKE_ORGANIZATION_INVITATION_SQL.contains("status = 'pending'"));
         assert!(ACCEPT_ORGANIZATION_INVITATION_SQL.contains("accepted_at = to_timestamp($2)"));
-        assert!(UPSERT_INVITED_ORGANIZATION_MEMBER_SQL
-            .contains("ON CONFLICT (organization_id, principal_id)"));
+        assert!(
+            UPSERT_INVITED_ORGANIZATION_MEMBER_SQL
+                .contains("ON CONFLICT (organization_id, principal_id)")
+        );
         assert!(
             UPSERT_INVITED_PROJECT_MEMBER_SQL.contains("ON CONFLICT (project_id, principal_id)")
         );
@@ -4823,10 +4830,15 @@ mod tests {
         assert!(CONSUME_OIDC_LOGIN_ATTEMPT_SQL.contains("expires_at > now()"));
         assert!(CONSUME_OIDC_LOGIN_ATTEMPT_SQL.contains("identity_provider_id = $4"));
 
-        assert!(UPSERT_OIDC_EXTERNAL_IDENTITY_SQL
-            .contains("ON CONFLICT (tenant_id, identity_provider_id, provider_subject)"));
-        assert!(UPSERT_OIDC_EXTERNAL_IDENTITY_SQL
-            .contains("WHERE platform_external_identities.principal_id = EXCLUDED.principal_id"));
+        assert!(
+            UPSERT_OIDC_EXTERNAL_IDENTITY_SQL
+                .contains("ON CONFLICT (tenant_id, identity_provider_id, provider_subject)")
+        );
+        assert!(
+            UPSERT_OIDC_EXTERNAL_IDENTITY_SQL.contains(
+                "WHERE platform_external_identities.principal_id = EXCLUDED.principal_id"
+            )
+        );
         assert!(!UPSERT_OIDC_EXTERNAL_IDENTITY_SQL.contains("raw_token"));
         assert!(!UPSERT_OIDC_EXTERNAL_IDENTITY_SQL.contains("id_token"));
 

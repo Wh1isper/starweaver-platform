@@ -53,37 +53,34 @@ impl PlatformConfig {
     #[must_use]
     pub fn from_env() -> Self {
         let mut config = Self::default();
-        if let Ok(value) = std::env::var("STARWEAVER_PLATFORM_LISTEN_ADDR") {
-            if let Some(value) = non_empty_env(&value) {
-                config.listen_addr = value;
-            }
+        if let Ok(value) = std::env::var("STARWEAVER_PLATFORM_LISTEN_ADDR")
+            && let Some(value) = non_empty_env(&value)
+        {
+            config.listen_addr = value;
         }
-        if let Ok(value) = std::env::var("STARWEAVER_PLATFORM_ENV") {
-            if let Some(value) = non_empty_env(&value) {
-                config.environment = value.to_ascii_lowercase();
-            }
+        if let Ok(value) = std::env::var("STARWEAVER_PLATFORM_ENV")
+            && let Some(value) = non_empty_env(&value)
+        {
+            config.environment = value.to_ascii_lowercase();
         }
         if let Ok(value) = std::env::var("STARWEAVER_PLATFORM_DATABASE_URL") {
             config.database_url = non_empty_env(&value);
         }
-        if let Ok(value) = std::env::var("STARWEAVER_PLATFORM_REPOSITORY_BACKEND") {
-            if let Some(backend) = parse_platform_repository_backend(&value) {
-                config.repository_backend = backend;
-            }
+        if let Ok(value) = std::env::var("STARWEAVER_PLATFORM_REPOSITORY_BACKEND")
+            && let Some(backend) = parse_platform_repository_backend(&value)
+        {
+            config.repository_backend = backend;
         }
-        if let Ok(value) = std::env::var("STARWEAVER_PLATFORM_MAX_BODY_BYTES") {
-            if let Ok(parsed) = value.parse::<usize>() {
-                config.max_body_bytes = parsed;
-            }
+        if let Ok(value) = std::env::var("STARWEAVER_PLATFORM_MAX_BODY_BYTES")
+            && let Ok(parsed) = value.parse::<usize>()
+        {
+            config.max_body_bytes = parsed;
         }
-        if let Ok(value) = std::env::var("STARWEAVER_PLATFORM_REQUEST_TIMEOUT_MS") {
-            if let Ok(parsed) = value.parse::<u64>() {
-                if (MIN_PLATFORM_REQUEST_TIMEOUT_MS..=MAX_PLATFORM_REQUEST_TIMEOUT_MS)
-                    .contains(&parsed)
-                {
-                    config.request_timeout_ms = parsed;
-                }
-            }
+        if let Ok(value) = std::env::var("STARWEAVER_PLATFORM_REQUEST_TIMEOUT_MS")
+            && let Ok(parsed) = value.parse::<u64>()
+            && (MIN_PLATFORM_REQUEST_TIMEOUT_MS..=MAX_PLATFORM_REQUEST_TIMEOUT_MS).contains(&parsed)
+        {
+            config.request_timeout_ms = parsed;
         }
         config.single_user_auth = single_user_auth_from_env();
         config
@@ -297,10 +294,10 @@ fn single_user_auth_from_env() -> Option<PlatformSingleUserConfig> {
     if let Ok(value) = std::env::var("STARWEAVER_PLATFORM_SINGLE_USER_EMAIL") {
         config = config.with_user_primary_email(non_empty_env(&value));
     }
-    if let Ok(value) = std::env::var("STARWEAVER_PLATFORM_SINGLE_USER_DISPLAY_NAME") {
-        if let Some(value) = non_empty_env(&value) {
-            config = config.with_user_display_name(value);
-        }
+    if let Ok(value) = std::env::var("STARWEAVER_PLATFORM_SINGLE_USER_DISPLAY_NAME")
+        && let Some(value) = non_empty_env(&value)
+    {
+        config = config.with_user_display_name(value);
     }
     Some(config)
 }
@@ -382,8 +379,8 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::{
-        is_platform_production_environment, parse_platform_repository_backend,
-        platform_startup_diagnostics, validate_platform_config, PlatformConfig,
+        PlatformConfig, is_platform_production_environment, parse_platform_repository_backend,
+        platform_startup_diagnostics, validate_platform_config,
     };
     use crate::service::PlatformRepositoryBackendKind;
 
@@ -405,10 +402,16 @@ mod tests {
         ENV_LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    fn clear_platform_env() {
-        for key in ENV_KEYS {
-            std::env::remove_var(key);
-        }
+    fn with_unset_env<R>(f: impl FnOnce() -> R) -> R {
+        temp_env::with_vars_unset(ENV_KEYS, f)
+    }
+
+    fn with_env<R>(values: &[(&'static str, &'static str)], f: impl FnOnce() -> R) -> R {
+        let vars = values
+            .iter()
+            .map(|(key, value)| (*key, Some(*value)))
+            .collect::<Vec<_>>();
+        temp_env::with_vars(vars, f)
     }
 
     fn diagnostic_codes(config: &PlatformConfig) -> Vec<&'static str> {
@@ -440,33 +443,38 @@ mod tests {
         let _guard = env_lock()
             .lock()
             .unwrap_or_else(|error| panic!("environment lock poisoned: {error}"));
-        clear_platform_env();
-        std::env::set_var("STARWEAVER_PLATFORM_LISTEN_ADDR", " 127.0.0.1:9001 ");
-        std::env::set_var("STARWEAVER_PLATFORM_ENV", " Production ");
-        std::env::set_var(
-            "STARWEAVER_PLATFORM_DATABASE_URL",
-            " postgres://platform@example/platform ",
-        );
-        std::env::set_var("STARWEAVER_PLATFORM_REPOSITORY_BACKEND", "PostgreSQL");
-        std::env::set_var("STARWEAVER_PLATFORM_MAX_BODY_BYTES", "2048");
-        std::env::set_var("STARWEAVER_PLATFORM_REQUEST_TIMEOUT_MS", "2500");
+        with_unset_env(|| {
+            with_env(
+                &[
+                    ("STARWEAVER_PLATFORM_LISTEN_ADDR", " 127.0.0.1:9001 "),
+                    ("STARWEAVER_PLATFORM_ENV", " Production "),
+                    (
+                        "STARWEAVER_PLATFORM_DATABASE_URL",
+                        " postgres://platform@example/platform ",
+                    ),
+                    ("STARWEAVER_PLATFORM_REPOSITORY_BACKEND", "PostgreSQL"),
+                    ("STARWEAVER_PLATFORM_MAX_BODY_BYTES", "2048"),
+                    ("STARWEAVER_PLATFORM_REQUEST_TIMEOUT_MS", "2500"),
+                ],
+                || {
+                    let config = PlatformConfig::from_env();
 
-        let config = PlatformConfig::from_env();
-        clear_platform_env();
-
-        assert_eq!(config.listen_addr, "127.0.0.1:9001");
-        assert_eq!(config.environment, "production");
-        assert_eq!(
-            config.database_url.as_deref(),
-            Some("postgres://platform@example/platform")
-        );
-        assert_eq!(
-            config.repository_backend,
-            PlatformRepositoryBackendKind::Postgres
-        );
-        assert_eq!(config.max_body_bytes, 2048);
-        assert_eq!(config.request_timeout_ms, 2500);
-        assert!(validate_platform_config(&config).is_ok());
+                    assert_eq!(config.listen_addr, "127.0.0.1:9001");
+                    assert_eq!(config.environment, "production");
+                    assert_eq!(
+                        config.database_url.as_deref(),
+                        Some("postgres://platform@example/platform")
+                    );
+                    assert_eq!(
+                        config.repository_backend,
+                        PlatformRepositoryBackendKind::Postgres
+                    );
+                    assert_eq!(config.max_body_bytes, 2048);
+                    assert_eq!(config.request_timeout_ms, 2500);
+                    assert!(validate_platform_config(&config).is_ok());
+                },
+            );
+        });
     }
 
     #[test]
@@ -474,17 +482,21 @@ mod tests {
         let _guard = env_lock()
             .lock()
             .unwrap_or_else(|error| panic!("environment lock poisoned: {error}"));
-        clear_platform_env();
-        std::env::set_var("STARWEAVER_PLATFORM_LISTEN_ADDR", " ");
-        std::env::set_var("STARWEAVER_PLATFORM_ENV", " ");
-        std::env::set_var("STARWEAVER_PLATFORM_DATABASE_URL", " ");
-        std::env::set_var("STARWEAVER_PLATFORM_REPOSITORY_BACKEND", "unknown");
-        std::env::set_var("STARWEAVER_PLATFORM_REQUEST_TIMEOUT_MS", "99");
-
-        let config = PlatformConfig::from_env();
-        clear_platform_env();
-
-        assert_eq!(config, PlatformConfig::default());
+        with_unset_env(|| {
+            with_env(
+                &[
+                    ("STARWEAVER_PLATFORM_LISTEN_ADDR", " "),
+                    ("STARWEAVER_PLATFORM_ENV", " "),
+                    ("STARWEAVER_PLATFORM_DATABASE_URL", " "),
+                    ("STARWEAVER_PLATFORM_REPOSITORY_BACKEND", "unknown"),
+                    ("STARWEAVER_PLATFORM_REQUEST_TIMEOUT_MS", "99"),
+                ],
+                || {
+                    let config = PlatformConfig::from_env();
+                    assert_eq!(config, PlatformConfig::default());
+                },
+            );
+        });
     }
 
     #[test]
@@ -492,36 +504,48 @@ mod tests {
         let _guard = env_lock()
             .lock()
             .unwrap_or_else(|error| panic!("environment lock poisoned: {error}"));
-        clear_platform_env();
+        with_unset_env(|| {
+            assert!(PlatformConfig::from_env().single_user_auth.is_none());
+            with_env(
+                &[("STARWEAVER_PLATFORM_SINGLE_USER_USERNAME", "admin")],
+                || {
+                    assert!(PlatformConfig::from_env().single_user_auth.is_none());
+                },
+            );
+            with_env(
+                &[
+                    ("STARWEAVER_PLATFORM_SINGLE_USER_USERNAME", "admin"),
+                    ("STARWEAVER_PLATFORM_SINGLE_USER_PASSWORD", " "),
+                ],
+                || {
+                    assert!(PlatformConfig::from_env().single_user_auth.is_none());
+                },
+            );
+            with_env(
+                &[
+                    ("STARWEAVER_PLATFORM_SINGLE_USER_USERNAME", " admin "),
+                    ("STARWEAVER_PLATFORM_SINGLE_USER_PASSWORD", " secret "),
+                    (
+                        "STARWEAVER_PLATFORM_SINGLE_USER_EMAIL",
+                        " admin@example.com ",
+                    ),
+                    ("STARWEAVER_PLATFORM_SINGLE_USER_DISPLAY_NAME", " Admin "),
+                ],
+                || {
+                    let single_user = PlatformConfig::from_env()
+                        .single_user_auth
+                        .unwrap_or_else(|| panic!("single-user config should be enabled"));
 
-        assert!(PlatformConfig::from_env().single_user_auth.is_none());
-
-        std::env::set_var("STARWEAVER_PLATFORM_SINGLE_USER_USERNAME", "admin");
-        assert!(PlatformConfig::from_env().single_user_auth.is_none());
-
-        std::env::set_var("STARWEAVER_PLATFORM_SINGLE_USER_PASSWORD", " ");
-        assert!(PlatformConfig::from_env().single_user_auth.is_none());
-
-        std::env::set_var("STARWEAVER_PLATFORM_SINGLE_USER_USERNAME", " admin ");
-        std::env::set_var("STARWEAVER_PLATFORM_SINGLE_USER_PASSWORD", " secret ");
-        std::env::set_var(
-            "STARWEAVER_PLATFORM_SINGLE_USER_EMAIL",
-            " admin@example.com ",
-        );
-        std::env::set_var("STARWEAVER_PLATFORM_SINGLE_USER_DISPLAY_NAME", " Admin ");
-
-        let single_user = PlatformConfig::from_env()
-            .single_user_auth
-            .unwrap_or_else(|| panic!("single-user config should be enabled"));
-        clear_platform_env();
-
-        assert_eq!(single_user.username(), "admin");
-        assert_eq!(single_user.user_primary_email(), Some("admin@example.com"));
-        assert_eq!(single_user.user_display_name(), "Admin");
-        assert!(single_user.credentials_match("admin", "secret"));
-        assert!(!single_user.credentials_match("admin", "wrong"));
-        assert!(!single_user.credentials_match("other", "secret"));
-        assert!(!format!("{single_user:?}").contains("secret"));
+                    assert_eq!(single_user.username(), "admin");
+                    assert_eq!(single_user.user_primary_email(), Some("admin@example.com"));
+                    assert_eq!(single_user.user_display_name(), "Admin");
+                    assert!(single_user.credentials_match("admin", "secret"));
+                    assert!(!single_user.credentials_match("admin", "wrong"));
+                    assert!(!single_user.credentials_match("other", "secret"));
+                    assert!(!format!("{single_user:?}").contains("secret"));
+                },
+            );
+        });
     }
 
     #[test]

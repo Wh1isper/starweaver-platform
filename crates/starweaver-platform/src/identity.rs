@@ -5,7 +5,7 @@ use std::fmt::{Display, Formatter};
 use std::sync::{Arc, RwLock};
 
 use jsonwebtoken::jwk::{Jwk, JwkSet, PublicKeyUse};
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -1130,10 +1130,11 @@ fn supported_oidc_algorithms(
     }
     let mut algorithms = Vec::new();
     for value in &discovery.id_token_signing_alg_values_supported {
-        if let Some(algorithm) = oidc_algorithm_from_str(value) {
-            if oidc_algorithm_is_asymmetric(algorithm) && !algorithms.contains(value) {
-                algorithms.push(value.clone());
-            }
+        if let Some(algorithm) = oidc_algorithm_from_str(value)
+            && oidc_algorithm_is_asymmetric(algorithm)
+            && !algorithms.contains(value)
+        {
+            algorithms.push(value.clone());
         }
     }
     if algorithms.is_empty() {
@@ -1307,19 +1308,18 @@ fn write_lock<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use jsonwebtoken::jwk::{Jwk, JwkSet, PublicKeyUse};
-    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     use serde_json::json;
 
     use super::{
-        hash_oidc_login_nonce, hash_oidc_login_state, hash_oidc_pkce_verifier, oidc_discovery_url,
-        resolve_oidc_provider_metadata, validate_external_identity, validate_oidc_id_token,
-        validate_oidc_login_attempt_record, validate_oidc_login_provider,
-        validate_oidc_verified_claims, InMemoryPlatformExternalIdentityStore,
-        OidcDiscoveryDocument, OidcLoginAttemptRecord, OidcLoginAttemptStart,
-        OidcLoginAttemptStatus, OidcLoginProviderRecord, OidcLoginProviderStatus,
-        OidcTokenEndpointAuthMethod, OidcValidationError, OidcVerifiedClaims,
-        PlatformExternalIdentityError, PlatformExternalIdentityRecord,
-        PlatformExternalIdentityStatus,
+        InMemoryPlatformExternalIdentityStore, OidcDiscoveryDocument, OidcLoginAttemptRecord,
+        OidcLoginAttemptStart, OidcLoginAttemptStatus, OidcLoginProviderRecord,
+        OidcLoginProviderStatus, OidcTokenEndpointAuthMethod, OidcValidationError,
+        OidcVerifiedClaims, PlatformExternalIdentityError, PlatformExternalIdentityRecord,
+        PlatformExternalIdentityStatus, hash_oidc_login_nonce, hash_oidc_login_state,
+        hash_oidc_pkce_verifier, oidc_discovery_url, resolve_oidc_provider_metadata,
+        validate_external_identity, validate_oidc_id_token, validate_oidc_login_attempt_record,
+        validate_oidc_login_provider, validate_oidc_verified_claims,
     };
 
     #[test]
@@ -1358,9 +1358,11 @@ mod tests {
             .unlink_external_identity("xid_test")
             .unwrap_or_else(|error| panic!("identity should unlink: {error:?}"));
         assert_eq!(unlinked.status, PlatformExternalIdentityStatus::Deleted);
-        assert!(store
-            .external_identities_for_principal("ten_test", "usr_test")
-            .is_empty());
+        assert!(
+            store
+                .external_identities_for_principal("ten_test", "usr_test")
+                .is_empty()
+        );
     }
 
     #[test]

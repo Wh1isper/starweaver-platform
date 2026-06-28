@@ -3,8 +3,8 @@
 use http::Method;
 use serde::Serialize;
 
-use crate::action::GatewayAction;
 use crate::ProtocolFamily;
+use crate::action::GatewayAction;
 
 /// Replay case for a gateway ingress route.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -134,11 +134,11 @@ mod tests {
     use http::Method;
 
     use super::{classify_ingress, foundation_route_replay_cases};
+    use crate::ProtocolFamily;
     use crate::action::{ActionGrant, FoundationAuthorizationEngine};
     use crate::domain::{ActorKind, AuthenticatedActor, CredentialKind};
     use crate::route::{authorize_route_with_evidence, foundation_routes};
     use crate::storage::InMemoryGatewayStore;
-    use crate::ProtocolFamily;
 
     fn api_key_actor() -> AuthenticatedActor {
         AuthenticatedActor {

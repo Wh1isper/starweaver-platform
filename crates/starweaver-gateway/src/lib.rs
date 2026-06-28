@@ -16,6 +16,7 @@ pub mod migrations;
 pub mod policy;
 pub mod redis_hot_state;
 pub mod replay;
+mod responses_websocket;
 pub mod route;
 pub mod routing;
 pub mod runtime;
@@ -84,7 +85,7 @@ impl ProtocolFamily {
 
 #[cfg(test)]
 mod tests {
-    use super::{service_name, ProtocolFamily, SERVICE_NAME};
+    use super::{ProtocolFamily, SERVICE_NAME, service_name};
 
     #[test]
     fn service_name_is_stable() {

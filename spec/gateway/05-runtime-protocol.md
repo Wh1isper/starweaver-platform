@@ -35,14 +35,14 @@ extraction responsibilities for the gateway.
 The gateway exposes protocol-compatible ingress paths. Each path maps to one
 `ProtocolFamily`.
 
-| Family                    | Candidate Paths                                    | Notes                                                    |
-| ------------------------- | -------------------------------------------------- | -------------------------------------------------------- |
-| `openai_responses`        | `POST /v1/responses`                               | OpenAI Responses-compatible body and stream              |
-| `openai_chat`             | `POST /v1/chat/completions`                        | Chat Completions-compatible body and stream              |
-| `anthropic_messages`      | `POST /v1/messages`, optional vendor mount path    | Anthropic Messages-compatible body and SSE               |
-| `gemini_generate_content` | Gemini-style generate and stream paths             | Developer API or Vertex-compatible path by target config |
-| `bedrock_converse`        | Bedrock Converse-compatible paths                  | native AWS shape, auth owned by gateway                  |
-| `provider_native`         | explicit `/native/{provider_kind}/...` style paths | disabled by default; requires native scope and grant     |
+| Family                    | Candidate Paths                                    | Notes                                                                |
+| ------------------------- | -------------------------------------------------- | -------------------------------------------------------------------- |
+| `openai_responses`        | `POST /v1/responses`, `GET /v1/responses`          | OpenAI Responses-compatible HTTP body, stream, and WebSocket upgrade |
+| `openai_chat`             | `POST /v1/chat/completions`                        | Chat Completions-compatible body and stream                          |
+| `anthropic_messages`      | `POST /v1/messages`, optional vendor mount path    | Anthropic Messages-compatible body and SSE                           |
+| `gemini_generate_content` | Gemini-style generate and stream paths             | Developer API or Vertex-compatible path by target config             |
+| `bedrock_converse`        | Bedrock Converse-compatible paths                  | native AWS shape, auth owned by gateway                              |
+| `provider_native`         | explicit `/native/{provider_kind}/...` style paths | disabled by default; requires native scope and grant                 |
 
 The first implementation can support a smaller set, but the spec reserves the
 families to prevent ad hoc route growth.
@@ -72,6 +72,48 @@ POST https://gateway.example/gateway/default/v1/messages
 
 Scoped paths are optional. Authenticated credential ownership remains the source
 of truth for tenant/project context unless the credential has delegation scope.
+
+## Responses WebSocket Proxy
+
+`GET /v1/responses` upgrades to an OpenAI Responses-compatible WebSocket
+session. The WebSocket path uses the same gateway authentication middleware,
+model alias resolution, route policy, provider grant checks, budget preflight,
+usage extraction, and route evidence model as `POST /v1/responses`.
+
+The first valid `response.create` frame pins the WebSocket connection to the
+selected model alias, model target, provider endpoint, credential, and upstream
+WebSocket. Later `response.create` frames on the same connection must use the
+same model alias. Clients that need a different model must open a new WebSocket
+connection.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Gateway
+    participant Provider
+
+    Client->>Gateway: GET /v1/responses upgrade
+    Gateway-->>Client: WebSocket accepted
+    Client->>Gateway: response.create
+    Gateway->>Gateway: authenticate, authorize, preflight, route
+    Gateway->>Provider: Open upstream WebSocket
+    Gateway->>Provider: adapted response.create
+    Provider-->>Gateway: response events
+    Gateway-->>Client: response events
+    Gateway->>Gateway: record route attempt and usage on terminal event
+```
+
+Provider adaptation rewrites the `model` field to the selected upstream model
+and injects a gateway-owned `prompt_cache_key` derived from
+`x-gateway-session-id`, `x-session-id`, API key id, or actor id. OpenAI-compatible
+provider endpoints and Codex OAuth provider endpoints are supported. Codex
+provider endpoints also receive `session_id` and `x-client-request-id` headers
+derived from the same session id.
+
+The proxy forwards upstream text frames as received. It records terminal usage
+from `response.completed.response.usage` when present. Mid-stream failover is
+not attempted because the upstream WebSocket is stateful and provider events are
+not replayable in a provider-neutral way.
 
 ## Request Lifecycle
 

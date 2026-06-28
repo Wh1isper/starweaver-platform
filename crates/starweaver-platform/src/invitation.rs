@@ -477,8 +477,8 @@ fn write_lock<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        hash_platform_invitation_token, InMemoryPlatformInvitationStore, PlatformInvitationError,
-        PlatformInvitationStatus, PlatformOrganizationInvitationRecord,
+        InMemoryPlatformInvitationStore, PlatformInvitationError, PlatformInvitationStatus,
+        PlatformOrganizationInvitationRecord, hash_platform_invitation_token,
     };
 
     #[test]

@@ -852,9 +852,8 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        authorize_item_list, ActionGrant, AuthenticatedActor, AuthorizationEngine,
-        AuthorizationRequest, BuiltInRole, FoundationAuthorizationEngine, PlatformAction,
-        ResourceRef,
+        ActionGrant, AuthenticatedActor, AuthorizationEngine, AuthorizationRequest, BuiltInRole,
+        FoundationAuthorizationEngine, PlatformAction, ResourceRef, authorize_item_list,
     };
 
     const TENANT_ID: &str = "ten_test";

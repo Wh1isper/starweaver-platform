@@ -1,7 +1,7 @@
 //! Authentication helpers for API keys and actor context.
 
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use chrono::{DateTime, Utc};
 use rand_core::{OsRng, RngCore};
 use secrecy::{ExposeSecret, SecretString};
@@ -9,8 +9,8 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::domain::{
-    new_prefixed_id, ActorScope, ApiKeyRecord, ApiKeyStatus, AuthSessionRecord, AuthSessionStatus,
-    AuthenticatedActor, PrincipalId, ProjectId, RequestId, TraceId,
+    ActorScope, ApiKeyRecord, ApiKeyStatus, AuthSessionRecord, AuthSessionStatus,
+    AuthenticatedActor, PrincipalId, ProjectId, RequestId, TraceId, new_prefixed_id,
 };
 use crate::error::{GatewayError, Result};
 use crate::storage::{
@@ -366,9 +366,10 @@ mod tests {
     use secrecy::ExposeSecret;
 
     use super::{
-        create_api_key, create_auth_session, resolve_service_account_actor,
-        resolve_user_session_actor, verify_api_key, verify_session_token, CreateApiKeyRequest,
-        CreateAuthSessionRequest, ResolveServiceAccountRequest, ResolveUserSessionRequest,
+        CreateApiKeyRequest, CreateAuthSessionRequest, ResolveServiceAccountRequest,
+        ResolveUserSessionRequest, create_api_key, create_auth_session,
+        resolve_service_account_actor, resolve_user_session_actor, verify_api_key,
+        verify_session_token,
     };
     use crate::domain::{
         ActorKind, ApiKeyStatus, AuthSessionStatus, CredentialKind, MembershipStatus,
@@ -542,14 +543,16 @@ mod tests {
         let store = InMemoryGatewayStore::default();
         store.insert_api_key(created.record);
 
-        assert!(verify_api_key(
-            &store,
-            created.raw_key.expose_secret(),
-            "req_1".to_owned(),
-            "tr_1".to_owned(),
-            now
-        )
-        .is_err());
+        assert!(
+            verify_api_key(
+                &store,
+                created.raw_key.expose_secret(),
+                "req_1".to_owned(),
+                "tr_1".to_owned(),
+                now
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -575,27 +578,31 @@ mod tests {
         let store = InMemoryGatewayStore::default();
         store.insert_api_key(created.record);
 
-        assert!(verify_api_key(
-            &store,
-            created.raw_key.expose_secret(),
-            "req_1".to_owned(),
-            "tr_1".to_owned(),
-            now
-        )
-        .is_err());
+        assert!(
+            verify_api_key(
+                &store,
+                created.raw_key.expose_secret(),
+                "req_1".to_owned(),
+                "tr_1".to_owned(),
+                now
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn malformed_api_key_is_rejected_before_lookup() {
         let store = InMemoryGatewayStore::default();
-        assert!(verify_api_key(
-            &store,
-            "not-a-gateway-key",
-            "req_1".to_owned(),
-            "tr_1".to_owned(),
-            chrono::Utc::now()
-        )
-        .is_err());
+        assert!(
+            verify_api_key(
+                &store,
+                "not-a-gateway-key",
+                "req_1".to_owned(),
+                "tr_1".to_owned(),
+                chrono::Utc::now()
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -623,14 +630,16 @@ mod tests {
         let store = InMemoryGatewayStore::default();
         store.insert_api_key(created.record);
 
-        assert!(verify_api_key(
-            &store,
-            &wrong_key,
-            "req_1".to_owned(),
-            "tr_1".to_owned(),
-            now
-        )
-        .is_err());
+        assert!(
+            verify_api_key(
+                &store,
+                &wrong_key,
+                "req_1".to_owned(),
+                "tr_1".to_owned(),
+                now
+            )
+            .is_err()
+        );
         assert_eq!(store.failed_api_key_auth_count(&prefix, now), 1);
     }
 
@@ -660,35 +669,41 @@ mod tests {
         store.insert_api_key(created.record);
 
         for index in 0..8 {
-            assert!(verify_api_key(
-                &store,
-                &wrong_key,
-                format!("req_{index}"),
-                format!("tr_{index}"),
-                now
-            )
-            .is_err());
+            assert!(
+                verify_api_key(
+                    &store,
+                    &wrong_key,
+                    format!("req_{index}"),
+                    format!("tr_{index}"),
+                    now
+                )
+                .is_err()
+            );
         }
         assert_eq!(store.failed_api_key_auth_count(&prefix, now), 8);
-        assert!(verify_api_key(
-            &store,
-            &wrong_key,
-            "req_blocked".to_owned(),
-            "tr_blocked".to_owned(),
-            now
-        )
-        .is_err());
+        assert!(
+            verify_api_key(
+                &store,
+                &wrong_key,
+                "req_blocked".to_owned(),
+                "tr_blocked".to_owned(),
+                now
+            )
+            .is_err()
+        );
         assert_eq!(store.failed_api_key_auth_count(&prefix, now), 8);
 
         let later = now + Duration::seconds(61);
-        assert!(verify_api_key(
-            &store,
-            &wrong_key,
-            "req_later".to_owned(),
-            "tr_later".to_owned(),
-            later
-        )
-        .is_err());
+        assert!(
+            verify_api_key(
+                &store,
+                &wrong_key,
+                "req_later".to_owned(),
+                "tr_later".to_owned(),
+                later
+            )
+            .is_err()
+        );
         assert_eq!(store.failed_api_key_auth_count(&prefix, later), 1);
     }
 
@@ -716,14 +731,16 @@ mod tests {
         let store = InMemoryGatewayStore::default();
         store.insert_api_key(created.record);
 
-        assert!(verify_api_key(
-            &store,
-            created.raw_key.expose_secret(),
-            "req_1".to_owned(),
-            "tr_1".to_owned(),
-            now
-        )
-        .is_ok());
+        assert!(
+            verify_api_key(
+                &store,
+                created.raw_key.expose_secret(),
+                "req_1".to_owned(),
+                "tr_1".to_owned(),
+                now
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -761,18 +778,20 @@ mod tests {
         membership.status = MembershipStatus::Suspended;
         store.insert_project_membership(membership);
 
-        assert!(resolve_user_session_actor(
-            &store,
-            ResolveUserSessionRequest {
-                principal_id: "usr_test".to_owned(),
-                session_id: "sess_test".to_owned(),
-                project_id: "prj_test".to_owned(),
-                request_id: "req_test".to_owned(),
-                trace_id: "tr_test".to_owned(),
-                expires_at: None,
-            },
-        )
-        .is_err());
+        assert!(
+            resolve_user_session_actor(
+                &store,
+                ResolveUserSessionRequest {
+                    principal_id: "usr_test".to_owned(),
+                    session_id: "sess_test".to_owned(),
+                    project_id: "prj_test".to_owned(),
+                    request_id: "req_test".to_owned(),
+                    trace_id: "tr_test".to_owned(),
+                    expires_at: None,
+                },
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -550,8 +550,8 @@ fn write_lock<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CreatePlatformSecretRefRequest, InMemoryPlatformSecretStore, PlatformSecretError,
-        ENVIRONMENT_SECRET_BACKEND, IN_MEMORY_SECRET_BACKEND,
+        CreatePlatformSecretRefRequest, ENVIRONMENT_SECRET_BACKEND, IN_MEMORY_SECRET_BACKEND,
+        InMemoryPlatformSecretStore, PlatformSecretError,
     };
 
     #[test]
@@ -585,35 +585,48 @@ mod tests {
 
     #[test]
     fn environment_secret_records_verify_fingerprint_on_resolve() {
-        std::env::set_var("STARWEAVER_PLATFORM_TEST_OIDC_SECRET", "environment-secret");
-        let store = InMemoryPlatformSecretStore::new();
-        let record = store
-            .create_environment_secret_ref(&CreatePlatformSecretRefRequest {
-                secret_ref_id: "sec_environment_oidc".to_owned(),
-                tenant_id: "ten_test".to_owned(),
-                organization_id: None,
-                project_id: None,
-                purpose: "OIDC client secret".to_owned(),
-                backend_kind: ENVIRONMENT_SECRET_BACKEND.to_owned(),
-                backend_locator: "STARWEAVER_PLATFORM_TEST_OIDC_SECRET".to_owned(),
-                in_memory_secret_value: None,
-                created_by: "usr_test".to_owned(),
-            })
-            .unwrap_or_else(|error| panic!("environment secret ref should be valid: {error}"));
+        temp_env::with_var(
+            "STARWEAVER_PLATFORM_TEST_OIDC_SECRET",
+            Some("environment-secret"),
+            || {
+                let store = InMemoryPlatformSecretStore::new();
+                let record = store
+                    .create_environment_secret_ref(&CreatePlatformSecretRefRequest {
+                        secret_ref_id: "sec_environment_oidc".to_owned(),
+                        tenant_id: "ten_test".to_owned(),
+                        organization_id: None,
+                        project_id: None,
+                        purpose: "OIDC client secret".to_owned(),
+                        backend_kind: ENVIRONMENT_SECRET_BACKEND.to_owned(),
+                        backend_locator: "STARWEAVER_PLATFORM_TEST_OIDC_SECRET".to_owned(),
+                        in_memory_secret_value: None,
+                        created_by: "usr_test".to_owned(),
+                    })
+                    .unwrap_or_else(|error| {
+                        panic!("environment secret ref should be valid: {error}")
+                    });
 
-        assert_eq!(
-            store
-                .resolve_secret(&record.secret_ref_id)
-                .unwrap_or_else(|error| panic!("environment secret should resolve: {error}"))
-                .expose(),
-            "environment-secret"
+                assert_eq!(
+                    store
+                        .resolve_secret(&record.secret_ref_id)
+                        .unwrap_or_else(|error| {
+                            panic!("environment secret should resolve: {error}")
+                        })
+                        .expose(),
+                    "environment-secret"
+                );
+                temp_env::with_var(
+                    "STARWEAVER_PLATFORM_TEST_OIDC_SECRET",
+                    Some("changed-secret"),
+                    || {
+                        let Err(error) = store.resolve_secret(&record.secret_ref_id) else {
+                            panic!("changed environment value should fail fingerprint check");
+                        };
+                        assert_eq!(error, PlatformSecretError::SecretFingerprintMismatch);
+                    },
+                );
+            },
         );
-        std::env::set_var("STARWEAVER_PLATFORM_TEST_OIDC_SECRET", "changed-secret");
-        let Err(error) = store.resolve_secret(&record.secret_ref_id) else {
-            panic!("changed environment value should fail fingerprint check");
-        };
-        assert_eq!(error, PlatformSecretError::SecretFingerprintMismatch);
-        std::env::remove_var("STARWEAVER_PLATFORM_TEST_OIDC_SECRET");
     }
 
     #[test]

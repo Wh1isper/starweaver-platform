@@ -754,13 +754,12 @@ fn write_lock<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
 mod tests {
     use crate::action::AuthenticatedActor;
     use crate::auth::{
-        hash_bearer_credential_token, hash_session_token, AuthError,
-        InMemoryPlatformAuthSessionStore, InMemoryPlatformBearerCredentialStore,
+        AuthError, InMemoryPlatformAuthSessionStore, InMemoryPlatformBearerCredentialStore,
         InMemoryPlatformMtlsIdentityStore, PlatformAuthSessionRecord,
         PlatformAuthSessionRepository, PlatformAuthSessionStatus, PlatformBearerCredentialKind,
         PlatformBearerCredentialRecord, PlatformBearerCredentialRepository,
         PlatformBearerCredentialStatus, PlatformMtlsIdentityRecord, PlatformMtlsIdentityRepository,
-        PlatformMtlsIdentityStatus,
+        PlatformMtlsIdentityStatus, hash_bearer_credential_token, hash_session_token,
     };
 
     const TENANT_ID: &str = "ten_test";
@@ -780,10 +779,12 @@ mod tests {
 
         assert_ne!(record.token_hash, RAW_TOKEN);
         assert_eq!(record.token_hash.len(), 64);
-        assert!(record
-            .token_hash
-            .chars()
-            .all(|character| character.is_ascii_hexdigit()));
+        assert!(
+            record
+                .token_hash
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        );
         assert_eq!(record.token_hash, hash_session_token(RAW_TOKEN));
     }
 

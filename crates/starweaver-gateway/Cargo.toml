@@ -17,10 +17,11 @@ workspace = true
 [dependencies]
 argon2 = "0.5"
 async-trait = "0.1"
-axum = { version = "0.8", features = ["json", "macros"] }
+axum = { version = "0.8", features = ["json", "macros", "ws"] }
 cedar-policy = "4.11.2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 fred = { version = "10.1.0", default-features = false, features = ["subscriber-client", "i-keys", "i-hashes", "i-scripts", "i-pubsub", "enable-rustls-ring"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 hmac = "0.12"
 http = "1"
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["rust_crypto"] }
@@ -34,10 +35,12 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-r
 subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio-tungstenite = { version = "0.27", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tower = "0.5"
 url = "2"
 uuid = { version = "1", features = ["serde", "v7"] }
 
 [dev-dependencies]
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["rust_crypto", "use_pem"] }
+temp-env = "0.3.6"
 tower = { version = "0.5", features = ["util"] }

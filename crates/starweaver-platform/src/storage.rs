@@ -110,7 +110,7 @@ pub trait ResourceOwnerRepository {
     /// Loads ownership metadata by resource kind and id.
     #[must_use]
     fn resource_owner(&self, resource_kind: &str, resource_id: &str)
-        -> Option<ResourceOwnerRecord>;
+    -> Option<ResourceOwnerRecord>;
 }
 
 /// In-memory platform resource ownership store.
@@ -196,7 +196,7 @@ mod tests {
         ActionGrant, AuthenticatedActor, AuthorizationEngine, AuthorizationRequest, BuiltInRole,
         FoundationAuthorizationEngine, PlatformAction,
     };
-    use crate::route::{route_metadata, HttpMethod};
+    use crate::route::{HttpMethod, route_metadata};
     use crate::storage::{
         InMemoryResourceOwnerStore, ResourceOwnerRecord, ResourceOwnerRepository, StoreError,
     };
@@ -248,9 +248,11 @@ mod tests {
 
         assert!(store.resource_owner("Run", "shared_id").is_some());
         assert!(store.resource_owner("Approval", "shared_id").is_some());
-        assert!(store
-            .resource_owner("EvidenceArchive", "shared_id")
-            .is_none());
+        assert!(
+            store
+                .resource_owner("EvidenceArchive", "shared_id")
+                .is_none()
+        );
         assert_eq!(store.resource_owners().len(), 2);
     }
 

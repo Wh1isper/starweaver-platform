@@ -13,13 +13,14 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use sqlx::Row;
 
+use crate::ProtocolFamily;
 use crate::action::{
     ActionGrant, AuthorizationDecisionRecord, AuthorizationEvidenceSink, GatewayAction,
 };
 use crate::config::{ConfigSnapshotDocument, PublishedConfigSnapshot};
 use crate::domain::{
-    new_prefixed_id, ApiKeyRecord, ApiKeyStatus, AuditEventRecord, AuthSessionRecord,
-    AuthSessionStatus, BudgetPolicyRecord, CatalogImportRecord, CodexOAuthConnectionRecord,
+    ApiKeyRecord, ApiKeyStatus, AuditEventRecord, AuthSessionRecord, AuthSessionStatus,
+    BudgetPolicyRecord, CatalogImportRecord, CodexOAuthConnectionRecord,
     CodexOAuthConnectionStatus, CodexOAuthRefreshStatusRecord, CodexOAuthSessionRecord,
     CodexOAuthSessionStatus, ConfigInvalidationEventRecord, ConfigPublicationPointerRecord,
     ConfigReloadSource, ConfigSnapshot, ConfigSnapshotStatus, ConfigWorkerReloadRecord,
@@ -35,6 +36,7 @@ use crate::domain::{
     RoutingGroupTargetRecord, RuntimeBudgetLeaseRecord, SecretRefRecord, SecretRefStatus,
     ServiceAccountRecord, TenancySeed, TenantRecord, UpstreamCredentialRecord,
     UpstreamCredentialStatus, UsageEventRecord, UserRecord, ValidationDiagnosticRecord,
+    new_prefixed_id,
 };
 use crate::error::{GatewayError, Result};
 use crate::hot_state::{
@@ -45,7 +47,6 @@ use crate::routing::{
     RouteAttemptRecord, RouteAttemptStatus, RouteDecisionRecord, RouteDecisionStatus,
     RouteEvidenceSink, RouteFilterSummary,
 };
-use crate::ProtocolFamily;
 
 type StickyRouteKey = (String, Option<String>, String, String);
 
@@ -134,7 +135,7 @@ pub trait AuthSessionRepository: Send + Sync {
 
     /// Lists sessions for one principal inside one tenant.
     fn sessions_for_principal(&self, tenant_id: &str, principal_id: &str)
-        -> Vec<AuthSessionRecord>;
+    -> Vec<AuthSessionRecord>;
 
     /// Loads a session by id for one principal inside one tenant.
     fn session_for_principal(
@@ -262,7 +263,7 @@ pub trait ValidationDiagnosticRepository: Send + Sync {
 
     /// Lists validation diagnostics in one tenant.
     fn validation_diagnostics_for_tenant(&self, tenant_id: &str)
-        -> Vec<ValidationDiagnosticRecord>;
+    -> Vec<ValidationDiagnosticRecord>;
 }
 
 /// Usage accounting repository boundary.
@@ -385,7 +386,7 @@ pub trait EmergencyOperationRepository: Send + Sync {
 
     /// Loads one emergency operation.
     fn emergency_operation(&self, emergency_operation_id: &str)
-        -> Option<EmergencyOperationRecord>;
+    -> Option<EmergencyOperationRecord>;
 
     /// Loads the latest active emergency operation by kind.
     fn active_emergency_operation(
@@ -737,7 +738,7 @@ pub trait ProviderAdminRepository: Send + Sync {
 
     /// Loads upstream credential metadata.
     fn upstream_credential(&self, upstream_credential_id: &str)
-        -> Option<UpstreamCredentialRecord>;
+    -> Option<UpstreamCredentialRecord>;
 
     /// Updates upstream credential status with optimistic concurrency.
     fn update_upstream_credential_status(
@@ -1007,7 +1008,7 @@ pub trait CatalogAdminRepository: Send + Sync {
 
     /// Loads exporter health for one config.
     fn otel_exporter_health(&self, otel_export_config_id: &str)
-        -> Option<OtelExporterHealthRecord>;
+    -> Option<OtelExporterHealthRecord>;
 
     /// Lists exporter health records in one tenant.
     fn otel_exporter_health_for_tenant(&self, tenant_id: &str) -> Vec<OtelExporterHealthRecord>;
@@ -4417,10 +4418,8 @@ fn repair_user_defaults_after_invite_accept(
         user.default_organization_id = Some(invitation.organization_id.clone());
     }
     let project_updated = user.default_project_id.is_none() && invitation.project_id.is_some();
-    if project_updated {
-        if let Some(project_id) = invitation.project_id.as_ref() {
-            user.default_project_id = Some(project_id.clone());
-        }
+    if project_updated && let Some(project_id) = invitation.project_id.as_ref() {
+        user.default_project_id = Some(project_id.clone());
     }
     if organization_updated || project_updated {
         user.resource_version += 1;
@@ -4804,10 +4803,10 @@ impl CodexOAuthRepository for InMemoryGatewayStore {
                 message: "stale_resource_version".to_owned(),
             });
         }
-        if status == CodexOAuthConnectionStatus::Disabled {
-            if let Some(upstream_credential_id) = connection.upstream_credential_id.as_deref() {
-                disable_upstream_credential_if_current(self, upstream_credential_id, now);
-            }
+        if status == CodexOAuthConnectionStatus::Disabled
+            && let Some(upstream_credential_id) = connection.upstream_credential_id.as_deref()
+        {
+            disable_upstream_credential_if_current(self, upstream_credential_id, now);
         }
         if status == CodexOAuthConnectionStatus::Unauthenticated {
             connection.upstream_credential_id = None;
@@ -4930,15 +4929,14 @@ impl CodexOAuthRepository for InMemoryGatewayStore {
         disable_upstream_credential_if_current(self, &updated.upstream_credential_id, now);
         {
             let mut connections = write_lock(&self.codex_oauth_connections);
-            if let Some(connection) = connections.get_mut(&updated.codex_oauth_connection_id) {
-                if connection.upstream_credential_id.as_deref()
+            if let Some(connection) = connections.get_mut(&updated.codex_oauth_connection_id)
+                && connection.upstream_credential_id.as_deref()
                     == Some(&updated.upstream_credential_id)
-                {
-                    connection.upstream_credential_id = None;
-                    connection.status = CodexOAuthConnectionStatus::Unauthenticated;
-                    connection.resource_version += 1;
-                    connection.updated_at = now;
-                }
+            {
+                connection.upstream_credential_id = None;
+                connection.status = CodexOAuthConnectionStatus::Unauthenticated;
+                connection.resource_version += 1;
+                connection.updated_at = now;
             }
             drop(connections);
         }
@@ -6617,12 +6615,12 @@ fn validate_service_account_request(
             reason: "organization_tenant_mismatch",
         });
     }
-    if let Some(project) = project.as_ref() {
-        if project.organization_id != organization.organization_id {
-            return Err(GatewayError::BadRequest {
-                message: "service_account_project_organization_mismatch".to_owned(),
-            });
-        }
+    if let Some(project) = project.as_ref()
+        && project.organization_id != organization.organization_id
+    {
+        return Err(GatewayError::BadRequest {
+            message: "service_account_project_organization_mismatch".to_owned(),
+        });
     }
     Ok((
         Some(organization.organization_id),
@@ -6758,12 +6756,12 @@ fn validate_api_key_scope(store: &InMemoryGatewayStore, record: &ApiKeyRecord) -
             reason: "api_key_organization_tenant_mismatch",
         });
     }
-    if let Some(project) = project.as_ref() {
-        if project.organization_id != organization.organization_id {
-            return Err(GatewayError::BadRequest {
-                message: "api_key_project_organization_mismatch".to_owned(),
-            });
-        }
+    if let Some(project) = project.as_ref()
+        && project.organization_id != organization.organization_id
+    {
+        return Err(GatewayError::BadRequest {
+            message: "api_key_project_organization_mismatch".to_owned(),
+        });
     }
     Ok(())
 }
@@ -6895,12 +6893,12 @@ fn validate_optional_project_scope(
             reason: "project_tenant_mismatch",
         });
     }
-    if let Some(organization_id) = organization_id {
-        if project.organization_id != organization_id {
-            return Err(GatewayError::BadRequest {
-                message: "project_organization_mismatch".to_owned(),
-            });
-        }
+    if let Some(organization_id) = organization_id
+        && project.organization_id != organization_id
+    {
+        return Err(GatewayError::BadRequest {
+            message: "project_organization_mismatch".to_owned(),
+        });
     }
     Ok(())
 }
@@ -7252,12 +7250,12 @@ fn validate_pricing_sku_request(
             message: "pricing_sku_provider_patterns_invalid".to_owned(),
         });
     }
-    if let Some(effective_until) = request.effective_until {
-        if effective_until <= request.effective_from {
-            return Err(GatewayError::BadRequest {
-                message: "pricing_sku_effective_window_invalid".to_owned(),
-            });
-        }
+    if let Some(effective_until) = request.effective_until
+        && effective_until <= request.effective_from
+    {
+        return Err(GatewayError::BadRequest {
+            message: "pricing_sku_effective_window_invalid".to_owned(),
+        });
     }
     validate_pricing_document(&request.pricing_document, &request.currency, &request.unit)?;
     let duplicate = read_lock(&store.pricing_skus).values().any(|sku| {
@@ -7572,12 +7570,12 @@ fn validate_budget_policy_limits(request: &CreateBudgetPolicyRequest) -> Result<
             message: "budget_policy_limit_positive_required".to_owned(),
         });
     }
-    if let (Some(soft_limit), Some(hard_limit)) = (request.soft_limit, request.hard_limit) {
-        if soft_limit > hard_limit {
-            return Err(GatewayError::BadRequest {
-                message: "budget_policy_soft_limit_exceeds_hard_limit".to_owned(),
-            });
-        }
+    if let (Some(soft_limit), Some(hard_limit)) = (request.soft_limit, request.hard_limit)
+        && soft_limit > hard_limit
+    {
+        return Err(GatewayError::BadRequest {
+            message: "budget_policy_soft_limit_exceeds_hard_limit".to_owned(),
+        });
     }
     if request.hard_limit.is_some()
         && request.overage_mode == "notify_only"
@@ -11109,16 +11107,16 @@ mod tests {
     use serde_json::json;
 
     use super::{file_secret_path, read_lock};
+    use crate::ProtocolFamily;
     use crate::domain::{
-        new_prefixed_id, DirectoryStatus, OtelResourceAttribute, UsageEventRecord,
+        DirectoryStatus, OtelResourceAttribute, UsageEventRecord, new_prefixed_id,
     };
     use crate::fixtures::bootstrap_request;
     use crate::storage::{
-        ledger_bucket_record_for_event, CatalogAdminRepository, CreateOtelExportConfigRequest,
-        CreateSecretRefRequest, InMemoryGatewayStore, SecretRefAdminRepository,
-        TenancyBootstrapRepository, TenancyRepository,
+        CatalogAdminRepository, CreateOtelExportConfigRequest, CreateSecretRefRequest,
+        InMemoryGatewayStore, SecretRefAdminRepository, TenancyBootstrapRepository,
+        TenancyRepository, ledger_bucket_record_for_event,
     };
-    use crate::ProtocolFamily;
 
     const CORE_SCHEMA: &str = include_str!("../migrations/20260625000001_core_schema.sql");
     const ROUTE_EVIDENCE_FIELDS_MIGRATION: &str =
@@ -11361,8 +11359,10 @@ mod tests {
         assert!(CORE_SCHEMA.contains("gateway_debug_capture_records_scope_time_idx"));
         assert!(CORE_SCHEMA.contains("gateway_otel_export_configs_scope_idx"));
         assert!(CORE_SCHEMA.contains("UNIQUE (tenant_id, request_id)"));
-        assert!(CORE_SCHEMA
-            .contains("upstream_credential_id TEXT REFERENCES gateway_upstream_credentials"));
+        assert!(
+            CORE_SCHEMA
+                .contains("upstream_credential_id TEXT REFERENCES gateway_upstream_credentials")
+        );
         assert!(
             CORE_SCHEMA.contains("provider_endpoint_id, upstream_credential_id, route_policy_id")
         );

@@ -3,8 +3,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{new_prefixed_id, ActorKind, AuthenticatedActor, TenantId};
 use crate::ProtocolFamily;
+use crate::domain::{ActorKind, AuthenticatedActor, TenantId, new_prefixed_id};
 
 /// Route target filter reason.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -431,8 +431,8 @@ pub fn add_filter_reason(summary: &mut Vec<RouteFilterSummary>, reason: RouteFil
 #[cfg(test)]
 mod tests {
     use crate::routing::{
-        add_filter_reason, RouteAttemptRecord, RouteAttemptStatus, RouteFilterReason,
-        SelectedRouteEvidence,
+        RouteAttemptRecord, RouteAttemptStatus, RouteFilterReason, SelectedRouteEvidence,
+        add_filter_reason,
     };
 
     #[test]

@@ -10,8 +10,8 @@ use cedar_policy::{
 };
 
 use crate::action::{
-    gateway_preflight_decision, AuthorizationDecision, AuthorizationEngine, AuthorizationRequest,
-    GatewayAction,
+    AuthorizationDecision, AuthorizationEngine, AuthorizationRequest, GatewayAction,
+    gateway_preflight_decision,
 };
 use crate::domain::ActorKind;
 use crate::error::{GatewayError, Result};
@@ -209,8 +209,8 @@ const fn cedar_actor_type(actor_kind: &ActorKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_cedar_schema_source, validate_cedar_policy_bundle, CedarAuthorizationEngine,
-        CEDAR_NAMESPACE,
+        CEDAR_NAMESPACE, CedarAuthorizationEngine, canonical_cedar_schema_source,
+        validate_cedar_policy_bundle,
     };
     use crate::action::{AuthorizationEngine, AuthorizationRequest, GatewayAction, ResourceRef};
     use crate::domain::{ActorKind, AuthenticatedActor, CredentialKind};
@@ -250,9 +250,11 @@ mod tests {
             panic!("unknown action should fail validation");
         };
 
-        assert!(error
-            .to_string()
-            .contains("cedar policy bundle validation failed"));
+        assert!(
+            error
+                .to_string()
+                .contains("cedar policy bundle validation failed")
+        );
     }
 
     #[test]
@@ -269,9 +271,11 @@ mod tests {
             panic!("action/resource mismatch should fail validation");
         };
 
-        assert!(error
-            .to_string()
-            .contains("cedar policy bundle validation failed"));
+        assert!(
+            error
+                .to_string()
+                .contains("cedar policy bundle validation failed")
+        );
     }
 
     #[test]
