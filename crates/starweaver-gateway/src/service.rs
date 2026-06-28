@@ -106,6 +106,7 @@ use crate::{ProtocolFamily, SERVICE_NAME};
 const REQUEST_ID_HEADER: &str = "x-gateway-request-id";
 const TRACE_ID_HEADER: &str = "x-gateway-trace-id";
 const TRACEPARENT_HEADER: &str = "traceparent";
+const GATEWAY_OPENAPI_JSON: &str = include_str!("../../../docs/openapi/gateway.openapi.json");
 const PROJECT_ID_HEADER: &str = "x-gateway-project-id";
 const GATEWAY_SESSION_ID_HEADER: &str = "x-gateway-session-id";
 const SESSION_ID_HEADER: &str = "x-session-id";
@@ -1362,9 +1363,8 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/version", get(version))
-        .merge(model_routes(&state))
-        .merge(auth_routes())
-        .merge(admin_routes(&state))
+        .merge(gateway_api_routes(&state))
+        .nest("/api", prefixed_gateway_api_routes(&state))
         .layer(DefaultBodyLimit::max(max_body_bytes))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -1372,6 +1372,37 @@ pub fn router(state: AppState) -> Router {
         ))
         .layer(middleware::from_fn(request_id_middleware))
         .with_state(state)
+}
+
+fn gateway_api_routes(state: &AppState) -> Router<AppState> {
+    Router::new()
+        .merge(model_routes(state))
+        .merge(auth_routes())
+        .merge(admin_routes(state))
+}
+
+fn prefixed_gateway_api_routes(state: &AppState) -> Router<AppState> {
+    Router::new()
+        .route("/openapi.json", get(openapi_json))
+        .route("/system/healthz", get(healthz))
+        .route("/system/readyz", get(readyz))
+        .route("/system/version", get(version))
+        .merge(gateway_api_routes(state))
+        .fallback(api_not_found)
+}
+
+async fn openapi_json() -> Result<Json<Value>> {
+    serde_json::from_str(GATEWAY_OPENAPI_JSON)
+        .map(Json)
+        .map_err(|error| GatewayError::Internal {
+            message: format!("failed to parse embedded gateway OpenAPI document: {error}"),
+        })
+}
+
+async fn api_not_found() -> GatewayError {
+    GatewayError::NotFound {
+        resource: "gateway API route".to_owned(),
+    }
 }
 
 fn model_routes(state: &AppState) -> Router<AppState> {
@@ -10134,6 +10165,12 @@ async fn otel_export_metrics(
         })
         .collect::<Vec<_>>();
     let route_attempts = route_attempt_evidence_for_tenant(state, &config.tenant_id).await?;
+    let worker_reloads = state
+        .store
+        .config_worker_reloads_for_tenant(&config.tenant_id);
+    let exporter_health = state
+        .store
+        .otel_exporter_health_for_tenant(&config.tenant_id);
     let mut metrics = vec![
         otel_gauge_i64(
             "gateway.ledger_bucket.count",
@@ -10156,6 +10193,15 @@ async fn otel_export_metrics(
         &usage_events,
         &route_decisions,
         &route_attempts,
+        time_unix_nano,
+    ));
+    metrics.extend(otel_runtime_observability_metrics(
+        &ledger_buckets,
+        &usage_events,
+        &route_decisions,
+        &worker_reloads,
+        &exporter_health,
+        now,
         time_unix_nano,
     ));
     metrics.insert(
@@ -10182,6 +10228,7 @@ struct OtelProviderMetricRollup {
     ttft_sample_count: i64,
     attempt_count: i64,
     failed_attempt_count: i64,
+    failover_count: i64,
 }
 
 fn otel_provider_metrics(
@@ -10260,6 +10307,9 @@ fn otel_provider_rollups(
             .entry(attempt.provider_endpoint_id.clone())
             .or_default();
         rollup.attempt_count = rollup.attempt_count.saturating_add(1);
+        if attempt.attempt_index > 0 {
+            rollup.failover_count = rollup.failover_count.saturating_add(1);
+        }
         if attempt.status != RouteAttemptStatus::Completed {
             rollup.failed_attempt_count = rollup.failed_attempt_count.saturating_add(1);
         }
@@ -10271,7 +10321,7 @@ fn otel_provider_metric_points(
     provider_endpoint_id: &str,
     rollup: &OtelProviderMetricRollup,
     time_unix_nano: i64,
-) -> [Value; 9] {
+) -> [Value; 11] {
     let attributes = [otel_string_attribute(
         "provider_endpoint_id",
         provider_endpoint_id,
@@ -10302,6 +10352,12 @@ fn otel_provider_metric_points(
             &attributes,
         ),
         otel_gauge_i64_with_attributes(
+            "gateway.provider.failover.count",
+            rollup.failover_count,
+            time_unix_nano,
+            &attributes,
+        ),
+        otel_gauge_i64_with_attributes(
             "gateway.provider.latency_ms.avg",
             average_i64(rollup.latency_sum_ms, rollup.latency_sample_count),
             time_unix_nano,
@@ -10310,6 +10366,15 @@ fn otel_provider_metric_points(
         otel_gauge_i64_with_attributes(
             "gateway.provider.ttft_ms.avg",
             average_i64(rollup.ttft_sum_ms, rollup.ttft_sample_count),
+            time_unix_nano,
+            &attributes,
+        ),
+        otel_gauge_i64_with_attributes(
+            "gateway.provider.throughput",
+            average_i64(
+                rollup.output_tokens.saturating_mul(1_000),
+                rollup.latency_sum_ms,
+            ),
             time_unix_nano,
             &attributes,
         ),
@@ -10332,6 +10397,110 @@ fn otel_provider_metric_points(
             &attributes,
         ),
     ]
+}
+
+fn otel_runtime_observability_metrics(
+    ledger_buckets: &[LedgerBucketRecord],
+    usage_events: &[UsageEventRecord],
+    route_decisions: &[RouteDecisionRecord],
+    worker_reloads: &[ConfigWorkerReloadRecord],
+    exporter_health: &[OtelExporterHealthRecord],
+    now: chrono::DateTime<chrono::Utc>,
+    time_unix_nano: i64,
+) -> [Value; 6] {
+    [
+        otel_gauge_i64(
+            "gateway.runtime.health.state",
+            runtime_health_state(route_decisions),
+            time_unix_nano,
+        ),
+        otel_gauge_i64(
+            "gateway.dashboard.freshness_lag.seconds",
+            dashboard_freshness_lag_seconds(ledger_buckets, usage_events, route_decisions, now),
+            time_unix_nano,
+        ),
+        otel_gauge_i64(
+            "gateway.usage_rollup.lag.seconds",
+            usage_rollup_lag_seconds(ledger_buckets, now),
+            time_unix_nano,
+        ),
+        otel_gauge_i64(
+            "gateway.config_publication.lag_ms",
+            config_publication_lag_ms(worker_reloads),
+            time_unix_nano,
+        ),
+        otel_gauge_i64(
+            "gateway.exporter.health.state",
+            exporter_health_state(exporter_health),
+            time_unix_nano,
+        ),
+        otel_gauge_i64(
+            "gateway.exporter.failure.count",
+            exporter_health
+                .iter()
+                .map(|record| record.failure_count)
+                .sum::<i64>(),
+            time_unix_nano,
+        ),
+    ]
+}
+
+fn runtime_health_state(route_decisions: &[RouteDecisionRecord]) -> i64 {
+    i64::from(!route_decisions.iter().any(|decision| {
+        matches!(
+            decision.status,
+            RouteDecisionStatus::NoRoute | RouteDecisionStatus::Blocked
+        )
+    }))
+}
+
+fn dashboard_freshness_lag_seconds(
+    ledger_buckets: &[LedgerBucketRecord],
+    usage_events: &[UsageEventRecord],
+    route_decisions: &[RouteDecisionRecord],
+    now: chrono::DateTime<chrono::Utc>,
+) -> i64 {
+    let latest = ledger_buckets
+        .iter()
+        .map(|bucket| bucket.updated_at)
+        .chain(usage_events.iter().map(|event| event.occurred_at))
+        .chain(route_decisions.iter().map(|decision| decision.occurred_at))
+        .max();
+    latest.map_or(0, |timestamp| observed_lag_seconds(now, timestamp))
+}
+
+fn usage_rollup_lag_seconds(
+    ledger_buckets: &[LedgerBucketRecord],
+    now: chrono::DateTime<chrono::Utc>,
+) -> i64 {
+    ledger_buckets
+        .iter()
+        .map(|bucket| bucket.updated_at)
+        .max()
+        .map_or(0, |timestamp| observed_lag_seconds(now, timestamp))
+}
+
+fn config_publication_lag_ms(worker_reloads: &[ConfigWorkerReloadRecord]) -> i64 {
+    worker_reloads
+        .iter()
+        .map(|reload| reload.publication_lag_ms)
+        .max()
+        .unwrap_or(0)
+}
+
+fn exporter_health_state(exporter_health: &[OtelExporterHealthRecord]) -> i64 {
+    i64::from(
+        !exporter_health
+            .iter()
+            .any(|record| record.status == "retryable_failed"),
+    )
+}
+
+fn observed_lag_seconds(
+    now: chrono::DateTime<chrono::Utc>,
+    observed_at: chrono::DateTime<chrono::Utc>,
+) -> i64 {
+    now.signed_duration_since(observed_at).num_seconds().max(0)
 }
 
 const fn average_i64(sum: i64, count: i64) -> i64 {
@@ -13010,7 +13179,7 @@ async fn model_ingress(
 ) -> Result<Json<RuntimeIngressResponse>> {
     let (parts, body) = request.into_parts();
     let method = parts.method;
-    let path = parts.uri.path().to_owned();
+    let path = canonical_gateway_api_path(parts.uri.path()).to_owned();
     let replay_case = replay_case_for_request(&method, &path)?;
     let actor = authenticated_actor_from_extensions(&parts.extensions)?;
     let (request_body_bytes, body) =
@@ -13090,6 +13259,12 @@ async fn model_ingress(
     .await?;
     release_runtime_policy_reservations(&state, &preflight).await;
     Ok(Json(response))
+}
+
+fn canonical_gateway_api_path(path: &str) -> &str {
+    path.strip_prefix("/api")
+        .filter(|stripped| stripped.starts_with('/'))
+        .unwrap_or(path)
 }
 
 async fn record_successful_runtime_attempt(
@@ -24766,6 +24941,92 @@ mod tests {
         assert!(response.headers().contains_key(REQUEST_ID_HEADER));
     }
 
+    #[tokio::test]
+    async fn api_prefix_exposes_system_probes_and_public_auth_discovery() {
+        let health = match router(AppState::default())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/system/healthz")
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("request should build: {error}")),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => panic!("prefixed health request should complete: {error}"),
+        };
+        assert_eq!(health.status(), StatusCode::OK);
+        assert_eq!(response_json(health).await["schema"], "gateway.health.v1");
+
+        let providers = match router(AppState::default())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/v1/providers")
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("request should build: {error}")),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => panic!("prefixed auth discovery should complete: {error}"),
+        };
+        let status = providers.status();
+        let body = response_json(providers).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["schema"], "gateway.auth.provider_list.v1");
+    }
+
+    #[tokio::test]
+    async fn api_prefix_unknown_paths_return_json_errors() {
+        let response = match router(AppState::default())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/not-a-real-route")
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("request should build: {error}")),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => panic!("unknown api request should complete: {error}"),
+        };
+        let status = response.status();
+        let body = response_json(response).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["schema"], "gateway.error.v1");
+        assert_eq!(body["error"]["code"], "gateway.resource.not_found");
+    }
+
+    #[tokio::test]
+    async fn api_prefix_exposes_external_openapi_contract() {
+        let response = match router(AppState::default())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/openapi.json")
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("request should build: {error}")),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => panic!("prefixed OpenAPI request should complete: {error}"),
+        };
+        let status = response.status();
+        let body = response_json(response).await;
+        let paths = body["paths"]
+            .as_object()
+            .unwrap_or_else(|| panic!("OpenAPI paths should be an object"));
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["openapi"], "3.1.0");
+        assert!(paths.contains_key("/api/v1/responses"));
+        assert!(!paths.contains_key("/v1/responses"));
+        assert_eq!(
+            body["paths"]["/api/v1/responses"]["post"]["x-starweaver-canonical-path"],
+            "/v1/responses"
+        );
+    }
+
     #[test]
     fn gateway_config_from_env_enables_single_user_only_with_required_credentials() {
         const KEYS: &[&str] = &[
@@ -26549,6 +26810,58 @@ mod tests {
                 assert_eq!(body["authorization"]["allowed"], true, "case {}", case.name);
                 assert_provider_shape(case.protocol_family, &body["body"]);
                 assert!(decisions[0].allowed, "case {}", case.name);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn api_prefix_replays_every_foundation_protocol_over_http() {
+        for case in foundation_route_replay_cases() {
+            let (store, raw_key) = gateway_store_with_runtime_access(true);
+            let response = match router(AppState::new(GatewayConfig::default(), store.clone()))
+                .oneshot(
+                    Request::builder()
+                        .method(case.method.clone())
+                        .uri(format!("/api{}", case.ingress_path))
+                        .header(header::AUTHORIZATION, format!("Bearer {raw_key}"))
+                        .header(REQUEST_ID_HEADER, "req_api_ingress")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(json!({"model": "ma_test"}).to_string()))
+                        .unwrap_or_else(|error| panic!("request should build: {error}")),
+                )
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => panic!("case {} request should complete: {error}", case.name),
+            };
+
+            let status = response.status();
+            let body = response_json(response).await;
+            let decisions = store.authorization_decisions();
+            assert_eq!(
+                decisions.len(),
+                1,
+                "case {} should record one authorization decision",
+                case.name
+            );
+            assert_eq!(decisions[0].request_id, "req_api_ingress");
+
+            if case.requires_native_grant {
+                assert_eq!(status, StatusCode::FORBIDDEN, "case {}", case.name);
+                assert_eq!(
+                    body["error"]["code"], "gateway.auth.authorization_denied",
+                    "case {}",
+                    case.name
+                );
+            } else {
+                assert_eq!(status, StatusCode::OK, "case {}", case.name);
+                assert_eq!(
+                    body["protocol_family"],
+                    case.protocol_family.as_str(),
+                    "case {}",
+                    case.name
+                );
+                assert_provider_shape(case.protocol_family, &body["body"]);
             }
         }
     }
@@ -36881,8 +37194,18 @@ mod tests {
         assert!(body_text.contains("gateway.route_decision.count"));
         assert!(body_text.contains("gateway.provider.request.count"));
         assert!(body_text.contains("gateway.provider.latency_ms.avg"));
+        assert!(body_text.contains("gateway.provider.ttft_ms.avg"));
+        assert!(body_text.contains("gateway.provider.throughput"));
+        assert!(body_text.contains("gateway.provider.failover.count"));
+        assert!(body_text.contains("gateway.provider.error.count"));
         assert!(body_text.contains("gateway.provider.input_tokens.sum"));
         assert!(body_text.contains("gateway.provider.estimated_cost_micros.sum"));
+        assert!(body_text.contains("gateway.runtime.health.state"));
+        assert!(body_text.contains("gateway.dashboard.freshness_lag.seconds"));
+        assert!(body_text.contains("gateway.usage_rollup.lag.seconds"));
+        assert!(body_text.contains("gateway.config_publication.lag_ms"));
+        assert!(body_text.contains("gateway.exporter.health.state"));
+        assert!(body_text.contains("gateway.exporter.failure.count"));
         assert!(body_text.contains("provider_endpoint_id"));
         assert!(body_text.contains("pep_openai"));
         assert!(body_text.contains("service.name"));

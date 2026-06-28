@@ -146,6 +146,13 @@ Completed foundation slices:
   routes, budgets, quotas, and workers under `/admin/v1/realtime/*`, all using
   the same realtime dashboard authorization action and Redis-compatible
   hot-state or safe operational evidence sources without querying OpenTelemetry.
+- Gateway API delivery now exposes the same auth, admin, dashboard, evidence,
+  and model ingress routes under the external `/api` mount while preserving the
+  canonical route metadata and root-level compatibility paths. System probes are
+  mirrored under `/api/system/*`, and unknown `/api/*` paths return JSON gateway
+  errors so future SPA fallback cannot swallow API mistakes. The generated
+  gateway OpenAPI contract now uses external `/api` paths, records canonical
+  route metadata, and is served at `/api/openapi.json`.
 - Model observability endpoints now expose alias dashboard, target dashboard,
   alias route diagnostics, alias quality, provider endpoint usage, and provider
   endpoint model-target breakdowns from durable route and usage evidence.
@@ -166,6 +173,11 @@ Completed foundation slices:
   store-only test API remains compatible for deterministic local replay, while
   background worker execution uses the full `AppState` path so exported
   dashboard metrics match durable admin reads.
+- OpenTelemetry metric payloads now include bounded long-term provider,
+  runtime, dashboard freshness, usage rollup lag, config publication lag, and
+  exporter health metrics from durable evidence and readiness state. The
+  built-in realtime dashboard remains Redis-compatible hot-state backed and
+  does not query an OpenTelemetry backend.
 - Sticky routing now uses Redis-compatible hot-state mappings keyed by tenant,
   project, model alias, and a hashed affinity header. Runtime routing reuses a
   fresh sticky target when it is still eligible, records sticky hit or miss
@@ -468,7 +480,13 @@ Completed foundation slices:
   a protocol cannot be added to one surface without the others.
 - GitHub Actions now exposes OpenAPI and gateway contract checks as named CI
   steps, and repository automation verifies that image release artifacts carry
-  the generated OpenAPI schemas alongside image metadata.
+  the generated OpenAPI schemas alongside image metadata. Repository automation
+  also guards the main-branch nightly, scheduled nightly, manual nightly,
+  release tag, GitHub release, and manual release image publication entry
+  points plus the GitHub OIDC access token exchange used for GCR pushes.
+  Nightly and release image jobs validate generated OpenAPI schemas and
+  migration checksum manifests before building and publishing images, so
+  artifact bundles cannot silently carry stale contracts.
 - Release migration checksum manifest generation and checks now cover embedded
   gateway and platform SQL migrations, run through `make ci`, and are included
   in nightly and release image artifact bundles.

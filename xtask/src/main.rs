@@ -45,6 +45,7 @@ use starweaver_platform::route::{
 };
 
 const PAGES_PROJECT_NAME: &str = "starweaver-platform-docs";
+const GATEWAY_EXTERNAL_API_PREFIX: &str = "/api";
 const SITE_URL: &str = "https://starweaver-platform-docs.pages.dev";
 const HARNESS_TENANT_ID: &str = "ten_harness";
 const HARNESS_ORGANIZATION_ID: &str = "org_harness";
@@ -368,8 +369,14 @@ fn validate_gateway_route_contracts(gateway_openapi: &Value) -> Result<(), Strin
         }
         let operation = openapi_operation(
             gateway_openapi,
-            route.path_pattern,
+            &gateway_external_path(route.path_pattern),
             &route.method.as_str().to_ascii_lowercase(),
+        )?;
+        validate_operation_extension(
+            operation,
+            "x-starweaver-canonical-path",
+            route.path_pattern,
+            &route_key,
         )?;
         validate_operation_extension(
             operation,
@@ -496,7 +503,7 @@ fn validate_gateway_replay_case(
 
     let operation = openapi_operation(
         gateway_openapi,
-        route.path_pattern,
+        &gateway_external_path(route.path_pattern),
         &route.method.as_str().to_ascii_lowercase(),
     )?;
     validate_operation_extension(
@@ -609,15 +616,17 @@ fn openapi_contracts() -> Vec<(PathBuf, Value)> {
 fn gateway_openapi_document() -> Value {
     let mut paths = serde_json::Map::new();
     for route in foundation_routes() {
+        let external_path = gateway_external_path(route.path_pattern);
         let method = route.method.as_str().to_ascii_lowercase();
         let operation = json!({
-            "operationId": operation_id("gateway", route.method.as_str(), route.path_pattern, route.action.as_str()),
+            "operationId": operation_id("gateway", route.method.as_str(), &external_path, route.action.as_str()),
             "tags": [gateway_route_tag(route.path_pattern)],
-            "summary": format!("{} {}", route.method.as_str(), route.path_pattern),
-            "parameters": path_parameters(route.path_pattern),
+            "summary": format!("{} {}", route.method.as_str(), external_path),
+            "parameters": path_parameters(&external_path),
             "requestBody": request_body(route.method.as_str()),
             "responses": standard_responses(),
             "security": [{"bearerAuth": []}],
+            "x-starweaver-canonical-path": route.path_pattern,
             "x-starweaver-action-id": route.action.as_str(),
             "x-starweaver-resource-kind": route.resource_kind,
             "x-starweaver-scope-params": route.scope_params,
@@ -626,13 +635,17 @@ fn gateway_openapi_document() -> Value {
             "x-starweaver-audit-event-type": route.audit_event_type,
             "x-starweaver-protocol-family": route.protocol_family.map(ProtocolFamily::as_str),
         });
-        insert_openapi_operation(&mut paths, route.path_pattern, method, operation);
+        insert_openapi_operation(&mut paths, &external_path, method, operation);
     }
     service_openapi_document(
         "Starweaver Gateway API",
-        "Route metadata generated from starweaver-gateway foundation routes.",
+        "External /api route metadata generated from starweaver-gateway foundation routes.",
         &paths,
     )
+}
+
+fn gateway_external_path(path_pattern: &str) -> String {
+    format!("{GATEWAY_EXTERNAL_API_PREFIX}{path_pattern}")
 }
 
 fn platform_openapi_document() -> Value {
@@ -885,6 +898,20 @@ fn check_repository_scripts(args: &[String]) -> Result<(), String> {
     let images_workflow = fs::read_to_string(root.join(".github/workflows/images.yml"))
         .map_err(|error| error.to_string())?;
     for required in [
+        "schedule:",
+        "workflow_dispatch:",
+        "release:",
+        "types: [published]",
+        "push:",
+        "branches:",
+        "- main",
+        "tags:",
+        "v*.*.*",
+        "inputs.channel == 'nightly'",
+        "inputs.channel == 'release'",
+        "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+        "github.ref == 'refs/heads/main'",
+        "startsWith(github.ref, 'refs/tags/v')",
         "starweaver-gateway",
         "starweaver-platform",
         "crates/starweaver-platform/Dockerfile",
@@ -892,6 +919,9 @@ fn check_repository_scripts(args: &[String]) -> Result<(), String> {
         "GCP_PROJECT_ID",
         "GCP_WORKLOAD_IDENTITY_PROVIDER",
         "GCP_SERVICE_ACCOUNT",
+        "token_format: access_token",
+        "Validate release contract artifacts",
+        "make migration-checksum-check openapi-check",
         "Run service image smoke",
         "load: true",
         "provenance: mode=max",

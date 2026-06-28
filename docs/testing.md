@@ -38,8 +38,9 @@ GitHub Actions runs:
   explicit JSON headers.
 - Gateway and platform image build plus `/readyz` smoke when container inputs
   change.
-- Nightly and release gateway and platform image publication to GCR with
-  BuildKit SBOM and provenance attestations.
+- Main-branch nightly, scheduled nightly, manual nightly, and release gateway
+  and platform image publication to GCR with BuildKit SBOM and provenance
+  attestations.
 - Image metadata artifacts with digest, tags, labels, OpenAPI schemas,
   migration checksums, and `SHA256SUMS`.
 - Manual-only live provider smoke workflow for deployed gateways; this is not

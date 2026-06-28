@@ -8,6 +8,11 @@ gateway and platform route metadata:
 
 These files are generated artifacts. Do not edit them by hand.
 
+The gateway OpenAPI artifact describes the external `/api` surface used by
+browser clients and deployed service consumers. The gateway also serves the
+same embedded contract at `/api/openapi.json`; operation extensions keep the
+canonical service route metadata aligned with the external path prefix.
+
 ```bash
 make openapi-generate
 make openapi-check

@@ -108,7 +108,8 @@ Required GitHub configuration:
 | `GCP_SERVICE_ACCOUNT`            | secret             | service account allowed to push GCR images   |
 | `GCR_REGISTRY`                   | variable           | optional registry host, defaults to `gcr.io` |
 
-Nightly builds are published from `main` by the scheduled workflow:
+Nightly builds are published from `main` by the scheduled workflow and by
+`main` branch pushes:
 
 ```text
 gcr.io/$GCP_PROJECT_ID/starweaver-gateway:nightly

@@ -3,16 +3,16 @@
   "info": {
     "title": "Starweaver Gateway API",
     "version": "0.0.1",
-    "description": "Route metadata generated from starweaver-gateway foundation routes."
+    "description": "External /api route metadata generated from starweaver-gateway foundation routes."
   },
   "paths": {
-    "/v1/responses": {
+    "/api/v1/responses": {
       "post": {
-        "operationId": "gateway_post_v1_responses_gateway_model_invoke",
+        "operationId": "gateway_post_api_v1_responses_gateway_model_invoke",
         "tags": [
           "gateway-runtime"
         ],
-        "summary": "POST /v1/responses",
+        "summary": "POST /api/v1/responses",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -52,6 +52,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/v1/responses",
         "x-starweaver-action-id": "gateway.model.invoke",
         "x-starweaver-resource-kind": "ModelAlias",
         "x-starweaver-scope-params": [
@@ -63,13 +64,13 @@
         "x-starweaver-protocol-family": "openai_responses"
       }
     },
-    "/v1/chat/completions": {
+    "/api/v1/chat/completions": {
       "post": {
-        "operationId": "gateway_post_v1_chat_completions_gateway_model_stream",
+        "operationId": "gateway_post_api_v1_chat_completions_gateway_model_stream",
         "tags": [
           "gateway-runtime"
         ],
-        "summary": "POST /v1/chat/completions",
+        "summary": "POST /api/v1/chat/completions",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -109,6 +110,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/v1/chat/completions",
         "x-starweaver-action-id": "gateway.model.stream",
         "x-starweaver-resource-kind": "ModelAlias",
         "x-starweaver-scope-params": [
@@ -120,13 +122,13 @@
         "x-starweaver-protocol-family": "openai_chat"
       }
     },
-    "/v1/messages": {
+    "/api/v1/messages": {
       "post": {
-        "operationId": "gateway_post_v1_messages_gateway_model_invoke",
+        "operationId": "gateway_post_api_v1_messages_gateway_model_invoke",
         "tags": [
           "gateway-runtime"
         ],
-        "summary": "POST /v1/messages",
+        "summary": "POST /api/v1/messages",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -166,6 +168,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/v1/messages",
         "x-starweaver-action-id": "gateway.model.invoke",
         "x-starweaver-resource-kind": "ModelAlias",
         "x-starweaver-scope-params": [
@@ -177,13 +180,13 @@
         "x-starweaver-protocol-family": "anthropic_messages"
       }
     },
-    "/v1beta/models/{model}:generateContent": {
+    "/api/v1beta/models/{model}:generateContent": {
       "post": {
-        "operationId": "gateway_post_v1beta_models_model_generatecontent_gateway_model_invoke",
+        "operationId": "gateway_post_api_v1beta_models_model_generatecontent_gateway_model_invoke",
         "tags": [
           "gateway-runtime"
         ],
-        "summary": "POST /v1beta/models/{model}:generateContent",
+        "summary": "POST /api/v1beta/models/{model}:generateContent",
         "parameters": [
           {
             "name": "model",
@@ -232,6 +235,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/v1beta/models/{model}:generateContent",
         "x-starweaver-action-id": "gateway.model.invoke",
         "x-starweaver-resource-kind": "ModelAlias",
         "x-starweaver-scope-params": [
@@ -243,13 +247,13 @@
         "x-starweaver-protocol-family": "gemini_generate_content"
       }
     },
-    "/model/{model}/converse": {
+    "/api/model/{model}/converse": {
       "post": {
-        "operationId": "gateway_post_model_model_converse_gateway_model_invoke",
+        "operationId": "gateway_post_api_model_model_converse_gateway_model_invoke",
         "tags": [
           "gateway-runtime"
         ],
-        "summary": "POST /model/{model}/converse",
+        "summary": "POST /api/model/{model}/converse",
         "parameters": [
           {
             "name": "model",
@@ -298,6 +302,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/model/{model}/converse",
         "x-starweaver-action-id": "gateway.model.invoke",
         "x-starweaver-resource-kind": "ModelAlias",
         "x-starweaver-scope-params": [
@@ -309,13 +314,13 @@
         "x-starweaver-protocol-family": "bedrock_converse"
       }
     },
-    "/native/{provider}/{operation}": {
+    "/api/native/{provider}/{operation}": {
       "post": {
-        "operationId": "gateway_post_native_provider_operation_gateway_model_native",
+        "operationId": "gateway_post_api_native_provider_operation_gateway_model_native",
         "tags": [
           "gateway-runtime"
         ],
-        "summary": "POST /native/{provider}/{operation}",
+        "summary": "POST /api/native/{provider}/{operation}",
         "parameters": [
           {
             "name": "provider",
@@ -372,6 +377,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/native/{provider}/{operation}",
         "x-starweaver-action-id": "gateway.model.native",
         "x-starweaver-resource-kind": "ProviderNativeEndpoint",
         "x-starweaver-scope-params": [
@@ -384,13 +390,13 @@
         "x-starweaver-protocol-family": "provider_native"
       }
     },
-    "/admin/v1/config/snapshots": {
+    "/api/admin/v1/config/snapshots": {
       "get": {
-        "operationId": "gateway_get_admin_v1_config_snapshots_gateway_config_read",
+        "operationId": "gateway_get_api_admin_v1_config_snapshots_gateway_config_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/config/snapshots",
+        "summary": "GET /api/admin/v1/config/snapshots",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -420,6 +426,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/config/snapshots",
         "x-starweaver-action-id": "gateway.config.read",
         "x-starweaver-resource-kind": "ConfigSnapshot",
         "x-starweaver-scope-params": [
@@ -431,13 +438,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/config/snapshots/{snapshot_id}": {
+    "/api/admin/v1/config/snapshots/{snapshot_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_config_snapshots_snapshot_id_gateway_config_read",
+        "operationId": "gateway_get_api_admin_v1_config_snapshots_snapshot_id_gateway_config_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/config/snapshots/{snapshot_id}",
+        "summary": "GET /api/admin/v1/config/snapshots/{snapshot_id}",
         "parameters": [
           {
             "name": "snapshot_id",
@@ -476,6 +483,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/config/snapshots/{snapshot_id}",
         "x-starweaver-action-id": "gateway.config.read",
         "x-starweaver-resource-kind": "ConfigSnapshot",
         "x-starweaver-scope-params": [
@@ -488,13 +496,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/config/snapshots:validate": {
+    "/api/admin/v1/config/snapshots:validate": {
       "post": {
-        "operationId": "gateway_post_admin_v1_config_snapshots_validate_gateway_config_read",
+        "operationId": "gateway_post_api_admin_v1_config_snapshots_validate_gateway_config_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/config/snapshots:validate",
+        "summary": "POST /api/admin/v1/config/snapshots:validate",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -534,6 +542,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/config/snapshots:validate",
         "x-starweaver-action-id": "gateway.config.read",
         "x-starweaver-resource-kind": "ConfigSnapshot",
         "x-starweaver-scope-params": [
@@ -545,13 +554,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/config/validation-diagnostics": {
+    "/api/admin/v1/config/validation-diagnostics": {
       "get": {
-        "operationId": "gateway_get_admin_v1_config_validation_diagnostics_gateway_config_read",
+        "operationId": "gateway_get_api_admin_v1_config_validation_diagnostics_gateway_config_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/config/validation-diagnostics",
+        "summary": "GET /api/admin/v1/config/validation-diagnostics",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -581,6 +590,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/config/validation-diagnostics",
         "x-starweaver-action-id": "gateway.config.read",
         "x-starweaver-resource-kind": "ConfigSnapshot",
         "x-starweaver-scope-params": [
@@ -592,13 +602,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/route-simulations": {
+    "/api/admin/v1/route-simulations": {
       "post": {
-        "operationId": "gateway_post_admin_v1_route_simulations_gateway_route_simulation_run",
+        "operationId": "gateway_post_api_admin_v1_route_simulations_gateway_route_simulation_run",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/route-simulations",
+        "summary": "POST /api/admin/v1/route-simulations",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -638,6 +648,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/route-simulations",
         "x-starweaver-action-id": "gateway.route_simulation.run",
         "x-starweaver-resource-kind": "RouteSimulation",
         "x-starweaver-scope-params": [
@@ -651,13 +662,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/route-decisions": {
+    "/api/admin/v1/route-decisions": {
       "get": {
-        "operationId": "gateway_get_admin_v1_route_decisions_gateway_route_debug_read",
+        "operationId": "gateway_get_api_admin_v1_route_decisions_gateway_route_debug_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/route-decisions",
+        "summary": "GET /api/admin/v1/route-decisions",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -687,6 +698,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/route-decisions",
         "x-starweaver-action-id": "gateway.route.debug.read",
         "x-starweaver-resource-kind": "RouteDecision",
         "x-starweaver-scope-params": [
@@ -698,13 +710,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/route-decisions/{route_decision_id}": {
+    "/api/admin/v1/route-decisions/{route_decision_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_route_decisions_route_decision_id_gateway_route_debug_read",
+        "operationId": "gateway_get_api_admin_v1_route_decisions_route_decision_id_gateway_route_debug_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/route-decisions/{route_decision_id}",
+        "summary": "GET /api/admin/v1/route-decisions/{route_decision_id}",
         "parameters": [
           {
             "name": "route_decision_id",
@@ -743,6 +755,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/route-decisions/{route_decision_id}",
         "x-starweaver-action-id": "gateway.route.debug.read",
         "x-starweaver-resource-kind": "RouteDecision",
         "x-starweaver-scope-params": [
@@ -755,13 +768,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/route-attempts": {
+    "/api/admin/v1/route-attempts": {
       "get": {
-        "operationId": "gateway_get_admin_v1_route_attempts_gateway_route_debug_read",
+        "operationId": "gateway_get_api_admin_v1_route_attempts_gateway_route_debug_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/route-attempts",
+        "summary": "GET /api/admin/v1/route-attempts",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -791,6 +804,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/route-attempts",
         "x-starweaver-action-id": "gateway.route.debug.read",
         "x-starweaver-resource-kind": "RouteDecision",
         "x-starweaver-scope-params": [
@@ -802,13 +816,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/route-attempts/{route_attempt_event_id}": {
+    "/api/admin/v1/route-attempts/{route_attempt_event_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_route_attempts_route_attempt_event_id_gateway_route_debug_read",
+        "operationId": "gateway_get_api_admin_v1_route_attempts_route_attempt_event_id_gateway_route_debug_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/route-attempts/{route_attempt_event_id}",
+        "summary": "GET /api/admin/v1/route-attempts/{route_attempt_event_id}",
         "parameters": [
           {
             "name": "route_attempt_event_id",
@@ -847,6 +861,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/route-attempts/{route_attempt_event_id}",
         "x-starweaver-action-id": "gateway.route.debug.read",
         "x-starweaver-resource-kind": "RouteDecision",
         "x-starweaver-scope-params": [
@@ -859,13 +874,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/audit/events": {
+    "/api/admin/v1/audit/events": {
       "get": {
-        "operationId": "gateway_get_admin_v1_audit_events_gateway_audit_read",
+        "operationId": "gateway_get_api_admin_v1_audit_events_gateway_audit_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/audit/events",
+        "summary": "GET /api/admin/v1/audit/events",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -895,6 +910,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/audit/events",
         "x-starweaver-action-id": "gateway.audit.read",
         "x-starweaver-resource-kind": "AuditEvent",
         "x-starweaver-scope-params": [
@@ -906,13 +922,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/config/snapshots:publish": {
+    "/api/admin/v1/config/snapshots:publish": {
       "post": {
-        "operationId": "gateway_post_admin_v1_config_snapshots_publish_gateway_config_publish",
+        "operationId": "gateway_post_api_admin_v1_config_snapshots_publish_gateway_config_publish",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/config/snapshots:publish",
+        "summary": "POST /api/admin/v1/config/snapshots:publish",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -952,6 +968,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/config/snapshots:publish",
         "x-starweaver-action-id": "gateway.config.publish",
         "x-starweaver-resource-kind": "ConfigSnapshot",
         "x-starweaver-scope-params": [
@@ -963,13 +980,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/config/snapshots:rollback": {
+    "/api/admin/v1/config/snapshots:rollback": {
       "post": {
-        "operationId": "gateway_post_admin_v1_config_snapshots_rollback_gateway_config_rollback",
+        "operationId": "gateway_post_api_admin_v1_config_snapshots_rollback_gateway_config_rollback",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/config/snapshots:rollback",
+        "summary": "POST /api/admin/v1/config/snapshots:rollback",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -1009,6 +1026,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/config/snapshots:rollback",
         "x-starweaver-action-id": "gateway.config.rollback",
         "x-starweaver-resource-kind": "ConfigSnapshot",
         "x-starweaver-scope-params": [
@@ -1021,13 +1039,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/projects": {
+    "/api/admin/v1/projects": {
       "get": {
-        "operationId": "gateway_get_admin_v1_projects_gateway_project_read",
+        "operationId": "gateway_get_api_admin_v1_projects_gateway_project_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/projects",
+        "summary": "GET /api/admin/v1/projects",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -1057,6 +1075,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/projects",
         "x-starweaver-action-id": "gateway.project.read",
         "x-starweaver-resource-kind": "Project",
         "x-starweaver-scope-params": [
@@ -1068,13 +1087,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/projects/{project_id}": {
+    "/api/admin/v1/projects/{project_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_projects_project_id_gateway_project_read",
+        "operationId": "gateway_get_api_admin_v1_projects_project_id_gateway_project_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/projects/{project_id}",
+        "summary": "GET /api/admin/v1/projects/{project_id}",
         "parameters": [
           {
             "name": "project_id",
@@ -1113,6 +1132,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/projects/{project_id}",
         "x-starweaver-action-id": "gateway.project.read",
         "x-starweaver-resource-kind": "Project",
         "x-starweaver-scope-params": [
@@ -1125,11 +1145,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_projects_project_id_gateway_project_write",
+        "operationId": "gateway_patch_api_admin_v1_projects_project_id_gateway_project_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/projects/{project_id}",
+        "summary": "PATCH /api/admin/v1/projects/{project_id}",
         "parameters": [
           {
             "name": "project_id",
@@ -1178,6 +1198,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/projects/{project_id}",
         "x-starweaver-action-id": "gateway.project.write",
         "x-starweaver-resource-kind": "Project",
         "x-starweaver-scope-params": [
@@ -1190,13 +1211,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/organizations": {
+    "/api/admin/v1/organizations": {
       "get": {
-        "operationId": "gateway_get_admin_v1_organizations_gateway_organization_read",
+        "operationId": "gateway_get_api_admin_v1_organizations_gateway_organization_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/organizations",
+        "summary": "GET /api/admin/v1/organizations",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -1226,6 +1247,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/organizations",
         "x-starweaver-action-id": "gateway.organization.read",
         "x-starweaver-resource-kind": "Organization",
         "x-starweaver-scope-params": [
@@ -1237,13 +1259,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/organizations/{organization_id}": {
+    "/api/admin/v1/organizations/{organization_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_organizations_organization_id_gateway_organization_read",
+        "operationId": "gateway_get_api_admin_v1_organizations_organization_id_gateway_organization_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/organizations/{organization_id}",
+        "summary": "GET /api/admin/v1/organizations/{organization_id}",
         "parameters": [
           {
             "name": "organization_id",
@@ -1282,6 +1304,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/organizations/{organization_id}",
         "x-starweaver-action-id": "gateway.organization.read",
         "x-starweaver-resource-kind": "Organization",
         "x-starweaver-scope-params": [
@@ -1294,11 +1317,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_organizations_organization_id_gateway_organization_write",
+        "operationId": "gateway_patch_api_admin_v1_organizations_organization_id_gateway_organization_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/organizations/{organization_id}",
+        "summary": "PATCH /api/admin/v1/organizations/{organization_id}",
         "parameters": [
           {
             "name": "organization_id",
@@ -1347,6 +1370,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/organizations/{organization_id}",
         "x-starweaver-action-id": "gateway.organization.write",
         "x-starweaver-resource-kind": "Organization",
         "x-starweaver-scope-params": [
@@ -1359,13 +1383,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/organizations/{organization_id}/members": {
+    "/api/admin/v1/organizations/{organization_id}/members": {
       "get": {
-        "operationId": "gateway_get_admin_v1_organizations_organization_id_members_gateway_organization_member_read",
+        "operationId": "gateway_get_api_admin_v1_organizations_organization_id_members_gateway_organization_member_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/organizations/{organization_id}/members",
+        "summary": "GET /api/admin/v1/organizations/{organization_id}/members",
         "parameters": [
           {
             "name": "organization_id",
@@ -1404,6 +1428,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/organizations/{organization_id}/members",
         "x-starweaver-action-id": "gateway.organization_member.read",
         "x-starweaver-resource-kind": "OrganizationMember",
         "x-starweaver-scope-params": [
@@ -1416,13 +1441,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/organizations/{organization_id}/members/{organization_member_id}": {
+    "/api/admin/v1/organizations/{organization_id}/members/{organization_member_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_organizations_organization_id_members_organization_member_id_gateway_organization_member_read",
+        "operationId": "gateway_get_api_admin_v1_organizations_organization_id_members_organization_member_id_gateway_organization_member_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/organizations/{organization_id}/members/{organization_member_id}",
+        "summary": "GET /api/admin/v1/organizations/{organization_id}/members/{organization_member_id}",
         "parameters": [
           {
             "name": "organization_id",
@@ -1469,6 +1494,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/organizations/{organization_id}/members/{organization_member_id}",
         "x-starweaver-action-id": "gateway.organization_member.read",
         "x-starweaver-resource-kind": "OrganizationMember",
         "x-starweaver-scope-params": [
@@ -1482,11 +1508,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_organizations_organization_id_members_organization_member_id_gateway_organization_member_write",
+        "operationId": "gateway_patch_api_admin_v1_organizations_organization_id_members_organization_member_id_gateway_organization_member_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/organizations/{organization_id}/members/{organization_member_id}",
+        "summary": "PATCH /api/admin/v1/organizations/{organization_id}/members/{organization_member_id}",
         "parameters": [
           {
             "name": "organization_id",
@@ -1543,6 +1569,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/organizations/{organization_id}/members/{organization_member_id}",
         "x-starweaver-action-id": "gateway.organization_member.write",
         "x-starweaver-resource-kind": "OrganizationMember",
         "x-starweaver-scope-params": [
@@ -1556,13 +1583,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/projects/{project_id}/members": {
+    "/api/admin/v1/projects/{project_id}/members": {
       "get": {
-        "operationId": "gateway_get_admin_v1_projects_project_id_members_gateway_project_member_read",
+        "operationId": "gateway_get_api_admin_v1_projects_project_id_members_gateway_project_member_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/projects/{project_id}/members",
+        "summary": "GET /api/admin/v1/projects/{project_id}/members",
         "parameters": [
           {
             "name": "project_id",
@@ -1601,6 +1628,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/projects/{project_id}/members",
         "x-starweaver-action-id": "gateway.project_member.read",
         "x-starweaver-resource-kind": "ProjectMember",
         "x-starweaver-scope-params": [
@@ -1613,11 +1641,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_projects_project_id_members_gateway_project_member_write",
+        "operationId": "gateway_post_api_admin_v1_projects_project_id_members_gateway_project_member_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/projects/{project_id}/members",
+        "summary": "POST /api/admin/v1/projects/{project_id}/members",
         "parameters": [
           {
             "name": "project_id",
@@ -1666,6 +1694,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/projects/{project_id}/members",
         "x-starweaver-action-id": "gateway.project_member.write",
         "x-starweaver-resource-kind": "ProjectMember",
         "x-starweaver-scope-params": [
@@ -1678,13 +1707,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/projects/{project_id}/members/{project_member_id}": {
+    "/api/admin/v1/projects/{project_id}/members/{project_member_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_projects_project_id_members_project_member_id_gateway_project_member_read",
+        "operationId": "gateway_get_api_admin_v1_projects_project_id_members_project_member_id_gateway_project_member_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/projects/{project_id}/members/{project_member_id}",
+        "summary": "GET /api/admin/v1/projects/{project_id}/members/{project_member_id}",
         "parameters": [
           {
             "name": "project_id",
@@ -1731,6 +1760,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/projects/{project_id}/members/{project_member_id}",
         "x-starweaver-action-id": "gateway.project_member.read",
         "x-starweaver-resource-kind": "ProjectMember",
         "x-starweaver-scope-params": [
@@ -1744,11 +1774,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_projects_project_id_members_project_member_id_gateway_project_member_write",
+        "operationId": "gateway_patch_api_admin_v1_projects_project_id_members_project_member_id_gateway_project_member_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/projects/{project_id}/members/{project_member_id}",
+        "summary": "PATCH /api/admin/v1/projects/{project_id}/members/{project_member_id}",
         "parameters": [
           {
             "name": "project_id",
@@ -1805,6 +1835,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/projects/{project_id}/members/{project_member_id}",
         "x-starweaver-action-id": "gateway.project_member.write",
         "x-starweaver-resource-kind": "ProjectMember",
         "x-starweaver-scope-params": [
@@ -1818,13 +1849,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/service-accounts": {
+    "/api/admin/v1/service-accounts": {
       "get": {
-        "operationId": "gateway_get_admin_v1_service_accounts_gateway_service_account_read",
+        "operationId": "gateway_get_api_admin_v1_service_accounts_gateway_service_account_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/service-accounts",
+        "summary": "GET /api/admin/v1/service-accounts",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -1854,6 +1885,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/service-accounts",
         "x-starweaver-action-id": "gateway.service_account.read",
         "x-starweaver-resource-kind": "ServiceAccount",
         "x-starweaver-scope-params": [
@@ -1865,11 +1897,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_service_accounts_gateway_service_account_write",
+        "operationId": "gateway_post_api_admin_v1_service_accounts_gateway_service_account_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/service-accounts",
+        "summary": "POST /api/admin/v1/service-accounts",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -1909,6 +1941,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/service-accounts",
         "x-starweaver-action-id": "gateway.service_account.write",
         "x-starweaver-resource-kind": "ServiceAccount",
         "x-starweaver-scope-params": [
@@ -1920,13 +1953,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/service-accounts/{service_account_id}": {
+    "/api/admin/v1/service-accounts/{service_account_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_service_accounts_service_account_id_gateway_service_account_read",
+        "operationId": "gateway_get_api_admin_v1_service_accounts_service_account_id_gateway_service_account_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/service-accounts/{service_account_id}",
+        "summary": "GET /api/admin/v1/service-accounts/{service_account_id}",
         "parameters": [
           {
             "name": "service_account_id",
@@ -1965,6 +1998,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/service-accounts/{service_account_id}",
         "x-starweaver-action-id": "gateway.service_account.read",
         "x-starweaver-resource-kind": "ServiceAccount",
         "x-starweaver-scope-params": [
@@ -1977,11 +2011,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_service_accounts_service_account_id_gateway_service_account_write",
+        "operationId": "gateway_patch_api_admin_v1_service_accounts_service_account_id_gateway_service_account_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/service-accounts/{service_account_id}",
+        "summary": "PATCH /api/admin/v1/service-accounts/{service_account_id}",
         "parameters": [
           {
             "name": "service_account_id",
@@ -2030,6 +2064,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/service-accounts/{service_account_id}",
         "x-starweaver-action-id": "gateway.service_account.write",
         "x-starweaver-resource-kind": "ServiceAccount",
         "x-starweaver-scope-params": [
@@ -2042,13 +2077,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/provider-endpoints": {
+    "/api/admin/v1/provider-endpoints": {
       "get": {
-        "operationId": "gateway_get_admin_v1_provider_endpoints_gateway_provider_endpoint_read",
+        "operationId": "gateway_get_api_admin_v1_provider_endpoints_gateway_provider_endpoint_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/provider-endpoints",
+        "summary": "GET /api/admin/v1/provider-endpoints",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -2078,6 +2113,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/provider-endpoints",
         "x-starweaver-action-id": "gateway.provider_endpoint.read",
         "x-starweaver-resource-kind": "ProviderEndpoint",
         "x-starweaver-scope-params": [
@@ -2089,11 +2125,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_provider_endpoints_gateway_provider_endpoint_write",
+        "operationId": "gateway_post_api_admin_v1_provider_endpoints_gateway_provider_endpoint_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/provider-endpoints",
+        "summary": "POST /api/admin/v1/provider-endpoints",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -2133,6 +2169,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/provider-endpoints",
         "x-starweaver-action-id": "gateway.provider_endpoint.write",
         "x-starweaver-resource-kind": "ProviderEndpoint",
         "x-starweaver-scope-params": [
@@ -2144,13 +2181,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/provider-endpoints:validate": {
+    "/api/admin/v1/provider-endpoints:validate": {
       "post": {
-        "operationId": "gateway_post_admin_v1_provider_endpoints_validate_gateway_provider_endpoint_read",
+        "operationId": "gateway_post_api_admin_v1_provider_endpoints_validate_gateway_provider_endpoint_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/provider-endpoints:validate",
+        "summary": "POST /api/admin/v1/provider-endpoints:validate",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -2190,6 +2227,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/provider-endpoints:validate",
         "x-starweaver-action-id": "gateway.provider_endpoint.read",
         "x-starweaver-resource-kind": "ProviderEndpoint",
         "x-starweaver-scope-params": [
@@ -2201,13 +2239,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/provider-endpoints/{provider_endpoint_id}": {
+    "/api/admin/v1/provider-endpoints/{provider_endpoint_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_provider_endpoints_provider_endpoint_id_gateway_provider_endpoint_read",
+        "operationId": "gateway_get_api_admin_v1_provider_endpoints_provider_endpoint_id_gateway_provider_endpoint_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/provider-endpoints/{provider_endpoint_id}",
+        "summary": "GET /api/admin/v1/provider-endpoints/{provider_endpoint_id}",
         "parameters": [
           {
             "name": "provider_endpoint_id",
@@ -2246,6 +2284,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/provider-endpoints/{provider_endpoint_id}",
         "x-starweaver-action-id": "gateway.provider_endpoint.read",
         "x-starweaver-resource-kind": "ProviderEndpoint",
         "x-starweaver-scope-params": [
@@ -2258,11 +2297,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_provider_endpoints_provider_endpoint_id_gateway_provider_endpoint_write",
+        "operationId": "gateway_patch_api_admin_v1_provider_endpoints_provider_endpoint_id_gateway_provider_endpoint_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/provider-endpoints/{provider_endpoint_id}",
+        "summary": "PATCH /api/admin/v1/provider-endpoints/{provider_endpoint_id}",
         "parameters": [
           {
             "name": "provider_endpoint_id",
@@ -2311,6 +2350,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/provider-endpoints/{provider_endpoint_id}",
         "x-starweaver-action-id": "gateway.provider_endpoint.write",
         "x-starweaver-resource-kind": "ProviderEndpoint",
         "x-starweaver-scope-params": [
@@ -2323,13 +2363,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/upstream-credentials": {
+    "/api/admin/v1/upstream-credentials": {
       "get": {
-        "operationId": "gateway_get_admin_v1_upstream_credentials_gateway_upstream_credential_read",
+        "operationId": "gateway_get_api_admin_v1_upstream_credentials_gateway_upstream_credential_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/upstream-credentials",
+        "summary": "GET /api/admin/v1/upstream-credentials",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -2359,6 +2399,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/upstream-credentials",
         "x-starweaver-action-id": "gateway.upstream_credential.read",
         "x-starweaver-resource-kind": "UpstreamCredential",
         "x-starweaver-scope-params": [
@@ -2370,11 +2411,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_upstream_credentials_gateway_upstream_credential_write",
+        "operationId": "gateway_post_api_admin_v1_upstream_credentials_gateway_upstream_credential_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/upstream-credentials",
+        "summary": "POST /api/admin/v1/upstream-credentials",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -2414,6 +2455,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/upstream-credentials",
         "x-starweaver-action-id": "gateway.upstream_credential.write",
         "x-starweaver-resource-kind": "UpstreamCredential",
         "x-starweaver-scope-params": [
@@ -2425,13 +2467,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/upstream-credentials:validate": {
+    "/api/admin/v1/upstream-credentials:validate": {
       "post": {
-        "operationId": "gateway_post_admin_v1_upstream_credentials_validate_gateway_upstream_credential_read",
+        "operationId": "gateway_post_api_admin_v1_upstream_credentials_validate_gateway_upstream_credential_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/upstream-credentials:validate",
+        "summary": "POST /api/admin/v1/upstream-credentials:validate",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -2471,6 +2513,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/upstream-credentials:validate",
         "x-starweaver-action-id": "gateway.upstream_credential.read",
         "x-starweaver-resource-kind": "UpstreamCredential",
         "x-starweaver-scope-params": [
@@ -2482,13 +2525,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/upstream-credentials/{upstream_credential_id}": {
+    "/api/admin/v1/upstream-credentials/{upstream_credential_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_upstream_credentials_upstream_credential_id_gateway_upstream_credential_read",
+        "operationId": "gateway_get_api_admin_v1_upstream_credentials_upstream_credential_id_gateway_upstream_credential_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/upstream-credentials/{upstream_credential_id}",
+        "summary": "GET /api/admin/v1/upstream-credentials/{upstream_credential_id}",
         "parameters": [
           {
             "name": "upstream_credential_id",
@@ -2527,6 +2570,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/upstream-credentials/{upstream_credential_id}",
         "x-starweaver-action-id": "gateway.upstream_credential.read",
         "x-starweaver-resource-kind": "UpstreamCredential",
         "x-starweaver-scope-params": [
@@ -2539,11 +2583,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_upstream_credentials_upstream_credential_id_gateway_upstream_credential_write",
+        "operationId": "gateway_patch_api_admin_v1_upstream_credentials_upstream_credential_id_gateway_upstream_credential_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/upstream-credentials/{upstream_credential_id}",
+        "summary": "PATCH /api/admin/v1/upstream-credentials/{upstream_credential_id}",
         "parameters": [
           {
             "name": "upstream_credential_id",
@@ -2592,6 +2636,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/upstream-credentials/{upstream_credential_id}",
         "x-starweaver-action-id": "gateway.upstream_credential.write",
         "x-starweaver-resource-kind": "UpstreamCredential",
         "x-starweaver-scope-params": [
@@ -2604,13 +2649,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/codex/oauth/connections": {
+    "/api/admin/v1/codex/oauth/connections": {
       "get": {
-        "operationId": "gateway_get_admin_v1_codex_oauth_connections_gateway_codex_oauth_connection_read",
+        "operationId": "gateway_get_api_admin_v1_codex_oauth_connections_gateway_codex_oauth_connection_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/codex/oauth/connections",
+        "summary": "GET /api/admin/v1/codex/oauth/connections",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -2640,6 +2685,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/codex/oauth/connections",
         "x-starweaver-action-id": "gateway.codex_oauth_connection.read",
         "x-starweaver-resource-kind": "CodexOAuthConnection",
         "x-starweaver-scope-params": [
@@ -2651,11 +2697,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_codex_oauth_connections_gateway_codex_oauth_connection_write",
+        "operationId": "gateway_post_api_admin_v1_codex_oauth_connections_gateway_codex_oauth_connection_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/codex/oauth/connections",
+        "summary": "POST /api/admin/v1/codex/oauth/connections",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -2695,6 +2741,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/codex/oauth/connections",
         "x-starweaver-action-id": "gateway.codex_oauth_connection.write",
         "x-starweaver-resource-kind": "CodexOAuthConnection",
         "x-starweaver-scope-params": [
@@ -2706,13 +2753,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/codex/oauth/connections/{codex_oauth_connection_id}": {
+    "/api/admin/v1/codex/oauth/connections/{codex_oauth_connection_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_codex_oauth_connections_codex_oauth_connection_id_gateway_codex_oauth_connection_read",
+        "operationId": "gateway_get_api_admin_v1_codex_oauth_connections_codex_oauth_connection_id_gateway_codex_oauth_connection_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/codex/oauth/connections/{codex_oauth_connection_id}",
+        "summary": "GET /api/admin/v1/codex/oauth/connections/{codex_oauth_connection_id}",
         "parameters": [
           {
             "name": "codex_oauth_connection_id",
@@ -2751,6 +2798,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/codex/oauth/connections/{codex_oauth_connection_id}",
         "x-starweaver-action-id": "gateway.codex_oauth_connection.read",
         "x-starweaver-resource-kind": "CodexOAuthConnection",
         "x-starweaver-scope-params": [
@@ -2763,11 +2811,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_codex_oauth_connections_codex_oauth_connection_id_gateway_codex_oauth_connection_write",
+        "operationId": "gateway_patch_api_admin_v1_codex_oauth_connections_codex_oauth_connection_id_gateway_codex_oauth_connection_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/codex/oauth/connections/{codex_oauth_connection_id}",
+        "summary": "PATCH /api/admin/v1/codex/oauth/connections/{codex_oauth_connection_id}",
         "parameters": [
           {
             "name": "codex_oauth_connection_id",
@@ -2816,6 +2864,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/codex/oauth/connections/{codex_oauth_connection_id}",
         "x-starweaver-action-id": "gateway.codex_oauth_connection.write",
         "x-starweaver-resource-kind": "CodexOAuthConnection",
         "x-starweaver-scope-params": [
@@ -2828,13 +2877,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/codex/oauth/connections/{codex_oauth_connection_id}/sessions": {
+    "/api/admin/v1/codex/oauth/connections/{codex_oauth_connection_id}/sessions": {
       "get": {
-        "operationId": "gateway_get_admin_v1_codex_oauth_connections_codex_oauth_connection_id_sessions_gateway_codex_oauth_session_read",
+        "operationId": "gateway_get_api_admin_v1_codex_oauth_connections_codex_oauth_connection_id_sessions_gateway_codex_oauth_session_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/codex/oauth/connections/{codex_oauth_connection_id}/sessions",
+        "summary": "GET /api/admin/v1/codex/oauth/connections/{codex_oauth_connection_id}/sessions",
         "parameters": [
           {
             "name": "codex_oauth_connection_id",
@@ -2873,6 +2922,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/codex/oauth/connections/{codex_oauth_connection_id}/sessions",
         "x-starweaver-action-id": "gateway.codex_oauth_session.read",
         "x-starweaver-resource-kind": "CodexOAuthSession",
         "x-starweaver-scope-params": [
@@ -2885,11 +2935,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_codex_oauth_connections_codex_oauth_connection_id_sessions_gateway_codex_oauth_session_start",
+        "operationId": "gateway_post_api_admin_v1_codex_oauth_connections_codex_oauth_connection_id_sessions_gateway_codex_oauth_session_start",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/codex/oauth/connections/{codex_oauth_connection_id}/sessions",
+        "summary": "POST /api/admin/v1/codex/oauth/connections/{codex_oauth_connection_id}/sessions",
         "parameters": [
           {
             "name": "codex_oauth_connection_id",
@@ -2938,6 +2988,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/codex/oauth/connections/{codex_oauth_connection_id}/sessions",
         "x-starweaver-action-id": "gateway.codex_oauth_session.start",
         "x-starweaver-resource-kind": "CodexOAuthSession",
         "x-starweaver-scope-params": [
@@ -2950,13 +3001,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/codex/oauth/sessions/{codex_oauth_session_id}": {
+    "/api/admin/v1/codex/oauth/sessions/{codex_oauth_session_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_codex_oauth_sessions_codex_oauth_session_id_gateway_codex_oauth_session_read",
+        "operationId": "gateway_get_api_admin_v1_codex_oauth_sessions_codex_oauth_session_id_gateway_codex_oauth_session_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/codex/oauth/sessions/{codex_oauth_session_id}",
+        "summary": "GET /api/admin/v1/codex/oauth/sessions/{codex_oauth_session_id}",
         "parameters": [
           {
             "name": "codex_oauth_session_id",
@@ -2995,6 +3046,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/codex/oauth/sessions/{codex_oauth_session_id}",
         "x-starweaver-action-id": "gateway.codex_oauth_session.read",
         "x-starweaver-resource-kind": "CodexOAuthSession",
         "x-starweaver-scope-params": [
@@ -3007,13 +3059,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/codex/oauth/sessions/{codex_oauth_session_id}/revoke": {
+    "/api/admin/v1/codex/oauth/sessions/{codex_oauth_session_id}/revoke": {
       "post": {
-        "operationId": "gateway_post_admin_v1_codex_oauth_sessions_codex_oauth_session_id_revoke_gateway_codex_oauth_session_revoke",
+        "operationId": "gateway_post_api_admin_v1_codex_oauth_sessions_codex_oauth_session_id_revoke_gateway_codex_oauth_session_revoke",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/codex/oauth/sessions/{codex_oauth_session_id}/revoke",
+        "summary": "POST /api/admin/v1/codex/oauth/sessions/{codex_oauth_session_id}/revoke",
         "parameters": [
           {
             "name": "codex_oauth_session_id",
@@ -3062,6 +3114,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/codex/oauth/sessions/{codex_oauth_session_id}/revoke",
         "x-starweaver-action-id": "gateway.codex_oauth_session.revoke",
         "x-starweaver-resource-kind": "CodexOAuthSession",
         "x-starweaver-scope-params": [
@@ -3074,13 +3127,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/codex/oauth/refresh-status/{codex_oauth_connection_id}": {
+    "/api/admin/v1/codex/oauth/refresh-status/{codex_oauth_connection_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_codex_oauth_refresh_status_codex_oauth_connection_id_gateway_codex_oauth_refresh_read",
+        "operationId": "gateway_get_api_admin_v1_codex_oauth_refresh_status_codex_oauth_connection_id_gateway_codex_oauth_refresh_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/codex/oauth/refresh-status/{codex_oauth_connection_id}",
+        "summary": "GET /api/admin/v1/codex/oauth/refresh-status/{codex_oauth_connection_id}",
         "parameters": [
           {
             "name": "codex_oauth_connection_id",
@@ -3119,6 +3172,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/codex/oauth/refresh-status/{codex_oauth_connection_id}",
         "x-starweaver-action-id": "gateway.codex_oauth_refresh.read",
         "x-starweaver-resource-kind": "CodexOAuthRefreshStatus",
         "x-starweaver-scope-params": [
@@ -3131,13 +3185,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/secret-refs": {
+    "/api/admin/v1/secret-refs": {
       "get": {
-        "operationId": "gateway_get_admin_v1_secret_refs_gateway_secret_ref_read",
+        "operationId": "gateway_get_api_admin_v1_secret_refs_gateway_secret_ref_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/secret-refs",
+        "summary": "GET /api/admin/v1/secret-refs",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -3167,6 +3221,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/secret-refs",
         "x-starweaver-action-id": "gateway.secret_ref.read",
         "x-starweaver-resource-kind": "SecretRef",
         "x-starweaver-scope-params": [
@@ -3178,11 +3233,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_secret_refs_gateway_secret_ref_write",
+        "operationId": "gateway_post_api_admin_v1_secret_refs_gateway_secret_ref_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/secret-refs",
+        "summary": "POST /api/admin/v1/secret-refs",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -3222,6 +3277,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/secret-refs",
         "x-starweaver-action-id": "gateway.secret_ref.write",
         "x-starweaver-resource-kind": "SecretRef",
         "x-starweaver-scope-params": [
@@ -3233,13 +3289,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/secret-refs/{secret_ref_id}": {
+    "/api/admin/v1/secret-refs/{secret_ref_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_secret_refs_secret_ref_id_gateway_secret_ref_read",
+        "operationId": "gateway_get_api_admin_v1_secret_refs_secret_ref_id_gateway_secret_ref_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/secret-refs/{secret_ref_id}",
+        "summary": "GET /api/admin/v1/secret-refs/{secret_ref_id}",
         "parameters": [
           {
             "name": "secret_ref_id",
@@ -3278,6 +3334,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/secret-refs/{secret_ref_id}",
         "x-starweaver-action-id": "gateway.secret_ref.read",
         "x-starweaver-resource-kind": "SecretRef",
         "x-starweaver-scope-params": [
@@ -3290,11 +3347,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_secret_refs_secret_ref_id_gateway_secret_ref_write",
+        "operationId": "gateway_patch_api_admin_v1_secret_refs_secret_ref_id_gateway_secret_ref_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/secret-refs/{secret_ref_id}",
+        "summary": "PATCH /api/admin/v1/secret-refs/{secret_ref_id}",
         "parameters": [
           {
             "name": "secret_ref_id",
@@ -3343,6 +3400,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/secret-refs/{secret_ref_id}",
         "x-starweaver-action-id": "gateway.secret_ref.write",
         "x-starweaver-resource-kind": "SecretRef",
         "x-starweaver-scope-params": [
@@ -3355,13 +3413,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/secret-refs/{secret_ref_id}/locator": {
+    "/api/admin/v1/secret-refs/{secret_ref_id}/locator": {
       "get": {
-        "operationId": "gateway_get_admin_v1_secret_refs_secret_ref_id_locator_gateway_secret_ref_locator_read",
+        "operationId": "gateway_get_api_admin_v1_secret_refs_secret_ref_id_locator_gateway_secret_ref_locator_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/secret-refs/{secret_ref_id}/locator",
+        "summary": "GET /api/admin/v1/secret-refs/{secret_ref_id}/locator",
         "parameters": [
           {
             "name": "secret_ref_id",
@@ -3400,6 +3458,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/secret-refs/{secret_ref_id}/locator",
         "x-starweaver-action-id": "gateway.secret_ref.locator.read",
         "x-starweaver-resource-kind": "SecretRef",
         "x-starweaver-scope-params": [
@@ -3412,13 +3471,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/secret-refs/{secret_ref_id}/rotate": {
+    "/api/admin/v1/secret-refs/{secret_ref_id}/rotate": {
       "post": {
-        "operationId": "gateway_post_admin_v1_secret_refs_secret_ref_id_rotate_gateway_secret_ref_write",
+        "operationId": "gateway_post_api_admin_v1_secret_refs_secret_ref_id_rotate_gateway_secret_ref_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/secret-refs/{secret_ref_id}/rotate",
+        "summary": "POST /api/admin/v1/secret-refs/{secret_ref_id}/rotate",
         "parameters": [
           {
             "name": "secret_ref_id",
@@ -3467,6 +3526,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/secret-refs/{secret_ref_id}/rotate",
         "x-starweaver-action-id": "gateway.secret_ref.write",
         "x-starweaver-resource-kind": "SecretRef",
         "x-starweaver-scope-params": [
@@ -3479,13 +3539,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/model-targets": {
+    "/api/admin/v1/model-targets": {
       "get": {
-        "operationId": "gateway_get_admin_v1_model_targets_gateway_model_target_read",
+        "operationId": "gateway_get_api_admin_v1_model_targets_gateway_model_target_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/model-targets",
+        "summary": "GET /api/admin/v1/model-targets",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -3515,6 +3575,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/model-targets",
         "x-starweaver-action-id": "gateway.model_target.read",
         "x-starweaver-resource-kind": "ModelTarget",
         "x-starweaver-scope-params": [
@@ -3526,11 +3587,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_model_targets_gateway_model_target_write",
+        "operationId": "gateway_post_api_admin_v1_model_targets_gateway_model_target_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/model-targets",
+        "summary": "POST /api/admin/v1/model-targets",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -3570,6 +3631,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/model-targets",
         "x-starweaver-action-id": "gateway.model_target.write",
         "x-starweaver-resource-kind": "ModelTarget",
         "x-starweaver-scope-params": [
@@ -3581,13 +3643,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/model-targets:validate": {
+    "/api/admin/v1/model-targets:validate": {
       "post": {
-        "operationId": "gateway_post_admin_v1_model_targets_validate_gateway_model_target_read",
+        "operationId": "gateway_post_api_admin_v1_model_targets_validate_gateway_model_target_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/model-targets:validate",
+        "summary": "POST /api/admin/v1/model-targets:validate",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -3627,6 +3689,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/model-targets:validate",
         "x-starweaver-action-id": "gateway.model_target.read",
         "x-starweaver-resource-kind": "ModelTarget",
         "x-starweaver-scope-params": [
@@ -3638,13 +3701,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/model-targets/{model_target_id}": {
+    "/api/admin/v1/model-targets/{model_target_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_model_targets_model_target_id_gateway_model_target_read",
+        "operationId": "gateway_get_api_admin_v1_model_targets_model_target_id_gateway_model_target_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/model-targets/{model_target_id}",
+        "summary": "GET /api/admin/v1/model-targets/{model_target_id}",
         "parameters": [
           {
             "name": "model_target_id",
@@ -3683,6 +3746,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/model-targets/{model_target_id}",
         "x-starweaver-action-id": "gateway.model_target.read",
         "x-starweaver-resource-kind": "ModelTarget",
         "x-starweaver-scope-params": [
@@ -3695,11 +3759,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_model_targets_model_target_id_gateway_model_target_write",
+        "operationId": "gateway_patch_api_admin_v1_model_targets_model_target_id_gateway_model_target_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/model-targets/{model_target_id}",
+        "summary": "PATCH /api/admin/v1/model-targets/{model_target_id}",
         "parameters": [
           {
             "name": "model_target_id",
@@ -3748,6 +3812,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/model-targets/{model_target_id}",
         "x-starweaver-action-id": "gateway.model_target.write",
         "x-starweaver-resource-kind": "ModelTarget",
         "x-starweaver-scope-params": [
@@ -3760,13 +3825,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/model-aliases": {
+    "/api/admin/v1/model-aliases": {
       "get": {
-        "operationId": "gateway_get_admin_v1_model_aliases_gateway_model_alias_read",
+        "operationId": "gateway_get_api_admin_v1_model_aliases_gateway_model_alias_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/model-aliases",
+        "summary": "GET /api/admin/v1/model-aliases",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -3796,6 +3861,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/model-aliases",
         "x-starweaver-action-id": "gateway.model_alias.read",
         "x-starweaver-resource-kind": "ModelAlias",
         "x-starweaver-scope-params": [
@@ -3807,11 +3873,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_model_aliases_gateway_model_alias_write",
+        "operationId": "gateway_post_api_admin_v1_model_aliases_gateway_model_alias_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/model-aliases",
+        "summary": "POST /api/admin/v1/model-aliases",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -3851,6 +3917,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/model-aliases",
         "x-starweaver-action-id": "gateway.model_alias.write",
         "x-starweaver-resource-kind": "ModelAlias",
         "x-starweaver-scope-params": [
@@ -3862,13 +3929,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/model-aliases:validate": {
+    "/api/admin/v1/model-aliases:validate": {
       "post": {
-        "operationId": "gateway_post_admin_v1_model_aliases_validate_gateway_model_alias_read",
+        "operationId": "gateway_post_api_admin_v1_model_aliases_validate_gateway_model_alias_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/model-aliases:validate",
+        "summary": "POST /api/admin/v1/model-aliases:validate",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -3908,6 +3975,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/model-aliases:validate",
         "x-starweaver-action-id": "gateway.model_alias.read",
         "x-starweaver-resource-kind": "ModelAlias",
         "x-starweaver-scope-params": [
@@ -3919,13 +3987,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/model-aliases/{model_alias_id}": {
+    "/api/admin/v1/model-aliases/{model_alias_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_model_aliases_model_alias_id_gateway_model_alias_read",
+        "operationId": "gateway_get_api_admin_v1_model_aliases_model_alias_id_gateway_model_alias_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/model-aliases/{model_alias_id}",
+        "summary": "GET /api/admin/v1/model-aliases/{model_alias_id}",
         "parameters": [
           {
             "name": "model_alias_id",
@@ -3964,6 +4032,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/model-aliases/{model_alias_id}",
         "x-starweaver-action-id": "gateway.model_alias.read",
         "x-starweaver-resource-kind": "ModelAlias",
         "x-starweaver-scope-params": [
@@ -3976,11 +4045,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_model_aliases_model_alias_id_gateway_model_alias_write",
+        "operationId": "gateway_patch_api_admin_v1_model_aliases_model_alias_id_gateway_model_alias_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/model-aliases/{model_alias_id}",
+        "summary": "PATCH /api/admin/v1/model-aliases/{model_alias_id}",
         "parameters": [
           {
             "name": "model_alias_id",
@@ -4029,6 +4098,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/model-aliases/{model_alias_id}",
         "x-starweaver-action-id": "gateway.model_alias.write",
         "x-starweaver-resource-kind": "ModelAlias",
         "x-starweaver-scope-params": [
@@ -4041,13 +4111,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/pricing-skus": {
+    "/api/admin/v1/pricing-skus": {
       "get": {
-        "operationId": "gateway_get_admin_v1_pricing_skus_gateway_pricing_sku_read",
+        "operationId": "gateway_get_api_admin_v1_pricing_skus_gateway_pricing_sku_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/pricing-skus",
+        "summary": "GET /api/admin/v1/pricing-skus",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -4077,6 +4147,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/pricing-skus",
         "x-starweaver-action-id": "gateway.pricing_sku.read",
         "x-starweaver-resource-kind": "PricingSku",
         "x-starweaver-scope-params": [
@@ -4088,11 +4159,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_pricing_skus_gateway_pricing_sku_write",
+        "operationId": "gateway_post_api_admin_v1_pricing_skus_gateway_pricing_sku_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/pricing-skus",
+        "summary": "POST /api/admin/v1/pricing-skus",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -4132,6 +4203,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/pricing-skus",
         "x-starweaver-action-id": "gateway.pricing_sku.write",
         "x-starweaver-resource-kind": "PricingSku",
         "x-starweaver-scope-params": [
@@ -4143,13 +4215,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/pricing-skus:validate": {
+    "/api/admin/v1/pricing-skus:validate": {
       "post": {
-        "operationId": "gateway_post_admin_v1_pricing_skus_validate_gateway_pricing_sku_read",
+        "operationId": "gateway_post_api_admin_v1_pricing_skus_validate_gateway_pricing_sku_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/pricing-skus:validate",
+        "summary": "POST /api/admin/v1/pricing-skus:validate",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -4189,6 +4261,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/pricing-skus:validate",
         "x-starweaver-action-id": "gateway.pricing_sku.read",
         "x-starweaver-resource-kind": "PricingSku",
         "x-starweaver-scope-params": [
@@ -4200,13 +4273,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/pricing-skus/{pricing_sku_id}": {
+    "/api/admin/v1/pricing-skus/{pricing_sku_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_pricing_skus_pricing_sku_id_gateway_pricing_sku_read",
+        "operationId": "gateway_get_api_admin_v1_pricing_skus_pricing_sku_id_gateway_pricing_sku_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/pricing-skus/{pricing_sku_id}",
+        "summary": "GET /api/admin/v1/pricing-skus/{pricing_sku_id}",
         "parameters": [
           {
             "name": "pricing_sku_id",
@@ -4245,6 +4318,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/pricing-skus/{pricing_sku_id}",
         "x-starweaver-action-id": "gateway.pricing_sku.read",
         "x-starweaver-resource-kind": "PricingSku",
         "x-starweaver-scope-params": [
@@ -4257,11 +4331,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_pricing_skus_pricing_sku_id_gateway_pricing_sku_write",
+        "operationId": "gateway_patch_api_admin_v1_pricing_skus_pricing_sku_id_gateway_pricing_sku_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/pricing-skus/{pricing_sku_id}",
+        "summary": "PATCH /api/admin/v1/pricing-skus/{pricing_sku_id}",
         "parameters": [
           {
             "name": "pricing_sku_id",
@@ -4310,6 +4384,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/pricing-skus/{pricing_sku_id}",
         "x-starweaver-action-id": "gateway.pricing_sku.write",
         "x-starweaver-resource-kind": "PricingSku",
         "x-starweaver-scope-params": [
@@ -4322,13 +4397,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/budgets/dashboard": {
+    "/api/admin/v1/budgets/dashboard": {
       "get": {
-        "operationId": "gateway_get_admin_v1_budgets_dashboard_gateway_budget_dashboard_read",
+        "operationId": "gateway_get_api_admin_v1_budgets_dashboard_gateway_budget_dashboard_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/budgets/dashboard",
+        "summary": "GET /api/admin/v1/budgets/dashboard",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -4358,6 +4433,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/budgets/dashboard",
         "x-starweaver-action-id": "gateway.budget_dashboard.read",
         "x-starweaver-resource-kind": "BudgetDashboard",
         "x-starweaver-scope-params": [
@@ -4369,13 +4445,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/budgets/{budget_policy_id}/timeseries": {
+    "/api/admin/v1/budgets/{budget_policy_id}/timeseries": {
       "get": {
-        "operationId": "gateway_get_admin_v1_budgets_budget_policy_id_timeseries_gateway_budget_dashboard_read",
+        "operationId": "gateway_get_api_admin_v1_budgets_budget_policy_id_timeseries_gateway_budget_dashboard_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/budgets/{budget_policy_id}/timeseries",
+        "summary": "GET /api/admin/v1/budgets/{budget_policy_id}/timeseries",
         "parameters": [
           {
             "name": "budget_policy_id",
@@ -4414,6 +4490,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/budgets/{budget_policy_id}/timeseries",
         "x-starweaver-action-id": "gateway.budget_dashboard.read",
         "x-starweaver-resource-kind": "BudgetDashboard",
         "x-starweaver-scope-params": [
@@ -4426,13 +4503,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/budget-policies": {
+    "/api/admin/v1/budget-policies": {
       "get": {
-        "operationId": "gateway_get_admin_v1_budget_policies_gateway_budget_policy_read",
+        "operationId": "gateway_get_api_admin_v1_budget_policies_gateway_budget_policy_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/budget-policies",
+        "summary": "GET /api/admin/v1/budget-policies",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -4462,6 +4539,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/budget-policies",
         "x-starweaver-action-id": "gateway.budget_policy.read",
         "x-starweaver-resource-kind": "BudgetPolicy",
         "x-starweaver-scope-params": [
@@ -4473,11 +4551,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_budget_policies_gateway_budget_policy_write",
+        "operationId": "gateway_post_api_admin_v1_budget_policies_gateway_budget_policy_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/budget-policies",
+        "summary": "POST /api/admin/v1/budget-policies",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -4517,6 +4595,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/budget-policies",
         "x-starweaver-action-id": "gateway.budget_policy.write",
         "x-starweaver-resource-kind": "BudgetPolicy",
         "x-starweaver-scope-params": [
@@ -4528,13 +4607,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/budget-policies:validate": {
+    "/api/admin/v1/budget-policies:validate": {
       "post": {
-        "operationId": "gateway_post_admin_v1_budget_policies_validate_gateway_budget_policy_read",
+        "operationId": "gateway_post_api_admin_v1_budget_policies_validate_gateway_budget_policy_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/budget-policies:validate",
+        "summary": "POST /api/admin/v1/budget-policies:validate",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -4574,6 +4653,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/budget-policies:validate",
         "x-starweaver-action-id": "gateway.budget_policy.read",
         "x-starweaver-resource-kind": "BudgetPolicy",
         "x-starweaver-scope-params": [
@@ -4585,13 +4665,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/budget-policies/{budget_policy_id}": {
+    "/api/admin/v1/budget-policies/{budget_policy_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_budget_policies_budget_policy_id_gateway_budget_policy_read",
+        "operationId": "gateway_get_api_admin_v1_budget_policies_budget_policy_id_gateway_budget_policy_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/budget-policies/{budget_policy_id}",
+        "summary": "GET /api/admin/v1/budget-policies/{budget_policy_id}",
         "parameters": [
           {
             "name": "budget_policy_id",
@@ -4630,6 +4710,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/budget-policies/{budget_policy_id}",
         "x-starweaver-action-id": "gateway.budget_policy.read",
         "x-starweaver-resource-kind": "BudgetPolicy",
         "x-starweaver-scope-params": [
@@ -4642,11 +4723,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_budget_policies_budget_policy_id_gateway_budget_policy_write",
+        "operationId": "gateway_patch_api_admin_v1_budget_policies_budget_policy_id_gateway_budget_policy_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/budget-policies/{budget_policy_id}",
+        "summary": "PATCH /api/admin/v1/budget-policies/{budget_policy_id}",
         "parameters": [
           {
             "name": "budget_policy_id",
@@ -4695,6 +4776,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/budget-policies/{budget_policy_id}",
         "x-starweaver-action-id": "gateway.budget_policy.write",
         "x-starweaver-resource-kind": "BudgetPolicy",
         "x-starweaver-scope-params": [
@@ -4707,13 +4789,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/quotas/dashboard": {
+    "/api/admin/v1/quotas/dashboard": {
       "get": {
-        "operationId": "gateway_get_admin_v1_quotas_dashboard_gateway_quota_dashboard_read",
+        "operationId": "gateway_get_api_admin_v1_quotas_dashboard_gateway_quota_dashboard_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/quotas/dashboard",
+        "summary": "GET /api/admin/v1/quotas/dashboard",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -4743,6 +4825,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/quotas/dashboard",
         "x-starweaver-action-id": "gateway.quota_dashboard.read",
         "x-starweaver-resource-kind": "QuotaDashboard",
         "x-starweaver-scope-params": [
@@ -4754,13 +4837,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/rate-limits/{quota_policy_id}/timeseries": {
+    "/api/admin/v1/rate-limits/{quota_policy_id}/timeseries": {
       "get": {
-        "operationId": "gateway_get_admin_v1_rate_limits_quota_policy_id_timeseries_gateway_quota_dashboard_read",
+        "operationId": "gateway_get_api_admin_v1_rate_limits_quota_policy_id_timeseries_gateway_quota_dashboard_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/rate-limits/{quota_policy_id}/timeseries",
+        "summary": "GET /api/admin/v1/rate-limits/{quota_policy_id}/timeseries",
         "parameters": [
           {
             "name": "quota_policy_id",
@@ -4799,6 +4882,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/rate-limits/{quota_policy_id}/timeseries",
         "x-starweaver-action-id": "gateway.quota_dashboard.read",
         "x-starweaver-resource-kind": "QuotaDashboard",
         "x-starweaver-scope-params": [
@@ -4811,13 +4895,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/quota-policies": {
+    "/api/admin/v1/quota-policies": {
       "get": {
-        "operationId": "gateway_get_admin_v1_quota_policies_gateway_quota_policy_read",
+        "operationId": "gateway_get_api_admin_v1_quota_policies_gateway_quota_policy_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/quota-policies",
+        "summary": "GET /api/admin/v1/quota-policies",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -4847,6 +4931,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/quota-policies",
         "x-starweaver-action-id": "gateway.quota_policy.read",
         "x-starweaver-resource-kind": "QuotaPolicy",
         "x-starweaver-scope-params": [
@@ -4858,11 +4943,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_quota_policies_gateway_quota_policy_write",
+        "operationId": "gateway_post_api_admin_v1_quota_policies_gateway_quota_policy_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/quota-policies",
+        "summary": "POST /api/admin/v1/quota-policies",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -4902,6 +4987,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/quota-policies",
         "x-starweaver-action-id": "gateway.quota_policy.write",
         "x-starweaver-resource-kind": "QuotaPolicy",
         "x-starweaver-scope-params": [
@@ -4913,13 +4999,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/quota-policies:validate": {
+    "/api/admin/v1/quota-policies:validate": {
       "post": {
-        "operationId": "gateway_post_admin_v1_quota_policies_validate_gateway_quota_policy_read",
+        "operationId": "gateway_post_api_admin_v1_quota_policies_validate_gateway_quota_policy_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/quota-policies:validate",
+        "summary": "POST /api/admin/v1/quota-policies:validate",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -4959,6 +5045,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/quota-policies:validate",
         "x-starweaver-action-id": "gateway.quota_policy.read",
         "x-starweaver-resource-kind": "QuotaPolicy",
         "x-starweaver-scope-params": [
@@ -4970,13 +5057,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/quota-policies/{quota_policy_id}": {
+    "/api/admin/v1/quota-policies/{quota_policy_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_quota_policies_quota_policy_id_gateway_quota_policy_read",
+        "operationId": "gateway_get_api_admin_v1_quota_policies_quota_policy_id_gateway_quota_policy_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/quota-policies/{quota_policy_id}",
+        "summary": "GET /api/admin/v1/quota-policies/{quota_policy_id}",
         "parameters": [
           {
             "name": "quota_policy_id",
@@ -5015,6 +5102,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/quota-policies/{quota_policy_id}",
         "x-starweaver-action-id": "gateway.quota_policy.read",
         "x-starweaver-resource-kind": "QuotaPolicy",
         "x-starweaver-scope-params": [
@@ -5027,11 +5115,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_quota_policies_quota_policy_id_gateway_quota_policy_write",
+        "operationId": "gateway_patch_api_admin_v1_quota_policies_quota_policy_id_gateway_quota_policy_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/quota-policies/{quota_policy_id}",
+        "summary": "PATCH /api/admin/v1/quota-policies/{quota_policy_id}",
         "parameters": [
           {
             "name": "quota_policy_id",
@@ -5080,6 +5168,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/quota-policies/{quota_policy_id}",
         "x-starweaver-action-id": "gateway.quota_policy.write",
         "x-starweaver-resource-kind": "QuotaPolicy",
         "x-starweaver-scope-params": [
@@ -5092,13 +5181,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/exports/jobs": {
+    "/api/admin/v1/exports/jobs": {
       "get": {
-        "operationId": "gateway_get_admin_v1_exports_jobs_gateway_export_read",
+        "operationId": "gateway_get_api_admin_v1_exports_jobs_gateway_export_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/exports/jobs",
+        "summary": "GET /api/admin/v1/exports/jobs",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -5128,6 +5217,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/exports/jobs",
         "x-starweaver-action-id": "gateway.export.read",
         "x-starweaver-resource-kind": "ExportManifest",
         "x-starweaver-scope-params": [
@@ -5139,11 +5229,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_exports_jobs_gateway_export_create",
+        "operationId": "gateway_post_api_admin_v1_exports_jobs_gateway_export_create",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/exports/jobs",
+        "summary": "POST /api/admin/v1/exports/jobs",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -5183,6 +5273,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/exports/jobs",
         "x-starweaver-action-id": "gateway.export.create",
         "x-starweaver-resource-kind": "ExportJob",
         "x-starweaver-scope-params": [
@@ -5194,13 +5285,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/exports/jobs/{export_job_id}": {
+    "/api/admin/v1/exports/jobs/{export_job_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_exports_jobs_export_job_id_gateway_export_read",
+        "operationId": "gateway_get_api_admin_v1_exports_jobs_export_job_id_gateway_export_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/exports/jobs/{export_job_id}",
+        "summary": "GET /api/admin/v1/exports/jobs/{export_job_id}",
         "parameters": [
           {
             "name": "export_job_id",
@@ -5239,6 +5330,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/exports/jobs/{export_job_id}",
         "x-starweaver-action-id": "gateway.export.read",
         "x-starweaver-resource-kind": "ExportManifest",
         "x-starweaver-scope-params": [
@@ -5251,13 +5343,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/exports/jobs/{export_job_id}/manifest": {
+    "/api/admin/v1/exports/jobs/{export_job_id}/manifest": {
       "get": {
-        "operationId": "gateway_get_admin_v1_exports_jobs_export_job_id_manifest_gateway_export_read",
+        "operationId": "gateway_get_api_admin_v1_exports_jobs_export_job_id_manifest_gateway_export_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/exports/jobs/{export_job_id}/manifest",
+        "summary": "GET /api/admin/v1/exports/jobs/{export_job_id}/manifest",
         "parameters": [
           {
             "name": "export_job_id",
@@ -5296,6 +5388,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/exports/jobs/{export_job_id}/manifest",
         "x-starweaver-action-id": "gateway.export.read",
         "x-starweaver-resource-kind": "ExportManifest",
         "x-starweaver-scope-params": [
@@ -5308,13 +5401,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/emergency/operations": {
+    "/api/admin/v1/emergency/operations": {
       "get": {
-        "operationId": "gateway_get_admin_v1_emergency_operations_gateway_emergency_disable",
+        "operationId": "gateway_get_api_admin_v1_emergency_operations_gateway_emergency_disable",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/emergency/operations",
+        "summary": "GET /api/admin/v1/emergency/operations",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -5344,6 +5437,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/emergency/operations",
         "x-starweaver-action-id": "gateway.emergency.disable",
         "x-starweaver-resource-kind": "EmergencyOperation",
         "x-starweaver-scope-params": [
@@ -5355,13 +5449,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/emergency/operations/{emergency_operation_id}": {
+    "/api/admin/v1/emergency/operations/{emergency_operation_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_emergency_operations_emergency_operation_id_gateway_emergency_disable",
+        "operationId": "gateway_get_api_admin_v1_emergency_operations_emergency_operation_id_gateway_emergency_disable",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/emergency/operations/{emergency_operation_id}",
+        "summary": "GET /api/admin/v1/emergency/operations/{emergency_operation_id}",
         "parameters": [
           {
             "name": "emergency_operation_id",
@@ -5400,6 +5494,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/emergency/operations/{emergency_operation_id}",
         "x-starweaver-action-id": "gateway.emergency.disable",
         "x-starweaver-resource-kind": "EmergencyOperation",
         "x-starweaver-scope-params": [
@@ -5412,13 +5507,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/emergency/upstream-credentials/{upstream_credential_id}/disable": {
+    "/api/admin/v1/emergency/upstream-credentials/{upstream_credential_id}/disable": {
       "post": {
-        "operationId": "gateway_post_admin_v1_emergency_upstream_credentials_upstream_credential_id_disable_gateway_emergency_disable",
+        "operationId": "gateway_post_api_admin_v1_emergency_upstream_credentials_upstream_credential_id_disable_gateway_emergency_disable",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/emergency/upstream-credentials/{upstream_credential_id}/disable",
+        "summary": "POST /api/admin/v1/emergency/upstream-credentials/{upstream_credential_id}/disable",
         "parameters": [
           {
             "name": "upstream_credential_id",
@@ -5467,6 +5562,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/emergency/upstream-credentials/{upstream_credential_id}/disable",
         "x-starweaver-action-id": "gateway.emergency.disable",
         "x-starweaver-resource-kind": "EmergencyOperation",
         "x-starweaver-scope-params": [
@@ -5479,13 +5575,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/emergency/provider-endpoints/{provider_endpoint_id}/disable": {
+    "/api/admin/v1/emergency/provider-endpoints/{provider_endpoint_id}/disable": {
       "post": {
-        "operationId": "gateway_post_admin_v1_emergency_provider_endpoints_provider_endpoint_id_disable_gateway_emergency_disable",
+        "operationId": "gateway_post_api_admin_v1_emergency_provider_endpoints_provider_endpoint_id_disable_gateway_emergency_disable",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/emergency/provider-endpoints/{provider_endpoint_id}/disable",
+        "summary": "POST /api/admin/v1/emergency/provider-endpoints/{provider_endpoint_id}/disable",
         "parameters": [
           {
             "name": "provider_endpoint_id",
@@ -5534,6 +5630,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/emergency/provider-endpoints/{provider_endpoint_id}/disable",
         "x-starweaver-action-id": "gateway.emergency.disable",
         "x-starweaver-resource-kind": "EmergencyOperation",
         "x-starweaver-scope-params": [
@@ -5546,13 +5643,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/emergency/routing-groups/{routing_group_id}/drain": {
+    "/api/admin/v1/emergency/routing-groups/{routing_group_id}/drain": {
       "post": {
-        "operationId": "gateway_post_admin_v1_emergency_routing_groups_routing_group_id_drain_gateway_emergency_disable",
+        "operationId": "gateway_post_api_admin_v1_emergency_routing_groups_routing_group_id_drain_gateway_emergency_disable",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/emergency/routing-groups/{routing_group_id}/drain",
+        "summary": "POST /api/admin/v1/emergency/routing-groups/{routing_group_id}/drain",
         "parameters": [
           {
             "name": "routing_group_id",
@@ -5601,6 +5698,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/emergency/routing-groups/{routing_group_id}/drain",
         "x-starweaver-action-id": "gateway.emergency.disable",
         "x-starweaver-resource-kind": "EmergencyOperation",
         "x-starweaver-scope-params": [
@@ -5613,13 +5711,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/emergency/config/freeze": {
+    "/api/admin/v1/emergency/config/freeze": {
       "post": {
-        "operationId": "gateway_post_admin_v1_emergency_config_freeze_gateway_emergency_disable",
+        "operationId": "gateway_post_api_admin_v1_emergency_config_freeze_gateway_emergency_disable",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/emergency/config/freeze",
+        "summary": "POST /api/admin/v1/emergency/config/freeze",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -5659,6 +5757,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/emergency/config/freeze",
         "x-starweaver-action-id": "gateway.emergency.disable",
         "x-starweaver-resource-kind": "EmergencyOperation",
         "x-starweaver-scope-params": [
@@ -5670,13 +5769,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/emergency/config/snapshots/{source_snapshot_id}/rollback": {
+    "/api/admin/v1/emergency/config/snapshots/{source_snapshot_id}/rollback": {
       "post": {
-        "operationId": "gateway_post_admin_v1_emergency_config_snapshots_source_snapshot_id_rollback_gateway_config_rollback",
+        "operationId": "gateway_post_api_admin_v1_emergency_config_snapshots_source_snapshot_id_rollback_gateway_config_rollback",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/emergency/config/snapshots/{source_snapshot_id}/rollback",
+        "summary": "POST /api/admin/v1/emergency/config/snapshots/{source_snapshot_id}/rollback",
         "parameters": [
           {
             "name": "source_snapshot_id",
@@ -5725,6 +5824,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/emergency/config/snapshots/{source_snapshot_id}/rollback",
         "x-starweaver-action-id": "gateway.config.rollback",
         "x-starweaver-resource-kind": "ConfigSnapshot",
         "x-starweaver-scope-params": [
@@ -5737,13 +5837,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/emergency/budget-policies/{budget_policy_id}/force-block": {
+    "/api/admin/v1/emergency/budget-policies/{budget_policy_id}/force-block": {
       "post": {
-        "operationId": "gateway_post_admin_v1_emergency_budget_policies_budget_policy_id_force_block_gateway_emergency_disable",
+        "operationId": "gateway_post_api_admin_v1_emergency_budget_policies_budget_policy_id_force_block_gateway_emergency_disable",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/emergency/budget-policies/{budget_policy_id}/force-block",
+        "summary": "POST /api/admin/v1/emergency/budget-policies/{budget_policy_id}/force-block",
         "parameters": [
           {
             "name": "budget_policy_id",
@@ -5792,6 +5892,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/emergency/budget-policies/{budget_policy_id}/force-block",
         "x-starweaver-action-id": "gateway.emergency.disable",
         "x-starweaver-resource-kind": "EmergencyOperation",
         "x-starweaver-scope-params": [
@@ -5804,13 +5905,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/observability/otel-export/configs": {
+    "/api/admin/v1/observability/otel-export/configs": {
       "get": {
-        "operationId": "gateway_get_admin_v1_observability_otel_export_configs_gateway_observability_export_read",
+        "operationId": "gateway_get_api_admin_v1_observability_otel_export_configs_gateway_observability_export_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/observability/otel-export/configs",
+        "summary": "GET /api/admin/v1/observability/otel-export/configs",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -5840,6 +5941,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/observability/otel-export/configs",
         "x-starweaver-action-id": "gateway.observability_export.read",
         "x-starweaver-resource-kind": "OpenTelemetryExportConfig",
         "x-starweaver-scope-params": [
@@ -5851,11 +5953,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_observability_otel_export_configs_gateway_observability_export_write",
+        "operationId": "gateway_post_api_admin_v1_observability_otel_export_configs_gateway_observability_export_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/observability/otel-export/configs",
+        "summary": "POST /api/admin/v1/observability/otel-export/configs",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -5895,6 +5997,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/observability/otel-export/configs",
         "x-starweaver-action-id": "gateway.observability_export.write",
         "x-starweaver-resource-kind": "OpenTelemetryExportConfig",
         "x-starweaver-scope-params": [
@@ -5906,13 +6009,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/observability/otel-export/configs/{otel_export_config_id}": {
+    "/api/admin/v1/observability/otel-export/configs/{otel_export_config_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_observability_otel_export_configs_otel_export_config_id_gateway_observability_export_read",
+        "operationId": "gateway_get_api_admin_v1_observability_otel_export_configs_otel_export_config_id_gateway_observability_export_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/observability/otel-export/configs/{otel_export_config_id}",
+        "summary": "GET /api/admin/v1/observability/otel-export/configs/{otel_export_config_id}",
         "parameters": [
           {
             "name": "otel_export_config_id",
@@ -5951,6 +6054,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/observability/otel-export/configs/{otel_export_config_id}",
         "x-starweaver-action-id": "gateway.observability_export.read",
         "x-starweaver-resource-kind": "OpenTelemetryExportConfig",
         "x-starweaver-scope-params": [
@@ -5963,11 +6067,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_observability_otel_export_configs_otel_export_config_id_gateway_observability_export_write",
+        "operationId": "gateway_patch_api_admin_v1_observability_otel_export_configs_otel_export_config_id_gateway_observability_export_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/observability/otel-export/configs/{otel_export_config_id}",
+        "summary": "PATCH /api/admin/v1/observability/otel-export/configs/{otel_export_config_id}",
         "parameters": [
           {
             "name": "otel_export_config_id",
@@ -6016,6 +6120,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/observability/otel-export/configs/{otel_export_config_id}",
         "x-starweaver-action-id": "gateway.observability_export.write",
         "x-starweaver-resource-kind": "OpenTelemetryExportConfig",
         "x-starweaver-scope-params": [
@@ -6028,13 +6133,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/observability/otel-export/configs/{otel_export_config_id}/validate": {
+    "/api/admin/v1/observability/otel-export/configs/{otel_export_config_id}/validate": {
       "post": {
-        "operationId": "gateway_post_admin_v1_observability_otel_export_configs_otel_export_config_id_validate_gateway_observability_export_write",
+        "operationId": "gateway_post_api_admin_v1_observability_otel_export_configs_otel_export_config_id_validate_gateway_observability_export_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/observability/otel-export/configs/{otel_export_config_id}/validate",
+        "summary": "POST /api/admin/v1/observability/otel-export/configs/{otel_export_config_id}/validate",
         "parameters": [
           {
             "name": "otel_export_config_id",
@@ -6083,6 +6188,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/observability/otel-export/configs/{otel_export_config_id}/validate",
         "x-starweaver-action-id": "gateway.observability_export.write",
         "x-starweaver-resource-kind": "OpenTelemetryExportConfig",
         "x-starweaver-scope-params": [
@@ -6095,13 +6201,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/observability/otel-export/configs/{otel_export_config_id}/disable": {
+    "/api/admin/v1/observability/otel-export/configs/{otel_export_config_id}/disable": {
       "post": {
-        "operationId": "gateway_post_admin_v1_observability_otel_export_configs_otel_export_config_id_disable_gateway_observability_export_write",
+        "operationId": "gateway_post_api_admin_v1_observability_otel_export_configs_otel_export_config_id_disable_gateway_observability_export_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/observability/otel-export/configs/{otel_export_config_id}/disable",
+        "summary": "POST /api/admin/v1/observability/otel-export/configs/{otel_export_config_id}/disable",
         "parameters": [
           {
             "name": "otel_export_config_id",
@@ -6150,6 +6256,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/observability/otel-export/configs/{otel_export_config_id}/disable",
         "x-starweaver-action-id": "gateway.observability_export.write",
         "x-starweaver-resource-kind": "OpenTelemetryExportConfig",
         "x-starweaver-scope-params": [
@@ -6162,13 +6269,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/notification/sinks": {
+    "/api/admin/v1/notification/sinks": {
       "get": {
-        "operationId": "gateway_get_admin_v1_notification_sinks_gateway_notification_read",
+        "operationId": "gateway_get_api_admin_v1_notification_sinks_gateway_notification_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/notification/sinks",
+        "summary": "GET /api/admin/v1/notification/sinks",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -6198,6 +6305,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/notification/sinks",
         "x-starweaver-action-id": "gateway.notification.read",
         "x-starweaver-resource-kind": "NotificationSink",
         "x-starweaver-scope-params": [
@@ -6209,11 +6317,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_notification_sinks_gateway_notification_write",
+        "operationId": "gateway_post_api_admin_v1_notification_sinks_gateway_notification_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/notification/sinks",
+        "summary": "POST /api/admin/v1/notification/sinks",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -6253,6 +6361,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/notification/sinks",
         "x-starweaver-action-id": "gateway.notification.write",
         "x-starweaver-resource-kind": "NotificationSink",
         "x-starweaver-scope-params": [
@@ -6264,13 +6373,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/notification/sinks:validate": {
+    "/api/admin/v1/notification/sinks:validate": {
       "post": {
-        "operationId": "gateway_post_admin_v1_notification_sinks_validate_gateway_notification_write",
+        "operationId": "gateway_post_api_admin_v1_notification_sinks_validate_gateway_notification_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/notification/sinks:validate",
+        "summary": "POST /api/admin/v1/notification/sinks:validate",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -6310,6 +6419,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/notification/sinks:validate",
         "x-starweaver-action-id": "gateway.notification.write",
         "x-starweaver-resource-kind": "NotificationSink",
         "x-starweaver-scope-params": [
@@ -6321,13 +6431,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/notification/sinks/{notification_sink_id}": {
+    "/api/admin/v1/notification/sinks/{notification_sink_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_notification_sinks_notification_sink_id_gateway_notification_read",
+        "operationId": "gateway_get_api_admin_v1_notification_sinks_notification_sink_id_gateway_notification_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/notification/sinks/{notification_sink_id}",
+        "summary": "GET /api/admin/v1/notification/sinks/{notification_sink_id}",
         "parameters": [
           {
             "name": "notification_sink_id",
@@ -6366,6 +6476,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/notification/sinks/{notification_sink_id}",
         "x-starweaver-action-id": "gateway.notification.read",
         "x-starweaver-resource-kind": "NotificationSink",
         "x-starweaver-scope-params": [
@@ -6378,11 +6489,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_notification_sinks_notification_sink_id_gateway_notification_write",
+        "operationId": "gateway_patch_api_admin_v1_notification_sinks_notification_sink_id_gateway_notification_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/notification/sinks/{notification_sink_id}",
+        "summary": "PATCH /api/admin/v1/notification/sinks/{notification_sink_id}",
         "parameters": [
           {
             "name": "notification_sink_id",
@@ -6431,6 +6542,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/notification/sinks/{notification_sink_id}",
         "x-starweaver-action-id": "gateway.notification.write",
         "x-starweaver-resource-kind": "NotificationSink",
         "x-starweaver-scope-params": [
@@ -6443,13 +6555,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/notification/sinks/{notification_sink_id}/subscriptions": {
+    "/api/admin/v1/notification/sinks/{notification_sink_id}/subscriptions": {
       "get": {
-        "operationId": "gateway_get_admin_v1_notification_sinks_notification_sink_id_subscriptions_gateway_notification_read",
+        "operationId": "gateway_get_api_admin_v1_notification_sinks_notification_sink_id_subscriptions_gateway_notification_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/notification/sinks/{notification_sink_id}/subscriptions",
+        "summary": "GET /api/admin/v1/notification/sinks/{notification_sink_id}/subscriptions",
         "parameters": [
           {
             "name": "notification_sink_id",
@@ -6488,6 +6600,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/notification/sinks/{notification_sink_id}/subscriptions",
         "x-starweaver-action-id": "gateway.notification.read",
         "x-starweaver-resource-kind": "NotificationSink",
         "x-starweaver-scope-params": [
@@ -6500,11 +6613,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_notification_sinks_notification_sink_id_subscriptions_gateway_notification_write",
+        "operationId": "gateway_post_api_admin_v1_notification_sinks_notification_sink_id_subscriptions_gateway_notification_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/notification/sinks/{notification_sink_id}/subscriptions",
+        "summary": "POST /api/admin/v1/notification/sinks/{notification_sink_id}/subscriptions",
         "parameters": [
           {
             "name": "notification_sink_id",
@@ -6553,6 +6666,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/notification/sinks/{notification_sink_id}/subscriptions",
         "x-starweaver-action-id": "gateway.notification.write",
         "x-starweaver-resource-kind": "NotificationSink",
         "x-starweaver-scope-params": [
@@ -6565,13 +6679,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/notification/sinks/{notification_sink_id}/subscriptions:validate": {
+    "/api/admin/v1/notification/sinks/{notification_sink_id}/subscriptions:validate": {
       "post": {
-        "operationId": "gateway_post_admin_v1_notification_sinks_notification_sink_id_subscriptions_validate_gateway_notification_write",
+        "operationId": "gateway_post_api_admin_v1_notification_sinks_notification_sink_id_subscriptions_validate_gateway_notification_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/notification/sinks/{notification_sink_id}/subscriptions:validate",
+        "summary": "POST /api/admin/v1/notification/sinks/{notification_sink_id}/subscriptions:validate",
         "parameters": [
           {
             "name": "notification_sink_id",
@@ -6620,6 +6734,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/notification/sinks/{notification_sink_id}/subscriptions:validate",
         "x-starweaver-action-id": "gateway.notification.write",
         "x-starweaver-resource-kind": "NotificationSink",
         "x-starweaver-scope-params": [
@@ -6632,13 +6747,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/notification/sinks/{notification_sink_id}/subscriptions/{notification_subscription_id}": {
+    "/api/admin/v1/notification/sinks/{notification_sink_id}/subscriptions/{notification_subscription_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_notification_sinks_notification_sink_id_subscriptions_notification_subscription_id_gateway_notification_read",
+        "operationId": "gateway_get_api_admin_v1_notification_sinks_notification_sink_id_subscriptions_notification_subscription_id_gateway_notification_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/notification/sinks/{notification_sink_id}/subscriptions/{notification_subscription_id}",
+        "summary": "GET /api/admin/v1/notification/sinks/{notification_sink_id}/subscriptions/{notification_subscription_id}",
         "parameters": [
           {
             "name": "notification_sink_id",
@@ -6685,6 +6800,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/notification/sinks/{notification_sink_id}/subscriptions/{notification_subscription_id}",
         "x-starweaver-action-id": "gateway.notification.read",
         "x-starweaver-resource-kind": "NotificationSink",
         "x-starweaver-scope-params": [
@@ -6698,11 +6814,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_notification_sinks_notification_sink_id_subscriptions_notification_subscription_id_gateway_notification_write",
+        "operationId": "gateway_patch_api_admin_v1_notification_sinks_notification_sink_id_subscriptions_notification_subscription_id_gateway_notification_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/notification/sinks/{notification_sink_id}/subscriptions/{notification_subscription_id}",
+        "summary": "PATCH /api/admin/v1/notification/sinks/{notification_sink_id}/subscriptions/{notification_subscription_id}",
         "parameters": [
           {
             "name": "notification_sink_id",
@@ -6759,6 +6875,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/notification/sinks/{notification_sink_id}/subscriptions/{notification_subscription_id}",
         "x-starweaver-action-id": "gateway.notification.write",
         "x-starweaver-resource-kind": "NotificationSink",
         "x-starweaver-scope-params": [
@@ -6772,13 +6889,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/notification/outbox/{notification_outbox_event_id}/replay": {
+    "/api/admin/v1/notification/outbox/{notification_outbox_event_id}/replay": {
       "post": {
-        "operationId": "gateway_post_admin_v1_notification_outbox_notification_outbox_event_id_replay_gateway_notification_outbox_write",
+        "operationId": "gateway_post_api_admin_v1_notification_outbox_notification_outbox_event_id_replay_gateway_notification_outbox_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/notification/outbox/{notification_outbox_event_id}/replay",
+        "summary": "POST /api/admin/v1/notification/outbox/{notification_outbox_event_id}/replay",
         "parameters": [
           {
             "name": "notification_outbox_event_id",
@@ -6827,6 +6944,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/notification/outbox/{notification_outbox_event_id}/replay",
         "x-starweaver-action-id": "gateway.notification_outbox.write",
         "x-starweaver-resource-kind": "NotificationOutboxEvent",
         "x-starweaver-scope-params": [
@@ -6839,13 +6957,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/identity-providers": {
+    "/api/admin/v1/identity-providers": {
       "get": {
-        "operationId": "gateway_get_admin_v1_identity_providers_gateway_identity_provider_read",
+        "operationId": "gateway_get_api_admin_v1_identity_providers_gateway_identity_provider_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/identity-providers",
+        "summary": "GET /api/admin/v1/identity-providers",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -6875,6 +6993,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/identity-providers",
         "x-starweaver-action-id": "gateway.identity_provider.read",
         "x-starweaver-resource-kind": "IdentityProvider",
         "x-starweaver-scope-params": [
@@ -6886,11 +7005,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_identity_providers_gateway_identity_provider_write",
+        "operationId": "gateway_post_api_admin_v1_identity_providers_gateway_identity_provider_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/identity-providers",
+        "summary": "POST /api/admin/v1/identity-providers",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -6930,6 +7049,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/identity-providers",
         "x-starweaver-action-id": "gateway.identity_provider.write",
         "x-starweaver-resource-kind": "IdentityProvider",
         "x-starweaver-scope-params": [
@@ -6941,13 +7061,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/identity-providers:validate": {
+    "/api/admin/v1/identity-providers:validate": {
       "post": {
-        "operationId": "gateway_post_admin_v1_identity_providers_validate_gateway_identity_provider_write",
+        "operationId": "gateway_post_api_admin_v1_identity_providers_validate_gateway_identity_provider_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/identity-providers:validate",
+        "summary": "POST /api/admin/v1/identity-providers:validate",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -6987,6 +7107,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/identity-providers:validate",
         "x-starweaver-action-id": "gateway.identity_provider.write",
         "x-starweaver-resource-kind": "IdentityProvider",
         "x-starweaver-scope-params": [
@@ -6998,13 +7119,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/identity-providers/{login_provider_id}": {
+    "/api/admin/v1/identity-providers/{login_provider_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_identity_providers_login_provider_id_gateway_identity_provider_read",
+        "operationId": "gateway_get_api_admin_v1_identity_providers_login_provider_id_gateway_identity_provider_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/identity-providers/{login_provider_id}",
+        "summary": "GET /api/admin/v1/identity-providers/{login_provider_id}",
         "parameters": [
           {
             "name": "login_provider_id",
@@ -7043,6 +7164,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/identity-providers/{login_provider_id}",
         "x-starweaver-action-id": "gateway.identity_provider.read",
         "x-starweaver-resource-kind": "IdentityProvider",
         "x-starweaver-scope-params": [
@@ -7055,11 +7177,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_identity_providers_login_provider_id_gateway_identity_provider_write",
+        "operationId": "gateway_patch_api_admin_v1_identity_providers_login_provider_id_gateway_identity_provider_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/identity-providers/{login_provider_id}",
+        "summary": "PATCH /api/admin/v1/identity-providers/{login_provider_id}",
         "parameters": [
           {
             "name": "login_provider_id",
@@ -7108,6 +7230,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/identity-providers/{login_provider_id}",
         "x-starweaver-action-id": "gateway.identity_provider.write",
         "x-starweaver-resource-kind": "IdentityProvider",
         "x-starweaver-scope-params": [
@@ -7120,13 +7243,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/users": {
+    "/api/admin/v1/users": {
       "get": {
-        "operationId": "gateway_get_admin_v1_users_gateway_user_read",
+        "operationId": "gateway_get_api_admin_v1_users_gateway_user_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/users",
+        "summary": "GET /api/admin/v1/users",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -7156,6 +7279,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/users",
         "x-starweaver-action-id": "gateway.user.read",
         "x-starweaver-resource-kind": "UserPrincipal",
         "x-starweaver-scope-params": [
@@ -7167,13 +7291,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/users/{user_id}": {
+    "/api/admin/v1/users/{user_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_users_user_id_gateway_user_read",
+        "operationId": "gateway_get_api_admin_v1_users_user_id_gateway_user_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/users/{user_id}",
+        "summary": "GET /api/admin/v1/users/{user_id}",
         "parameters": [
           {
             "name": "user_id",
@@ -7212,6 +7336,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/users/{user_id}",
         "x-starweaver-action-id": "gateway.user.read",
         "x-starweaver-resource-kind": "UserPrincipal",
         "x-starweaver-scope-params": [
@@ -7224,11 +7349,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_users_user_id_gateway_user_disable",
+        "operationId": "gateway_patch_api_admin_v1_users_user_id_gateway_user_disable",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/users/{user_id}",
+        "summary": "PATCH /api/admin/v1/users/{user_id}",
         "parameters": [
           {
             "name": "user_id",
@@ -7277,6 +7402,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/users/{user_id}",
         "x-starweaver-action-id": "gateway.user.disable",
         "x-starweaver-resource-kind": "UserPrincipal",
         "x-starweaver-scope-params": [
@@ -7289,13 +7415,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/users/{user_id}/sessions": {
+    "/api/admin/v1/users/{user_id}/sessions": {
       "get": {
-        "operationId": "gateway_get_admin_v1_users_user_id_sessions_gateway_session_read",
+        "operationId": "gateway_get_api_admin_v1_users_user_id_sessions_gateway_session_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/users/{user_id}/sessions",
+        "summary": "GET /api/admin/v1/users/{user_id}/sessions",
         "parameters": [
           {
             "name": "user_id",
@@ -7334,6 +7460,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/users/{user_id}/sessions",
         "x-starweaver-action-id": "gateway.session.read",
         "x-starweaver-resource-kind": "AuthSession",
         "x-starweaver-scope-params": [
@@ -7346,13 +7473,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/users/{user_id}/sessions/{auth_session_id}/revoke": {
+    "/api/admin/v1/users/{user_id}/sessions/{auth_session_id}/revoke": {
       "post": {
-        "operationId": "gateway_post_admin_v1_users_user_id_sessions_auth_session_id_revoke_gateway_session_revoke",
+        "operationId": "gateway_post_api_admin_v1_users_user_id_sessions_auth_session_id_revoke_gateway_session_revoke",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/users/{user_id}/sessions/{auth_session_id}/revoke",
+        "summary": "POST /api/admin/v1/users/{user_id}/sessions/{auth_session_id}/revoke",
         "parameters": [
           {
             "name": "user_id",
@@ -7409,6 +7536,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/users/{user_id}/sessions/{auth_session_id}/revoke",
         "x-starweaver-action-id": "gateway.session.revoke",
         "x-starweaver-resource-kind": "AuthSession",
         "x-starweaver-scope-params": [
@@ -7422,13 +7550,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/users/{user_id}/external-identities": {
+    "/api/admin/v1/users/{user_id}/external-identities": {
       "get": {
-        "operationId": "gateway_get_admin_v1_users_user_id_external_identities_gateway_external_identity_read",
+        "operationId": "gateway_get_api_admin_v1_users_user_id_external_identities_gateway_external_identity_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/users/{user_id}/external-identities",
+        "summary": "GET /api/admin/v1/users/{user_id}/external-identities",
         "parameters": [
           {
             "name": "user_id",
@@ -7467,6 +7595,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/users/{user_id}/external-identities",
         "x-starweaver-action-id": "gateway.external_identity.read",
         "x-starweaver-resource-kind": "ExternalIdentity",
         "x-starweaver-scope-params": [
@@ -7479,13 +7608,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/users/{user_id}/external-identities/{external_identity_id}": {
+    "/api/admin/v1/users/{user_id}/external-identities/{external_identity_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_users_user_id_external_identities_external_identity_id_gateway_external_identity_read",
+        "operationId": "gateway_get_api_admin_v1_users_user_id_external_identities_external_identity_id_gateway_external_identity_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/users/{user_id}/external-identities/{external_identity_id}",
+        "summary": "GET /api/admin/v1/users/{user_id}/external-identities/{external_identity_id}",
         "parameters": [
           {
             "name": "user_id",
@@ -7532,6 +7661,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/users/{user_id}/external-identities/{external_identity_id}",
         "x-starweaver-action-id": "gateway.external_identity.read",
         "x-starweaver-resource-kind": "ExternalIdentity",
         "x-starweaver-scope-params": [
@@ -7545,13 +7675,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/users/{user_id}/external-identities/{external_identity_id}/unlink": {
+    "/api/admin/v1/users/{user_id}/external-identities/{external_identity_id}/unlink": {
       "post": {
-        "operationId": "gateway_post_admin_v1_users_user_id_external_identities_external_identity_id_unlink_gateway_external_identity_unlink",
+        "operationId": "gateway_post_api_admin_v1_users_user_id_external_identities_external_identity_id_unlink_gateway_external_identity_unlink",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/users/{user_id}/external-identities/{external_identity_id}/unlink",
+        "summary": "POST /api/admin/v1/users/{user_id}/external-identities/{external_identity_id}/unlink",
         "parameters": [
           {
             "name": "user_id",
@@ -7608,6 +7738,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/users/{user_id}/external-identities/{external_identity_id}/unlink",
         "x-starweaver-action-id": "gateway.external_identity.unlink",
         "x-starweaver-resource-kind": "ExternalIdentity",
         "x-starweaver-scope-params": [
@@ -7621,13 +7752,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/organizations/{organization_id}/invitations": {
+    "/api/admin/v1/organizations/{organization_id}/invitations": {
       "get": {
-        "operationId": "gateway_get_admin_v1_organizations_organization_id_invitations_gateway_organization_invite_read",
+        "operationId": "gateway_get_api_admin_v1_organizations_organization_id_invitations_gateway_organization_invite_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/organizations/{organization_id}/invitations",
+        "summary": "GET /api/admin/v1/organizations/{organization_id}/invitations",
         "parameters": [
           {
             "name": "organization_id",
@@ -7666,6 +7797,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/organizations/{organization_id}/invitations",
         "x-starweaver-action-id": "gateway.organization_invite.read",
         "x-starweaver-resource-kind": "OrganizationInvite",
         "x-starweaver-scope-params": [
@@ -7678,11 +7810,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_organizations_organization_id_invitations_gateway_organization_invite_create",
+        "operationId": "gateway_post_api_admin_v1_organizations_organization_id_invitations_gateway_organization_invite_create",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/organizations/{organization_id}/invitations",
+        "summary": "POST /api/admin/v1/organizations/{organization_id}/invitations",
         "parameters": [
           {
             "name": "organization_id",
@@ -7731,6 +7863,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/organizations/{organization_id}/invitations",
         "x-starweaver-action-id": "gateway.organization_invite.create",
         "x-starweaver-resource-kind": "OrganizationInvite",
         "x-starweaver-scope-params": [
@@ -7743,13 +7876,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/organizations/{organization_id}/invitations/{invitation_id}": {
+    "/api/admin/v1/organizations/{organization_id}/invitations/{invitation_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_organizations_organization_id_invitations_invitation_id_gateway_organization_invite_read",
+        "operationId": "gateway_get_api_admin_v1_organizations_organization_id_invitations_invitation_id_gateway_organization_invite_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/organizations/{organization_id}/invitations/{invitation_id}",
+        "summary": "GET /api/admin/v1/organizations/{organization_id}/invitations/{invitation_id}",
         "parameters": [
           {
             "name": "organization_id",
@@ -7796,6 +7929,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/organizations/{organization_id}/invitations/{invitation_id}",
         "x-starweaver-action-id": "gateway.organization_invite.read",
         "x-starweaver-resource-kind": "OrganizationInvite",
         "x-starweaver-scope-params": [
@@ -7809,13 +7943,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/organizations/{organization_id}/invitations/{invitation_id}/revoke": {
+    "/api/admin/v1/organizations/{organization_id}/invitations/{invitation_id}/revoke": {
       "post": {
-        "operationId": "gateway_post_admin_v1_organizations_organization_id_invitations_invitation_id_revoke_gateway_organization_invite_manage",
+        "operationId": "gateway_post_api_admin_v1_organizations_organization_id_invitations_invitation_id_revoke_gateway_organization_invite_manage",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/organizations/{organization_id}/invitations/{invitation_id}/revoke",
+        "summary": "POST /api/admin/v1/organizations/{organization_id}/invitations/{invitation_id}/revoke",
         "parameters": [
           {
             "name": "organization_id",
@@ -7872,6 +8006,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/organizations/{organization_id}/invitations/{invitation_id}/revoke",
         "x-starweaver-action-id": "gateway.organization_invite.manage",
         "x-starweaver-resource-kind": "OrganizationInvite",
         "x-starweaver-scope-params": [
@@ -7885,13 +8020,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/route-policies": {
+    "/api/admin/v1/route-policies": {
       "get": {
-        "operationId": "gateway_get_admin_v1_route_policies_gateway_route_policy_read",
+        "operationId": "gateway_get_api_admin_v1_route_policies_gateway_route_policy_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/route-policies",
+        "summary": "GET /api/admin/v1/route-policies",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -7921,6 +8056,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/route-policies",
         "x-starweaver-action-id": "gateway.route_policy.read",
         "x-starweaver-resource-kind": "RoutePolicy",
         "x-starweaver-scope-params": [
@@ -7932,11 +8068,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_route_policies_gateway_route_policy_write",
+        "operationId": "gateway_post_api_admin_v1_route_policies_gateway_route_policy_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/route-policies",
+        "summary": "POST /api/admin/v1/route-policies",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -7976,6 +8112,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/route-policies",
         "x-starweaver-action-id": "gateway.route_policy.write",
         "x-starweaver-resource-kind": "RoutePolicy",
         "x-starweaver-scope-params": [
@@ -7987,13 +8124,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/route-policies:validate": {
+    "/api/admin/v1/route-policies:validate": {
       "post": {
-        "operationId": "gateway_post_admin_v1_route_policies_validate_gateway_route_policy_read",
+        "operationId": "gateway_post_api_admin_v1_route_policies_validate_gateway_route_policy_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/route-policies:validate",
+        "summary": "POST /api/admin/v1/route-policies:validate",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -8033,6 +8170,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/route-policies:validate",
         "x-starweaver-action-id": "gateway.route_policy.read",
         "x-starweaver-resource-kind": "RoutePolicy",
         "x-starweaver-scope-params": [
@@ -8044,13 +8182,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/route-policies/{route_policy_id}": {
+    "/api/admin/v1/route-policies/{route_policy_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_route_policies_route_policy_id_gateway_route_policy_read",
+        "operationId": "gateway_get_api_admin_v1_route_policies_route_policy_id_gateway_route_policy_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/route-policies/{route_policy_id}",
+        "summary": "GET /api/admin/v1/route-policies/{route_policy_id}",
         "parameters": [
           {
             "name": "route_policy_id",
@@ -8089,6 +8227,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/route-policies/{route_policy_id}",
         "x-starweaver-action-id": "gateway.route_policy.read",
         "x-starweaver-resource-kind": "RoutePolicy",
         "x-starweaver-scope-params": [
@@ -8101,11 +8240,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_route_policies_route_policy_id_gateway_route_policy_write",
+        "operationId": "gateway_patch_api_admin_v1_route_policies_route_policy_id_gateway_route_policy_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/route-policies/{route_policy_id}",
+        "summary": "PATCH /api/admin/v1/route-policies/{route_policy_id}",
         "parameters": [
           {
             "name": "route_policy_id",
@@ -8154,6 +8293,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/route-policies/{route_policy_id}",
         "x-starweaver-action-id": "gateway.route_policy.write",
         "x-starweaver-resource-kind": "RoutePolicy",
         "x-starweaver-scope-params": [
@@ -8166,13 +8306,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/provider-grants": {
+    "/api/admin/v1/provider-grants": {
       "get": {
-        "operationId": "gateway_get_admin_v1_provider_grants_gateway_provider_grant_read",
+        "operationId": "gateway_get_api_admin_v1_provider_grants_gateway_provider_grant_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/provider-grants",
+        "summary": "GET /api/admin/v1/provider-grants",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -8202,6 +8342,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/provider-grants",
         "x-starweaver-action-id": "gateway.provider_grant.read",
         "x-starweaver-resource-kind": "ProviderGrant",
         "x-starweaver-scope-params": [
@@ -8213,11 +8354,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_provider_grants_gateway_provider_grant_write",
+        "operationId": "gateway_post_api_admin_v1_provider_grants_gateway_provider_grant_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/provider-grants",
+        "summary": "POST /api/admin/v1/provider-grants",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -8257,6 +8398,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/provider-grants",
         "x-starweaver-action-id": "gateway.provider_grant.write",
         "x-starweaver-resource-kind": "ProviderGrant",
         "x-starweaver-scope-params": [
@@ -8268,13 +8410,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/provider-grants:validate": {
+    "/api/admin/v1/provider-grants:validate": {
       "post": {
-        "operationId": "gateway_post_admin_v1_provider_grants_validate_gateway_provider_grant_read",
+        "operationId": "gateway_post_api_admin_v1_provider_grants_validate_gateway_provider_grant_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/provider-grants:validate",
+        "summary": "POST /api/admin/v1/provider-grants:validate",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -8314,6 +8456,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/provider-grants:validate",
         "x-starweaver-action-id": "gateway.provider_grant.read",
         "x-starweaver-resource-kind": "ProviderGrant",
         "x-starweaver-scope-params": [
@@ -8325,13 +8468,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/provider-grants/{provider_grant_id}": {
+    "/api/admin/v1/provider-grants/{provider_grant_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_provider_grants_provider_grant_id_gateway_provider_grant_read",
+        "operationId": "gateway_get_api_admin_v1_provider_grants_provider_grant_id_gateway_provider_grant_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/provider-grants/{provider_grant_id}",
+        "summary": "GET /api/admin/v1/provider-grants/{provider_grant_id}",
         "parameters": [
           {
             "name": "provider_grant_id",
@@ -8370,6 +8513,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/provider-grants/{provider_grant_id}",
         "x-starweaver-action-id": "gateway.provider_grant.read",
         "x-starweaver-resource-kind": "ProviderGrant",
         "x-starweaver-scope-params": [
@@ -8382,11 +8526,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_provider_grants_provider_grant_id_gateway_provider_grant_write",
+        "operationId": "gateway_patch_api_admin_v1_provider_grants_provider_grant_id_gateway_provider_grant_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/provider-grants/{provider_grant_id}",
+        "summary": "PATCH /api/admin/v1/provider-grants/{provider_grant_id}",
         "parameters": [
           {
             "name": "provider_grant_id",
@@ -8435,6 +8579,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/provider-grants/{provider_grant_id}",
         "x-starweaver-action-id": "gateway.provider_grant.write",
         "x-starweaver-resource-kind": "ProviderGrant",
         "x-starweaver-scope-params": [
@@ -8447,13 +8592,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/routing-groups": {
+    "/api/admin/v1/routing-groups": {
       "get": {
-        "operationId": "gateway_get_admin_v1_routing_groups_gateway_routing_group_read",
+        "operationId": "gateway_get_api_admin_v1_routing_groups_gateway_routing_group_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/routing-groups",
+        "summary": "GET /api/admin/v1/routing-groups",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -8483,6 +8628,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/routing-groups",
         "x-starweaver-action-id": "gateway.routing_group.read",
         "x-starweaver-resource-kind": "RoutingGroup",
         "x-starweaver-scope-params": [
@@ -8494,11 +8640,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_routing_groups_gateway_routing_group_write",
+        "operationId": "gateway_post_api_admin_v1_routing_groups_gateway_routing_group_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/routing-groups",
+        "summary": "POST /api/admin/v1/routing-groups",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -8538,6 +8684,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/routing-groups",
         "x-starweaver-action-id": "gateway.routing_group.write",
         "x-starweaver-resource-kind": "RoutingGroup",
         "x-starweaver-scope-params": [
@@ -8549,13 +8696,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/routing-groups:validate": {
+    "/api/admin/v1/routing-groups:validate": {
       "post": {
-        "operationId": "gateway_post_admin_v1_routing_groups_validate_gateway_routing_group_read",
+        "operationId": "gateway_post_api_admin_v1_routing_groups_validate_gateway_routing_group_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/routing-groups:validate",
+        "summary": "POST /api/admin/v1/routing-groups:validate",
         "parameters": [],
         "requestBody": {
           "required": false,
@@ -8595,6 +8742,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/routing-groups:validate",
         "x-starweaver-action-id": "gateway.routing_group.read",
         "x-starweaver-resource-kind": "RoutingGroup",
         "x-starweaver-scope-params": [
@@ -8606,13 +8754,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/routing-groups/{routing_group_id}": {
+    "/api/admin/v1/routing-groups/{routing_group_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_routing_groups_routing_group_id_gateway_routing_group_read",
+        "operationId": "gateway_get_api_admin_v1_routing_groups_routing_group_id_gateway_routing_group_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/routing-groups/{routing_group_id}",
+        "summary": "GET /api/admin/v1/routing-groups/{routing_group_id}",
         "parameters": [
           {
             "name": "routing_group_id",
@@ -8651,6 +8799,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/routing-groups/{routing_group_id}",
         "x-starweaver-action-id": "gateway.routing_group.read",
         "x-starweaver-resource-kind": "RoutingGroup",
         "x-starweaver-scope-params": [
@@ -8663,11 +8812,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_routing_groups_routing_group_id_gateway_routing_group_write",
+        "operationId": "gateway_patch_api_admin_v1_routing_groups_routing_group_id_gateway_routing_group_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/routing-groups/{routing_group_id}",
+        "summary": "PATCH /api/admin/v1/routing-groups/{routing_group_id}",
         "parameters": [
           {
             "name": "routing_group_id",
@@ -8716,6 +8865,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/routing-groups/{routing_group_id}",
         "x-starweaver-action-id": "gateway.routing_group.write",
         "x-starweaver-resource-kind": "RoutingGroup",
         "x-starweaver-scope-params": [
@@ -8728,13 +8878,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/routing-groups/{routing_group_id}/targets": {
+    "/api/admin/v1/routing-groups/{routing_group_id}/targets": {
       "get": {
-        "operationId": "gateway_get_admin_v1_routing_groups_routing_group_id_targets_gateway_routing_group_read",
+        "operationId": "gateway_get_api_admin_v1_routing_groups_routing_group_id_targets_gateway_routing_group_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/routing-groups/{routing_group_id}/targets",
+        "summary": "GET /api/admin/v1/routing-groups/{routing_group_id}/targets",
         "parameters": [
           {
             "name": "routing_group_id",
@@ -8773,6 +8923,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/routing-groups/{routing_group_id}/targets",
         "x-starweaver-action-id": "gateway.routing_group.read",
         "x-starweaver-resource-kind": "RoutingGroup",
         "x-starweaver-scope-params": [
@@ -8785,11 +8936,11 @@
         "x-starweaver-protocol-family": null
       },
       "post": {
-        "operationId": "gateway_post_admin_v1_routing_groups_routing_group_id_targets_gateway_routing_group_write",
+        "operationId": "gateway_post_api_admin_v1_routing_groups_routing_group_id_targets_gateway_routing_group_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/routing-groups/{routing_group_id}/targets",
+        "summary": "POST /api/admin/v1/routing-groups/{routing_group_id}/targets",
         "parameters": [
           {
             "name": "routing_group_id",
@@ -8838,6 +8989,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/routing-groups/{routing_group_id}/targets",
         "x-starweaver-action-id": "gateway.routing_group.write",
         "x-starweaver-resource-kind": "RoutingGroup",
         "x-starweaver-scope-params": [
@@ -8850,13 +9002,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/routing-groups/{routing_group_id}/targets:validate": {
+    "/api/admin/v1/routing-groups/{routing_group_id}/targets:validate": {
       "post": {
-        "operationId": "gateway_post_admin_v1_routing_groups_routing_group_id_targets_validate_gateway_routing_group_read",
+        "operationId": "gateway_post_api_admin_v1_routing_groups_routing_group_id_targets_validate_gateway_routing_group_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "POST /admin/v1/routing-groups/{routing_group_id}/targets:validate",
+        "summary": "POST /api/admin/v1/routing-groups/{routing_group_id}/targets:validate",
         "parameters": [
           {
             "name": "routing_group_id",
@@ -8905,6 +9057,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/routing-groups/{routing_group_id}/targets:validate",
         "x-starweaver-action-id": "gateway.routing_group.read",
         "x-starweaver-resource-kind": "RoutingGroup",
         "x-starweaver-scope-params": [
@@ -8917,13 +9070,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/routing-groups/{routing_group_id}/targets/{routing_group_target_id}": {
+    "/api/admin/v1/routing-groups/{routing_group_id}/targets/{routing_group_target_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_routing_groups_routing_group_id_targets_routing_group_target_id_gateway_routing_group_read",
+        "operationId": "gateway_get_api_admin_v1_routing_groups_routing_group_id_targets_routing_group_target_id_gateway_routing_group_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/routing-groups/{routing_group_id}/targets/{routing_group_target_id}",
+        "summary": "GET /api/admin/v1/routing-groups/{routing_group_id}/targets/{routing_group_target_id}",
         "parameters": [
           {
             "name": "routing_group_id",
@@ -8970,6 +9123,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/routing-groups/{routing_group_id}/targets/{routing_group_target_id}",
         "x-starweaver-action-id": "gateway.routing_group.read",
         "x-starweaver-resource-kind": "RoutingGroup",
         "x-starweaver-scope-params": [
@@ -8983,11 +9137,11 @@
         "x-starweaver-protocol-family": null
       },
       "patch": {
-        "operationId": "gateway_patch_admin_v1_routing_groups_routing_group_id_targets_routing_group_target_id_gateway_routing_group_write",
+        "operationId": "gateway_patch_api_admin_v1_routing_groups_routing_group_id_targets_routing_group_target_id_gateway_routing_group_write",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "PATCH /admin/v1/routing-groups/{routing_group_id}/targets/{routing_group_target_id}",
+        "summary": "PATCH /api/admin/v1/routing-groups/{routing_group_id}/targets/{routing_group_target_id}",
         "parameters": [
           {
             "name": "routing_group_id",
@@ -9044,6 +9198,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/routing-groups/{routing_group_id}/targets/{routing_group_target_id}",
         "x-starweaver-action-id": "gateway.routing_group.write",
         "x-starweaver-resource-kind": "RoutingGroup",
         "x-starweaver-scope-params": [
@@ -9057,13 +9212,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/realtime/overview": {
+    "/api/admin/v1/realtime/overview": {
       "get": {
-        "operationId": "gateway_get_admin_v1_realtime_overview_gateway_realtime_dashboard_read",
+        "operationId": "gateway_get_api_admin_v1_realtime_overview_gateway_realtime_dashboard_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/realtime/overview",
+        "summary": "GET /api/admin/v1/realtime/overview",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -9093,6 +9248,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/realtime/overview",
         "x-starweaver-action-id": "gateway.realtime_dashboard.read",
         "x-starweaver-resource-kind": "RealtimeDashboard",
         "x-starweaver-scope-params": [
@@ -9104,13 +9260,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/realtime/providers": {
+    "/api/admin/v1/realtime/providers": {
       "get": {
-        "operationId": "gateway_get_admin_v1_realtime_providers_gateway_realtime_dashboard_read",
+        "operationId": "gateway_get_api_admin_v1_realtime_providers_gateway_realtime_dashboard_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/realtime/providers",
+        "summary": "GET /api/admin/v1/realtime/providers",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -9140,6 +9296,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/realtime/providers",
         "x-starweaver-action-id": "gateway.realtime_dashboard.read",
         "x-starweaver-resource-kind": "RealtimeDashboard",
         "x-starweaver-scope-params": [
@@ -9151,13 +9308,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/realtime/routes": {
+    "/api/admin/v1/realtime/routes": {
       "get": {
-        "operationId": "gateway_get_admin_v1_realtime_routes_gateway_realtime_dashboard_read",
+        "operationId": "gateway_get_api_admin_v1_realtime_routes_gateway_realtime_dashboard_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/realtime/routes",
+        "summary": "GET /api/admin/v1/realtime/routes",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -9187,6 +9344,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/realtime/routes",
         "x-starweaver-action-id": "gateway.realtime_dashboard.read",
         "x-starweaver-resource-kind": "RealtimeDashboard",
         "x-starweaver-scope-params": [
@@ -9198,13 +9356,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/realtime/budgets": {
+    "/api/admin/v1/realtime/budgets": {
       "get": {
-        "operationId": "gateway_get_admin_v1_realtime_budgets_gateway_realtime_dashboard_read",
+        "operationId": "gateway_get_api_admin_v1_realtime_budgets_gateway_realtime_dashboard_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/realtime/budgets",
+        "summary": "GET /api/admin/v1/realtime/budgets",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -9234,6 +9392,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/realtime/budgets",
         "x-starweaver-action-id": "gateway.realtime_dashboard.read",
         "x-starweaver-resource-kind": "RealtimeDashboard",
         "x-starweaver-scope-params": [
@@ -9245,13 +9404,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/realtime/quotas": {
+    "/api/admin/v1/realtime/quotas": {
       "get": {
-        "operationId": "gateway_get_admin_v1_realtime_quotas_gateway_realtime_dashboard_read",
+        "operationId": "gateway_get_api_admin_v1_realtime_quotas_gateway_realtime_dashboard_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/realtime/quotas",
+        "summary": "GET /api/admin/v1/realtime/quotas",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -9281,6 +9440,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/realtime/quotas",
         "x-starweaver-action-id": "gateway.realtime_dashboard.read",
         "x-starweaver-resource-kind": "RealtimeDashboard",
         "x-starweaver-scope-params": [
@@ -9292,13 +9452,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/realtime/workers": {
+    "/api/admin/v1/realtime/workers": {
       "get": {
-        "operationId": "gateway_get_admin_v1_realtime_workers_gateway_realtime_dashboard_read",
+        "operationId": "gateway_get_api_admin_v1_realtime_workers_gateway_realtime_dashboard_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/realtime/workers",
+        "summary": "GET /api/admin/v1/realtime/workers",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -9328,6 +9488,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/realtime/workers",
         "x-starweaver-action-id": "gateway.realtime_dashboard.read",
         "x-starweaver-resource-kind": "RealtimeDashboard",
         "x-starweaver-scope-params": [
@@ -9339,13 +9500,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/dashboards/tenant/overview": {
+    "/api/admin/v1/dashboards/tenant/overview": {
       "get": {
-        "operationId": "gateway_get_admin_v1_dashboards_tenant_overview_gateway_dashboard_tenant_read",
+        "operationId": "gateway_get_api_admin_v1_dashboards_tenant_overview_gateway_dashboard_tenant_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/dashboards/tenant/overview",
+        "summary": "GET /api/admin/v1/dashboards/tenant/overview",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -9375,6 +9536,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/dashboards/tenant/overview",
         "x-starweaver-action-id": "gateway.dashboard.tenant.read",
         "x-starweaver-resource-kind": "TenantDashboard",
         "x-starweaver-scope-params": [
@@ -9386,13 +9548,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/dashboards/organizations/{organization_id}": {
+    "/api/admin/v1/dashboards/organizations/{organization_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_dashboards_organizations_organization_id_gateway_dashboard_organization_read",
+        "operationId": "gateway_get_api_admin_v1_dashboards_organizations_organization_id_gateway_dashboard_organization_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/dashboards/organizations/{organization_id}",
+        "summary": "GET /api/admin/v1/dashboards/organizations/{organization_id}",
         "parameters": [
           {
             "name": "organization_id",
@@ -9431,6 +9593,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/dashboards/organizations/{organization_id}",
         "x-starweaver-action-id": "gateway.dashboard.organization.read",
         "x-starweaver-resource-kind": "OrganizationDashboard",
         "x-starweaver-scope-params": [
@@ -9443,13 +9606,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/dashboards/projects/{project_id}": {
+    "/api/admin/v1/dashboards/projects/{project_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_dashboards_projects_project_id_gateway_dashboard_project_read",
+        "operationId": "gateway_get_api_admin_v1_dashboards_projects_project_id_gateway_dashboard_project_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/dashboards/projects/{project_id}",
+        "summary": "GET /api/admin/v1/dashboards/projects/{project_id}",
         "parameters": [
           {
             "name": "project_id",
@@ -9488,6 +9651,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/dashboards/projects/{project_id}",
         "x-starweaver-action-id": "gateway.dashboard.project.read",
         "x-starweaver-resource-kind": "ProjectDashboard",
         "x-starweaver-scope-params": [
@@ -9500,13 +9664,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/dashboards/project-members/{project_member_id}": {
+    "/api/admin/v1/dashboards/project-members/{project_member_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_dashboards_project_members_project_member_id_gateway_dashboard_project_member_read",
+        "operationId": "gateway_get_api_admin_v1_dashboards_project_members_project_member_id_gateway_dashboard_project_member_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/dashboards/project-members/{project_member_id}",
+        "summary": "GET /api/admin/v1/dashboards/project-members/{project_member_id}",
         "parameters": [
           {
             "name": "project_member_id",
@@ -9545,6 +9709,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/dashboards/project-members/{project_member_id}",
         "x-starweaver-action-id": "gateway.dashboard.project_member.read",
         "x-starweaver-resource-kind": "ProjectMemberDashboard",
         "x-starweaver-scope-params": [
@@ -9557,13 +9722,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/dashboards/api-keys/{api_key_id}": {
+    "/api/admin/v1/dashboards/api-keys/{api_key_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_dashboards_api_keys_api_key_id_gateway_dashboard_api_key_read",
+        "operationId": "gateway_get_api_admin_v1_dashboards_api_keys_api_key_id_gateway_dashboard_api_key_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/dashboards/api-keys/{api_key_id}",
+        "summary": "GET /api/admin/v1/dashboards/api-keys/{api_key_id}",
         "parameters": [
           {
             "name": "api_key_id",
@@ -9602,6 +9767,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/dashboards/api-keys/{api_key_id}",
         "x-starweaver-action-id": "gateway.dashboard.api_key.read",
         "x-starweaver-resource-kind": "ApiKeyDashboard",
         "x-starweaver-scope-params": [
@@ -9614,13 +9780,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/dashboards/service-accounts/{service_account_id}": {
+    "/api/admin/v1/dashboards/service-accounts/{service_account_id}": {
       "get": {
-        "operationId": "gateway_get_admin_v1_dashboards_service_accounts_service_account_id_gateway_dashboard_service_account_read",
+        "operationId": "gateway_get_api_admin_v1_dashboards_service_accounts_service_account_id_gateway_dashboard_service_account_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/dashboards/service-accounts/{service_account_id}",
+        "summary": "GET /api/admin/v1/dashboards/service-accounts/{service_account_id}",
         "parameters": [
           {
             "name": "service_account_id",
@@ -9659,6 +9825,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/dashboards/service-accounts/{service_account_id}",
         "x-starweaver-action-id": "gateway.dashboard.service_account.read",
         "x-starweaver-resource-kind": "ServiceAccountDashboard",
         "x-starweaver-scope-params": [
@@ -9671,13 +9838,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/models/aliases/{model_alias_id}/dashboard": {
+    "/api/admin/v1/models/aliases/{model_alias_id}/dashboard": {
       "get": {
-        "operationId": "gateway_get_admin_v1_models_aliases_model_alias_id_dashboard_gateway_model_observability_read",
+        "operationId": "gateway_get_api_admin_v1_models_aliases_model_alias_id_dashboard_gateway_model_observability_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/models/aliases/{model_alias_id}/dashboard",
+        "summary": "GET /api/admin/v1/models/aliases/{model_alias_id}/dashboard",
         "parameters": [
           {
             "name": "model_alias_id",
@@ -9716,6 +9883,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/models/aliases/{model_alias_id}/dashboard",
         "x-starweaver-action-id": "gateway.model_observability.read",
         "x-starweaver-resource-kind": "ModelObservability",
         "x-starweaver-scope-params": [
@@ -9728,13 +9896,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/models/aliases/{model_alias_id}/routes": {
+    "/api/admin/v1/models/aliases/{model_alias_id}/routes": {
       "get": {
-        "operationId": "gateway_get_admin_v1_models_aliases_model_alias_id_routes_gateway_model_observability_read",
+        "operationId": "gateway_get_api_admin_v1_models_aliases_model_alias_id_routes_gateway_model_observability_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/models/aliases/{model_alias_id}/routes",
+        "summary": "GET /api/admin/v1/models/aliases/{model_alias_id}/routes",
         "parameters": [
           {
             "name": "model_alias_id",
@@ -9773,6 +9941,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/models/aliases/{model_alias_id}/routes",
         "x-starweaver-action-id": "gateway.model_observability.read",
         "x-starweaver-resource-kind": "ModelObservability",
         "x-starweaver-scope-params": [
@@ -9785,13 +9954,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/models/aliases/{model_alias_id}/quality": {
+    "/api/admin/v1/models/aliases/{model_alias_id}/quality": {
       "get": {
-        "operationId": "gateway_get_admin_v1_models_aliases_model_alias_id_quality_gateway_model_observability_read",
+        "operationId": "gateway_get_api_admin_v1_models_aliases_model_alias_id_quality_gateway_model_observability_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/models/aliases/{model_alias_id}/quality",
+        "summary": "GET /api/admin/v1/models/aliases/{model_alias_id}/quality",
         "parameters": [
           {
             "name": "model_alias_id",
@@ -9830,6 +9999,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/models/aliases/{model_alias_id}/quality",
         "x-starweaver-action-id": "gateway.model_observability.read",
         "x-starweaver-resource-kind": "ModelObservability",
         "x-starweaver-scope-params": [
@@ -9842,13 +10012,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/models/targets/{model_target_id}/dashboard": {
+    "/api/admin/v1/models/targets/{model_target_id}/dashboard": {
       "get": {
-        "operationId": "gateway_get_admin_v1_models_targets_model_target_id_dashboard_gateway_model_observability_read",
+        "operationId": "gateway_get_api_admin_v1_models_targets_model_target_id_dashboard_gateway_model_observability_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/models/targets/{model_target_id}/dashboard",
+        "summary": "GET /api/admin/v1/models/targets/{model_target_id}/dashboard",
         "parameters": [
           {
             "name": "model_target_id",
@@ -9887,6 +10057,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/models/targets/{model_target_id}/dashboard",
         "x-starweaver-action-id": "gateway.model_observability.read",
         "x-starweaver-resource-kind": "ModelObservability",
         "x-starweaver-scope-params": [
@@ -9899,13 +10070,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/usage": {
+    "/api/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/usage": {
       "get": {
-        "operationId": "gateway_get_admin_v1_provider_endpoints_provider_endpoint_id_observability_usage_gateway_provider_observability_read",
+        "operationId": "gateway_get_api_admin_v1_provider_endpoints_provider_endpoint_id_observability_usage_gateway_provider_observability_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/provider-endpoints/{provider_endpoint_id}/observability/usage",
+        "summary": "GET /api/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/usage",
         "parameters": [
           {
             "name": "provider_endpoint_id",
@@ -9944,6 +10115,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/usage",
         "x-starweaver-action-id": "gateway.provider_observability.read",
         "x-starweaver-resource-kind": "ProviderEndpoint",
         "x-starweaver-scope-params": [
@@ -9956,13 +10128,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/health": {
+    "/api/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/health": {
       "get": {
-        "operationId": "gateway_get_admin_v1_provider_endpoints_provider_endpoint_id_observability_health_gateway_provider_observability_read",
+        "operationId": "gateway_get_api_admin_v1_provider_endpoints_provider_endpoint_id_observability_health_gateway_provider_observability_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/provider-endpoints/{provider_endpoint_id}/observability/health",
+        "summary": "GET /api/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/health",
         "parameters": [
           {
             "name": "provider_endpoint_id",
@@ -10001,6 +10173,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/health",
         "x-starweaver-action-id": "gateway.provider_observability.read",
         "x-starweaver-resource-kind": "ProviderEndpoint",
         "x-starweaver-scope-params": [
@@ -10013,13 +10186,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/failover": {
+    "/api/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/failover": {
       "get": {
-        "operationId": "gateway_get_admin_v1_provider_endpoints_provider_endpoint_id_observability_failover_gateway_provider_observability_read",
+        "operationId": "gateway_get_api_admin_v1_provider_endpoints_provider_endpoint_id_observability_failover_gateway_provider_observability_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/provider-endpoints/{provider_endpoint_id}/observability/failover",
+        "summary": "GET /api/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/failover",
         "parameters": [
           {
             "name": "provider_endpoint_id",
@@ -10058,6 +10231,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/failover",
         "x-starweaver-action-id": "gateway.provider_observability.read",
         "x-starweaver-resource-kind": "ProviderEndpoint",
         "x-starweaver-scope-params": [
@@ -10070,13 +10244,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/credentials": {
+    "/api/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/credentials": {
       "get": {
-        "operationId": "gateway_get_admin_v1_provider_endpoints_provider_endpoint_id_observability_credentials_gateway_provider_observability_read",
+        "operationId": "gateway_get_api_admin_v1_provider_endpoints_provider_endpoint_id_observability_credentials_gateway_provider_observability_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/provider-endpoints/{provider_endpoint_id}/observability/credentials",
+        "summary": "GET /api/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/credentials",
         "parameters": [
           {
             "name": "provider_endpoint_id",
@@ -10115,6 +10289,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/credentials",
         "x-starweaver-action-id": "gateway.provider_observability.read",
         "x-starweaver-resource-kind": "ProviderEndpoint",
         "x-starweaver-scope-params": [
@@ -10127,13 +10302,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/model-targets": {
+    "/api/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/model-targets": {
       "get": {
-        "operationId": "gateway_get_admin_v1_provider_endpoints_provider_endpoint_id_observability_model_targets_gateway_provider_observability_read",
+        "operationId": "gateway_get_api_admin_v1_provider_endpoints_provider_endpoint_id_observability_model_targets_gateway_provider_observability_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/provider-endpoints/{provider_endpoint_id}/observability/model-targets",
+        "summary": "GET /api/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/model-targets",
         "parameters": [
           {
             "name": "provider_endpoint_id",
@@ -10172,6 +10347,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/provider-endpoints/{provider_endpoint_id}/observability/model-targets",
         "x-starweaver-action-id": "gateway.provider_observability.read",
         "x-starweaver-resource-kind": "ProviderEndpoint",
         "x-starweaver-scope-params": [
@@ -10184,13 +10360,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/usage/summary": {
+    "/api/admin/v1/usage/summary": {
       "get": {
-        "operationId": "gateway_get_admin_v1_usage_summary_gateway_usage_summary_read",
+        "operationId": "gateway_get_api_admin_v1_usage_summary_gateway_usage_summary_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/usage/summary",
+        "summary": "GET /api/admin/v1/usage/summary",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -10220,6 +10396,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/usage/summary",
         "x-starweaver-action-id": "gateway.usage.summary.read",
         "x-starweaver-resource-kind": "UsageScope",
         "x-starweaver-scope-params": [
@@ -10233,13 +10410,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/usage/timeseries": {
+    "/api/admin/v1/usage/timeseries": {
       "get": {
-        "operationId": "gateway_get_admin_v1_usage_timeseries_gateway_usage_summary_read",
+        "operationId": "gateway_get_api_admin_v1_usage_timeseries_gateway_usage_summary_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/usage/timeseries",
+        "summary": "GET /api/admin/v1/usage/timeseries",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -10269,6 +10446,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/usage/timeseries",
         "x-starweaver-action-id": "gateway.usage.summary.read",
         "x-starweaver-resource-kind": "UsageScope",
         "x-starweaver-scope-params": [
@@ -10283,13 +10461,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/usage/events": {
+    "/api/admin/v1/usage/events": {
       "get": {
-        "operationId": "gateway_get_admin_v1_usage_events_gateway_usage_event_read",
+        "operationId": "gateway_get_api_admin_v1_usage_events_gateway_usage_event_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/usage/events",
+        "summary": "GET /api/admin/v1/usage/events",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -10319,6 +10497,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/usage/events",
         "x-starweaver-action-id": "gateway.usage.event.read",
         "x-starweaver-resource-kind": "UsageEvent",
         "x-starweaver-scope-params": [
@@ -10332,13 +10511,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/usage/breakdown/by-project": {
+    "/api/admin/v1/usage/breakdown/by-project": {
       "get": {
-        "operationId": "gateway_get_admin_v1_usage_breakdown_by_project_gateway_usage_read",
+        "operationId": "gateway_get_api_admin_v1_usage_breakdown_by_project_gateway_usage_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/usage/breakdown/by-project",
+        "summary": "GET /api/admin/v1/usage/breakdown/by-project",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -10368,6 +10547,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/usage/breakdown/by-project",
         "x-starweaver-action-id": "gateway.usage.read",
         "x-starweaver-resource-kind": "UsageScope",
         "x-starweaver-scope-params": [
@@ -10381,13 +10561,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/usage/breakdown/by-project-member": {
+    "/api/admin/v1/usage/breakdown/by-project-member": {
       "get": {
-        "operationId": "gateway_get_admin_v1_usage_breakdown_by_project_member_gateway_usage_read",
+        "operationId": "gateway_get_api_admin_v1_usage_breakdown_by_project_member_gateway_usage_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/usage/breakdown/by-project-member",
+        "summary": "GET /api/admin/v1/usage/breakdown/by-project-member",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -10417,6 +10597,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/usage/breakdown/by-project-member",
         "x-starweaver-action-id": "gateway.usage.read",
         "x-starweaver-resource-kind": "UsageScope",
         "x-starweaver-scope-params": [
@@ -10430,13 +10611,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/usage/breakdown/by-model": {
+    "/api/admin/v1/usage/breakdown/by-model": {
       "get": {
-        "operationId": "gateway_get_admin_v1_usage_breakdown_by_model_gateway_usage_read",
+        "operationId": "gateway_get_api_admin_v1_usage_breakdown_by_model_gateway_usage_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/usage/breakdown/by-model",
+        "summary": "GET /api/admin/v1/usage/breakdown/by-model",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -10466,6 +10647,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/usage/breakdown/by-model",
         "x-starweaver-action-id": "gateway.usage.read",
         "x-starweaver-resource-kind": "UsageScope",
         "x-starweaver-scope-params": [
@@ -10479,13 +10661,13 @@
         "x-starweaver-protocol-family": null
       }
     },
-    "/admin/v1/usage/breakdown/by-provider-endpoint": {
+    "/api/admin/v1/usage/breakdown/by-provider-endpoint": {
       "get": {
-        "operationId": "gateway_get_admin_v1_usage_breakdown_by_provider_endpoint_gateway_usage_read",
+        "operationId": "gateway_get_api_admin_v1_usage_breakdown_by_provider_endpoint_gateway_usage_read",
         "tags": [
           "gateway-admin"
         ],
-        "summary": "GET /admin/v1/usage/breakdown/by-provider-endpoint",
+        "summary": "GET /api/admin/v1/usage/breakdown/by-provider-endpoint",
         "parameters": [],
         "requestBody": null,
         "responses": {
@@ -10515,6 +10697,7 @@
             "bearerAuth": []
           }
         ],
+        "x-starweaver-canonical-path": "/admin/v1/usage/breakdown/by-provider-endpoint",
         "x-starweaver-action-id": "gateway.usage.read",
         "x-starweaver-resource-kind": "UsageScope",
         "x-starweaver-scope-params": [
