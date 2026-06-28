@@ -80,22 +80,6 @@ pub(crate) struct ProviderAdapterRequest {
     pub(crate) safe_metadata: ProviderAdapterRequestMetadata,
 }
 
-impl ProviderAdapterRequest {
-    pub(crate) fn into_safe_metadata(self) -> ProviderAdapterRequestMetadata {
-        let _ = (
-            self.protocol_family,
-            self.method,
-            self.url.as_str(),
-            self.headers
-                .iter()
-                .map(|header| header.name.len() + header.value.expose_secret().len())
-                .sum::<usize>(),
-            &self.body,
-        );
-        self.safe_metadata
-    }
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct ProviderAdapterHeader {
     pub(crate) name: &'static str,

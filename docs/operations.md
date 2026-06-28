@@ -57,10 +57,15 @@ STARWEAVER_GATEWAY_SESSION_COOKIE_HTTP_ONLY=true
 STARWEAVER_GATEWAY_SESSION_COOKIE_SAME_SITE=lax
 ```
 
-The HTTP service currently uses the foundation in-memory runtime store. In
-`prod` or `production`, startup rejects that profile instead of silently serving
-non-durable state. Wire the PostgreSQL-backed runtime repository before
-enabling production traffic.
+The HTTP service supports the `memory` runtime store for local replay and the
+`postgres` runtime store for durable service profiles. In `prod` or
+`production`, startup rejects `memory` instead of silently serving non-durable
+state. Set both values before enabling production traffic:
+
+```bash
+STARWEAVER_GATEWAY_RUNTIME_STORE=postgres
+STARWEAVER_GATEWAY_DATABASE_URL=postgres://gateway:gateway@postgres:5432/starweaver_gateway
+```
 
 ## Gateway Fake-Provider Load And Soak Harnesses
 

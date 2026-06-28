@@ -51,6 +51,12 @@ pub enum GatewayError {
     /// Service is not ready.
     #[error("service not ready")]
     NotReady,
+    /// Upstream provider execution failed.
+    #[error("upstream provider failed: {reason}")]
+    Upstream {
+        /// Safe upstream failure reason.
+        reason: &'static str,
+    },
     /// Internal service error.
     #[error("internal error: {message}")]
     Internal {
@@ -73,6 +79,7 @@ impl GatewayError {
             Self::QuotaExceeded { .. } => "gateway.quota.exceeded",
             Self::RequestTimeout => "gateway.request.timeout",
             Self::NotReady => "gateway.runtime.not_ready",
+            Self::Upstream { .. } => "gateway.upstream.failed",
             Self::Internal { .. } => "gateway.internal",
         }
     }
@@ -87,6 +94,7 @@ impl GatewayError {
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
             Self::NoRoute { .. } | Self::NotReady => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Upstream { .. } => StatusCode::BAD_GATEWAY,
             Self::BudgetExceeded { .. } | Self::QuotaExceeded { .. } => {
                 StatusCode::TOO_MANY_REQUESTS
             }
@@ -131,6 +139,7 @@ impl ErrorEnvelope {
                     GatewayError::NoRoute { .. }
                         | GatewayError::RequestTimeout
                         | GatewayError::NotReady
+                        | GatewayError::Upstream { .. }
                         | GatewayError::QuotaExceeded { .. }
                         | GatewayError::Internal { .. }
                 ),

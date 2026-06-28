@@ -105,16 +105,51 @@ Completed foundation slices:
   key candidate lookup, session-token lookup, project-membership checks, and
   API-key last-used updates when durable storage is configured, while preserving
   the deterministic in-memory resolver for local replay and foundation tests.
+- Gateway login and session mutation endpoints now persist auth sessions,
+  active context updates, and logout revocations to PostgreSQL when durable
+  storage is attached, so newly issued user sessions use the same durable
+  session truth as protected API authentication.
 - Runtime route simulation and model ingress now load the latest tenant-scoped
   published config snapshot document from PostgreSQL when durable storage is
   attached, so catalog routing and runtime Cedar policy evaluation no longer
   depend only on the in-memory config snapshot store.
+- Control-plane config snapshot reads now use durable-first adapters for
+  readiness, config snapshot list/get, admin route authorization, and item-level
+  admin list filtering when PostgreSQL is attached, keeping published Cedar
+  policy semantics aligned between admin APIs and runtime ingress.
 - Runtime ingress now constructs a redaction-safe provider adapter request
   boundary from the selected catalog route, provider endpoint, upstream model
-  id, and optional runtime credential material. The current execution path
-  remains deterministic fake-provider replay, but the provider-facing URL,
-  model rewrite, authorization header shape, and safe metadata contract are now
-  covered before enabling live provider transport.
+  id, and optional runtime credential material. The provider-facing URL, model
+  rewrite, authorization header shape, and safe metadata contract are covered
+  before a request can use live provider transport.
+- Runtime ingress now supports an explicit opt-in HTTP provider transport via
+  `STARWEAVER_GATEWAY_PROVIDER_TRANSPORT=http`. The default remains
+  deterministic fake-provider replay; HTTP mode executes non-streaming JSON
+  provider requests through the adapter boundary, resolves credential metadata
+  from the published snapshot plus secret store, records completed attempts and
+  usage only after successful upstream responses, and records failed attempts
+  without usage when the provider rejects or is unavailable.
+- Runtime terminal usage events now have a PostgreSQL bridge when durable
+  storage is attached. Successful model requests still update the deterministic
+  in-memory replay store first, then insert immutable durable usage evidence and
+  idempotently fold event, minute, hour, day, and month ledger buckets in one
+  transaction without losing request trace ids.
+- Admin usage analytics now read usage events and ledger buckets from the
+  attached PostgreSQL store when durable storage is configured, while runtime
+  policy preflight remains on the immediate in-memory hot path until Redis
+  runtime observation is connected.
+- Built-in dashboard overview endpoints now load route evidence and usage
+  rollups through the durable-first read adapters when PostgreSQL is attached,
+  preserving the in-memory replay path for local tests and single-node
+  development.
+- Usage export jobs now build manifest pages from the durable-first usage event
+  read adapter when PostgreSQL is attached, aligning exports with usage
+  analytics and dashboard read paths.
+- OpenTelemetry exporter runs now build metric counts and OTLP payloads from
+  the durable-first route evidence, usage event, and ledger-bucket adapters
+  when PostgreSQL is attached. The store-only test API remains compatible for
+  deterministic local replay, while background worker execution uses the full
+  `AppState` path so exported dashboard metrics match durable admin reads.
 - Sticky routing now uses Redis-compatible hot-state mappings keyed by tenant,
   project, model alias, and a hashed affinity header. Runtime routing reuses a
   fresh sticky target when it is still eligible, records sticky hit or miss
@@ -351,11 +386,13 @@ Completed foundation slices:
 - Production profile gates now reject unsafe startup configuration when
   `STARWEAVER_GATEWAY_ENV` is `prod` or `production`: missing PostgreSQL URL,
   missing Redis-compatible URL, in-memory HTTP runtime store, unsupported
-  runtime store profiles before PostgreSQL repository wiring is complete,
-  in-memory secret backend, disabled telemetry, missing HTTPS public base URL,
-  missing or unsafe CORS origins, insecure browser session cookie policy,
-  missing published-snapshot requirement, or an invalid body limit. `/readyz`
-  now reports profile validity and dependency readiness details.
+  runtime store profiles, in-memory secret backend, disabled telemetry, missing
+  HTTPS public base URL, missing or unsafe CORS origins, insecure browser
+  session cookie policy, missing published-snapshot requirement, or an invalid
+  body limit. The `postgres` runtime-store profile is now accepted when
+  `STARWEAVER_GATEWAY_DATABASE_URL` is configured, unknown profiles fail
+  closed, and `/readyz` reports profile validity and dependency readiness
+  details.
 - Fake-provider load and soak harnesses now run through `xtask` and Makefile
   targets. The default CI-sized harnesses exercise every foundation protocol
   replay case, including streaming behavior and provider-native denial, through
@@ -886,6 +923,8 @@ Work items:
   throttling, partial usage, missing usage, and malformed stream frames.
 - Implement provider request builder boundary using provider endpoint,
   credential resolver, model target, headers, timeouts, and protocol family.
+- Implement opt-in live HTTP provider execution for non-streaming JSON
+  requests while keeping deterministic fake-provider replay as the default.
 - Implement normalized error envelopes while preserving provider-compatible
   response shapes where promised.
 - Reject unsupported multipart/media routes until a bounded body policy exists.
@@ -897,6 +936,9 @@ Acceptance evidence:
 - Request lifecycle tests cover authn, authz, alias resolution, provider grant
   closure, route selection, budget preflight stub, upstream attempt, usage event
   stub, and audit evidence.
+- HTTP provider transport tests prove model rewrite, snapshot-backed credential
+  header resolution, upstream JSON wrapping, failed attempt evidence, and no
+  usage writes on provider rejection.
 - No provider stream is buffered unboundedly for retry, logging, or tracing.
 
 Feasibility review:
@@ -1130,6 +1172,9 @@ Work items:
 - Implement `OpenTelemetryExportConfig` admin APIs, validation, publication,
   snapshot loading, exporter health, failure count, dropped metric count, and
   disabled exporter behavior.
+- Read OTel exporter metric counts and payload inputs from durable-first route
+  evidence, usage event, and ledger-bucket adapters when PostgreSQL is
+  attached.
 - Emit OTLP metrics for provider latency, TTFT, throughput, provider errors,
   failover, runtime health, dashboard freshness, usage rollup lag, config
   publication lag, and exporter health.
@@ -1145,6 +1190,8 @@ Acceptance evidence:
   config is rejected.
 - Exporter outage tests prove model requests continue and exporter health
   reports failure and dropped metrics.
+- OTel exporter tests prove the state-backed worker path still exports and
+  records health while preserving the store-only replay helper for local tests.
 - Dashboard redaction tests prove no raw prompts, completions, credentials, or
   secret headers are returned.
 

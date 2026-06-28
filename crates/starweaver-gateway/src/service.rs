@@ -44,9 +44,9 @@ use crate::domain::{
     new_prefixed_id, ActorKind, ActorScope, ApiKeyRecord, AuditEventRecord, AuthSessionRecord,
     AuthenticatedActor, BudgetPolicyRecord, CodexOAuthConnectionRecord, CodexOAuthConnectionStatus,
     CodexOAuthRefreshStatusRecord, CodexOAuthSessionRecord, ConfigPublicationPointerRecord,
-    ConfigWorkerReloadRecord, DirectoryStatus, EmergencyOperationRecord, ExportJobRecord,
-    ExportManifestRecord, ExternalIdentityRecord, LedgerBucketRecord, LoginAttemptRecord,
-    LoginProviderRecord, MembershipStatus, ModelAliasRecord, ModelTargetRecord,
+    ConfigSnapshot, ConfigWorkerReloadRecord, DirectoryStatus, EmergencyOperationRecord,
+    ExportJobRecord, ExportManifestRecord, ExternalIdentityRecord, LedgerBucketRecord,
+    LoginAttemptRecord, LoginProviderRecord, MembershipStatus, ModelAliasRecord, ModelTargetRecord,
     NotificationDeliveryAttemptRecord, NotificationOutboxEventRecord, NotificationSinkRecord,
     NotificationSubscriptionRecord, OrganizationInvitationRecord, OrganizationMembershipRecord,
     OrganizationRecord, OtelExportConfigRecord, OtelExporterHealthRecord, OtelHeaderRef,
@@ -71,8 +71,9 @@ use crate::routing::{
 };
 use crate::runtime::{
     authorize_fake_provider_replay_target, build_provider_adapter_request,
-    fake_provider_response_for_authorization, FakeProviderReplayEvidence, FakeProviderReplayTarget,
-    ProviderAdapterCredential, ProviderAdapterRequestMetadata, ProviderAdapterTarget,
+    fake_provider_response_for_authorization, FakeProviderAuthorization,
+    FakeProviderReplayEvidence, FakeProviderReplayTarget, ProviderAdapterCredential,
+    ProviderAdapterRequest, ProviderAdapterRequestMetadata, ProviderAdapterTarget,
     RuntimeIngressResponse,
 };
 use crate::storage::{
@@ -393,6 +394,8 @@ const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
 const MIN_REQUEST_TIMEOUT_MS: u64 = 100;
 const MAX_REQUEST_TIMEOUT_MS: u64 = 300_000;
 const ROUTE_EVIDENCE_DURABLE_SCAN_LIMIT: i64 = 10_000;
+const USAGE_ANALYTICS_DURABLE_SCAN_LIMIT: i64 = 100_000;
+const CONFIG_SNAPSHOT_DURABLE_SCAN_LIMIT: i64 = 1_000;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Gateway service configuration.
@@ -426,6 +429,8 @@ pub struct GatewayConfig {
     pub max_body_bytes: usize,
     /// Maximum inbound request handling time in milliseconds.
     pub request_timeout_ms: u64,
+    /// Runtime provider transport mode.
+    pub provider_transport_mode: ProviderTransportMode,
     /// Dependency probe mode used by `/readyz`.
     pub dependency_probe_mode: DependencyProbeMode,
     /// Per-dependency readiness probe timeout in milliseconds.
@@ -473,6 +478,15 @@ pub enum BackgroundWorkerMode {
     Enabled,
     /// Do not run background workers in this process.
     Disabled,
+}
+
+/// Runtime provider execution mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderTransportMode {
+    /// Use deterministic fake provider responses.
+    Fake,
+    /// Execute an opt-in live HTTP provider request and wrap the JSON response.
+    Http,
 }
 
 /// External object storage writer configuration.
@@ -605,6 +619,7 @@ impl Default for GatewayConfig {
             session_cookie_same_site: "lax".to_owned(),
             max_body_bytes: 1024 * 1024,
             request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
+            provider_transport_mode: ProviderTransportMode::Fake,
             dependency_probe_mode: DependencyProbeMode::Configured,
             readiness_probe_timeout_ms: 750,
             require_published_snapshot: false,
@@ -682,6 +697,11 @@ impl GatewayConfig {
                 if (MIN_REQUEST_TIMEOUT_MS..=MAX_REQUEST_TIMEOUT_MS).contains(&parsed) {
                     config.request_timeout_ms = parsed;
                 }
+            }
+        }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_PROVIDER_TRANSPORT") {
+            if let Some(mode) = parse_provider_transport_mode(&value) {
+                config.provider_transport_mode = mode;
             }
         }
         if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_REQUIRE_SNAPSHOT") {
@@ -799,12 +819,21 @@ fn push_runtime_store_diagnostics(
     config: &GatewayConfig,
     diagnostics: &mut Vec<StartupDiagnostic>,
 ) {
-    if config.runtime_store_profile != "memory" {
-        diagnostics.push(StartupDiagnostic {
-            code: "runtime_store_profile_unsupported",
-            message:
-                "HTTP runtime store profile is not wired yet; only memory is currently supported",
-        });
+    match config.runtime_store_profile.as_str() {
+        "postgres" if config.database_url.is_none() => {
+            diagnostics.push(StartupDiagnostic {
+                code: "postgres_runtime_store_database_url_required",
+                message:
+                    "STARWEAVER_GATEWAY_RUNTIME_STORE=postgres requires STARWEAVER_GATEWAY_DATABASE_URL",
+            });
+        }
+        "memory" | "postgres" => {}
+        _ => {
+            diagnostics.push(StartupDiagnostic {
+                code: "runtime_store_profile_unsupported",
+                message: "HTTP runtime store profile must be memory or postgres",
+            });
+        }
     }
 }
 
@@ -953,6 +982,14 @@ fn parse_dependency_probe_mode(value: &str) -> Option<DependencyProbeMode> {
     match value.trim() {
         "configured" | "config" => Some(DependencyProbeMode::Configured),
         "live" => Some(DependencyProbeMode::Live),
+        _ => None,
+    }
+}
+
+fn parse_provider_transport_mode(value: &str) -> Option<ProviderTransportMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "fake" | "replay" | "synthetic" => Some(ProviderTransportMode::Fake),
+        "http" | "live_http" | "live" => Some(ProviderTransportMode::Http),
         _ => None,
     }
 }
@@ -1810,8 +1847,8 @@ pub async fn run_background_worker_tick_once(
             .notification_attempt_count
             .saturating_add(notification_attempts.len());
 
-        match run_due_otel_exporter_once_with_transport(
-            &state.store,
+        match run_due_otel_exporter_once_for_state_with_transport(
+            state,
             &tenant_id,
             worker_id,
             now,
@@ -2949,7 +2986,10 @@ async fn healthz() -> Json<HealthResponse> {
 }
 
 async fn readyz(State(state): State<AppState>) -> (StatusCode, Json<ReadinessResponse>) {
-    let latest_snapshot = state.store.latest_published_snapshot();
+    let latest_snapshot = latest_published_snapshot_for_readiness(&state)
+        .await
+        .ok()
+        .flatten();
     let diagnostics = production_profile_diagnostics(&state.config);
     let dependency_readiness = dependency_readiness(&state.config).await;
     let snapshot_ready = !state.config.require_published_snapshot || latest_snapshot.is_some();
@@ -3190,12 +3230,11 @@ async fn list_config_snapshots(
         "/admin/v1/config/snapshots",
         &actor.tenant_id,
         now,
-    )?;
-    let snapshots = state
-        .store
-        .config_snapshots()
+    )
+    .await?;
+    let snapshots = config_snapshots_for_actor(&state, &actor)
+        .await?
         .iter()
-        .filter(|snapshot| snapshot.metadata.tenant_id == actor.tenant_id)
         .map(config_snapshot_summary)
         .collect::<Vec<_>>();
     Ok(Json(json!({
@@ -3218,14 +3257,9 @@ async fn get_config_snapshot(
         ADMIN_CONFIG_SNAPSHOT_GET_PATH,
         &snapshot_id,
         now,
-    )?;
-    let snapshot = state
-        .store
-        .config_snapshot(&snapshot_id)
-        .filter(|snapshot| snapshot.metadata.tenant_id == actor.tenant_id)
-        .ok_or_else(|| GatewayError::NotFound {
-            resource: format!("config snapshot {snapshot_id}"),
-        })?;
+    )
+    .await?;
+    let snapshot = config_snapshot_for_actor(&state, &actor, &snapshot_id).await?;
     Ok(Json(json!({
         "schema": "gateway.admin.config_snapshot.v1",
         "snapshot": snapshot
@@ -3244,7 +3278,8 @@ async fn list_validation_diagnostics(
         ADMIN_CONFIG_VALIDATION_DIAGNOSTICS_PATH,
         &actor.tenant_id,
         now,
-    )?;
+    )
+    .await?;
     let diagnostics = state
         .store
         .validation_diagnostics_for_tenant(&actor.tenant_id)
@@ -3271,7 +3306,8 @@ async fn run_route_simulation(
         ADMIN_ROUTE_SIMULATION_LIST_PATH,
         &actor.tenant_id,
         now,
-    )?;
+    )
+    .await?;
     let alias_name = request.alias_name.trim();
     if alias_name.is_empty() {
         return Err(GatewayError::BadRequest {
@@ -3409,6 +3445,32 @@ async fn route_attempt_evidence_for_tenant(
     }
 }
 
+async fn usage_events_for_analytics(
+    state: &AppState,
+    tenant_id: &str,
+) -> Result<Vec<UsageEventRecord>> {
+    if let Some(store) = state.postgres_store.as_ref() {
+        store
+            .usage_events_for_tenant(tenant_id, USAGE_ANALYTICS_DURABLE_SCAN_LIMIT)
+            .await
+    } else {
+        Ok(state.store.usage_events_for_tenant(tenant_id))
+    }
+}
+
+async fn ledger_buckets_for_analytics(
+    state: &AppState,
+    tenant_id: &str,
+) -> Result<Vec<LedgerBucketRecord>> {
+    if let Some(store) = state.postgres_store.as_ref() {
+        store
+            .ledger_buckets_for_tenant(tenant_id, USAGE_ANALYTICS_DURABLE_SCAN_LIMIT)
+            .await
+    } else {
+        Ok(state.store.ledger_buckets_for_tenant(tenant_id))
+    }
+}
+
 async fn list_route_decisions(
     State(state): State<AppState>,
     Extension(actor): Extension<AuthenticatedActor>,
@@ -3422,7 +3484,8 @@ async fn list_route_decisions(
         ADMIN_ROUTE_DECISION_LIST_PATH,
         &actor.tenant_id,
         now,
-    )?;
+    )
+    .await?;
     let limit = route_evidence_list_limit(query.limit)?;
     let offset = route_evidence_list_offset(query.cursor.as_deref())?;
     let mut decisions = route_decision_evidence_for_tenant(&state, &actor.tenant_id)
@@ -3468,7 +3531,8 @@ async fn get_route_decision(
         ADMIN_ROUTE_DECISION_GET_PATH,
         &route_decision_id,
         now,
-    )?;
+    )
+    .await?;
     let decision = route_decision_evidence_for_tenant(&state, &actor.tenant_id)
         .await?
         .into_iter()
@@ -3502,7 +3566,8 @@ async fn list_route_attempts(
         ADMIN_ROUTE_ATTEMPT_LIST_PATH,
         &actor.tenant_id,
         now,
-    )?;
+    )
+    .await?;
     let limit = route_evidence_list_limit(query.limit)?;
     let offset = route_evidence_list_offset(query.cursor.as_deref())?;
     let decisions = route_decision_evidence_for_tenant(&state, &actor.tenant_id)
@@ -3569,7 +3634,8 @@ async fn get_route_attempt(
         ADMIN_ROUTE_ATTEMPT_GET_PATH,
         &route_attempt_event_id,
         now,
-    )?;
+    )
+    .await?;
     let attempts = route_attempt_evidence_for_tenant(&state, &actor.tenant_id).await?;
     let attempt = attempts
         .into_iter()
@@ -3603,7 +3669,8 @@ async fn list_audit_events(
         ADMIN_AUDIT_EVENT_LIST_PATH,
         &actor.tenant_id,
         now,
-    )?;
+    )
+    .await?;
     let limit = audit_event_list_limit(query.limit)?;
     let offset = audit_event_list_offset(query.cursor.as_deref())?;
     let mut events = state
@@ -3650,11 +3717,12 @@ async fn list_export_jobs(
         ADMIN_EXPORT_JOB_LIST_PATH,
         &actor.tenant_id,
         now,
-    )?;
+    )
+    .await?;
     let limit = export_list_limit(query.limit)?;
     let offset = export_list_offset(query.cursor.as_deref())?;
     let route = route_metadata(&Method::GET, ADMIN_EXPORT_JOB_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -3712,7 +3780,8 @@ async fn create_export_job(
         ADMIN_EXPORT_JOB_LIST_PATH,
         &scope.scope_id,
         now,
-    )?;
+    )
+    .await?;
     let request_hash = stable_request_hash(&request)?;
     let scope_key = idempotency_scope_key("exports:create", &request.idempotency_key);
     if let Some(response) =
@@ -3725,19 +3794,11 @@ async fn create_export_job(
     let limit = export_list_limit(request.limit)?;
     let offset = export_list_offset(request.cursor.as_deref())?;
     let retention_days = export_retention_days(request.retention_days)?;
-    let export_page = build_export_page(&state, &request.export_kind, &scope, limit, offset)?;
+    let export_page =
+        build_export_page(&state, &request.export_kind, &scope, limit, offset).await?;
     let query_document = export_query_document(&request, &scope, limit, storage_backend);
-    let job = state.store.create_export_job(
-        CreateExportJobRequest {
-            tenant_id: actor.tenant_id.clone(),
-            organization_id: scope.organization_id.clone(),
-            project_id: scope.project_id.clone(),
-            export_kind: request.export_kind.clone(),
-            requested_by: actor_principal_or_actor_id(&actor),
-            query_document,
-        },
-        now,
-    )?;
+    let job_request = create_export_job_request(&actor, &scope, &request, query_document);
+    let job = state.store.create_export_job(job_request, now)?;
     let expires_at = now + chrono::Duration::days(retention_days);
     let export_result = build_export_result(
         &state,
@@ -3795,6 +3856,22 @@ async fn create_export_job(
     Ok(Json(response))
 }
 
+fn create_export_job_request(
+    actor: &AuthenticatedActor,
+    scope: &DashboardScopeInput,
+    request: &AdminCreateExportJobRequest,
+    query_document: Value,
+) -> CreateExportJobRequest {
+    CreateExportJobRequest {
+        tenant_id: actor.tenant_id.clone(),
+        organization_id: scope.organization_id.clone(),
+        project_id: scope.project_id.clone(),
+        export_kind: request.export_kind.clone(),
+        requested_by: actor_principal_or_actor_id(actor),
+        query_document,
+    }
+}
+
 async fn get_export_job(
     State(state): State<AppState>,
     Extension(actor): Extension<AuthenticatedActor>,
@@ -3808,7 +3885,8 @@ async fn get_export_job(
         ADMIN_EXPORT_JOB_GET_PATH,
         &export_job_id,
         now,
-    )?;
+    )
+    .await?;
     let job = export_job_for_actor(&state, &actor, &export_job_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.export_job.v1",
@@ -3829,7 +3907,8 @@ async fn get_export_job_manifest(
         ADMIN_EXPORT_JOB_MANIFEST_PATH,
         &export_job_id,
         now,
-    )?;
+    )
+    .await?;
     let job = export_job_for_actor(&state, &actor, &export_job_id)?;
     let manifest = export_manifest_for_job(&state, &job, now)?;
     Ok(Json(json!({
@@ -3851,11 +3930,12 @@ async fn list_emergency_operations(
         ADMIN_EMERGENCY_OPERATION_LIST_PATH,
         &actor.tenant_id,
         now,
-    )?;
+    )
+    .await?;
     let limit = export_list_limit(query.limit)?;
     let offset = export_list_offset(query.cursor.as_deref())?;
     let route = route_metadata(&Method::GET, ADMIN_EMERGENCY_OPERATION_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -3904,7 +3984,8 @@ async fn get_emergency_operation(
         ADMIN_EMERGENCY_OPERATION_GET_PATH,
         &emergency_operation_id,
         now,
-    )?;
+    )
+    .await?;
     let operation = emergency_operation_for_actor(&state, &actor, &emergency_operation_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.emergency_operation.v1",
@@ -3927,7 +4008,8 @@ async fn emergency_disable_upstream_credential(
         ADMIN_EMERGENCY_DISABLE_UPSTREAM_CREDENTIAL_PATH,
         &upstream_credential_id,
         now,
-    )?;
+    )
+    .await?;
     let scope_key = emergency_idempotency_scope_key(
         "disable_upstream_credential",
         &upstream_credential_id,
@@ -4006,7 +4088,8 @@ async fn emergency_disable_provider_endpoint(
         ADMIN_EMERGENCY_DISABLE_PROVIDER_ENDPOINT_PATH,
         &provider_endpoint_id,
         now,
-    )?;
+    )
+    .await?;
     let scope_key = emergency_idempotency_scope_key(
         "disable_provider_endpoint",
         &provider_endpoint_id,
@@ -4087,7 +4170,8 @@ async fn emergency_drain_routing_group(
         ADMIN_EMERGENCY_DRAIN_ROUTING_GROUP_PATH,
         &routing_group_id,
         now,
-    )?;
+    )
+    .await?;
     let scope_key = emergency_idempotency_scope_key(
         "drain_routing_group",
         &routing_group_id,
@@ -4165,7 +4249,8 @@ async fn emergency_freeze_config(
         ADMIN_EMERGENCY_FREEZE_CONFIG_PATH,
         &actor.tenant_id,
         now,
-    )?;
+    )
+    .await?;
     let scope_key = emergency_idempotency_scope_key(
         "freeze_config",
         &actor.tenant_id,
@@ -4239,7 +4324,8 @@ async fn emergency_rollback_config_snapshot(
         ADMIN_EMERGENCY_ROLLBACK_CONFIG_SNAPSHOT_PATH,
         &source_snapshot_id,
         now,
-    )?;
+    )
+    .await?;
     let scope_key = emergency_idempotency_scope_key(
         "rollback_config_snapshot",
         &source_snapshot_id,
@@ -4331,7 +4417,8 @@ async fn emergency_force_budget_block(
         ADMIN_EMERGENCY_FORCE_BUDGET_BLOCK_PATH,
         &budget_policy_id,
         now,
-    )?;
+    )
+    .await?;
     let scope_key = emergency_idempotency_scope_key(
         "force_budget_block",
         &budget_policy_id,
@@ -4414,7 +4501,8 @@ async fn validate_config_snapshot(
         "/admin/v1/config/snapshots:validate",
         &actor.tenant_id,
         now,
-    )?;
+    )
+    .await?;
     let errors = match validate_config_snapshot_payload(&request.payload) {
         Ok(()) => Vec::new(),
         Err(error) => vec![json!({
@@ -4450,7 +4538,8 @@ async fn publish_config_snapshot(
         "/admin/v1/config/snapshots:publish",
         &actor.tenant_id,
         now,
-    )?;
+    )
+    .await?;
     let request_hash = stable_request_hash(&request)?;
     let scope_key = idempotency_scope_key("config_snapshots:publish", &request.idempotency_key);
     if let Some(response) =
@@ -4522,7 +4611,8 @@ async fn rollback_config_snapshot(
         "/admin/v1/config/snapshots:rollback",
         &request.source_snapshot_id,
         now,
-    )?;
+    )
+    .await?;
     let request_hash = stable_request_hash(&request)?;
     let scope_key = idempotency_scope_key("config_snapshots:rollback", &request.idempotency_key);
     if let Some(response) =
@@ -4588,7 +4678,8 @@ async fn get_realtime_overview(
         "/admin/v1/realtime/overview",
         &actor.tenant_id,
         now,
-    )?;
+    )
+    .await?;
     let latest_config = state
         .store
         .latest_published_snapshot_for_tenant(&actor.tenant_id);
@@ -4669,8 +4760,11 @@ async fn get_usage_summary(
         ADMIN_USAGE_SUMMARY_PATH,
         &scope.scope_id,
         now,
-    )?;
-    let rollup = dashboard_usage_rollup(&state, &scope);
+    )
+    .await?;
+    let ledger_buckets = ledger_buckets_for_analytics(&state, &scope.tenant_id).await?;
+    let usage_events = usage_events_for_analytics(&state, &scope.tenant_id).await?;
+    let rollup = dashboard_usage_rollup_from_records(&ledger_buckets, &usage_events, &scope);
     Ok(Json(json!({
         "schema": "gateway.admin.usage_summary.v1",
         "scope": dashboard_scope_body(&scope),
@@ -4703,12 +4797,13 @@ async fn get_usage_timeseries(
         ADMIN_USAGE_TIMESERIES_PATH,
         &scope.scope_id,
         now,
-    )?;
+    )
+    .await?;
     Ok(Json(json!({
         "schema": "gateway.admin.usage_timeseries.v1",
         "scope": dashboard_scope_body(&scope),
         "bucket_kind": bucket_kind,
-        "points": usage_timeseries_points(&state, &scope, bucket_kind),
+        "points": usage_timeseries_points(&state, &scope, bucket_kind).await?,
         "sources": {
             "usage_ledger_rollups": "durable_ledger_buckets",
             "metrics_backend_queried": false
@@ -4735,12 +4830,12 @@ async fn list_usage_events(
         ADMIN_USAGE_EVENTS_PATH,
         &scope.scope_id,
         now,
-    )?;
+    )
+    .await?;
     let limit = usage_list_limit(query.limit)?;
     let offset = usage_list_offset(query.cursor.as_deref())?;
-    let events = state
-        .store
-        .usage_events_for_tenant(&actor.tenant_id)
+    let events = usage_events_for_analytics(&state, &actor.tenant_id)
+        .await?
         .into_iter()
         .filter(|event| dashboard_usage_event_matches_scope(event, &scope))
         .filter(|event| usage_event_matches_query(event, &query))
@@ -4777,6 +4872,7 @@ async fn get_usage_breakdown_by_project(
         ADMIN_USAGE_BREAKDOWN_BY_PROJECT_PATH,
         UsageBreakdownDimension::Project,
     )
+    .await
 }
 
 async fn get_usage_breakdown_by_project_member(
@@ -4791,6 +4887,7 @@ async fn get_usage_breakdown_by_project_member(
         ADMIN_USAGE_BREAKDOWN_BY_PROJECT_MEMBER_PATH,
         UsageBreakdownDimension::ProjectMember,
     )
+    .await
 }
 
 async fn get_usage_breakdown_by_model(
@@ -4805,6 +4902,7 @@ async fn get_usage_breakdown_by_model(
         ADMIN_USAGE_BREAKDOWN_BY_MODEL_PATH,
         UsageBreakdownDimension::Model,
     )
+    .await
 }
 
 async fn get_usage_breakdown_by_provider_endpoint(
@@ -4819,6 +4917,7 @@ async fn get_usage_breakdown_by_provider_endpoint(
         ADMIN_USAGE_BREAKDOWN_BY_PROVIDER_ENDPOINT_PATH,
         UsageBreakdownDimension::ProviderEndpoint,
     )
+    .await
 }
 
 async fn get_tenant_dashboard_overview(
@@ -4833,22 +4932,26 @@ async fn get_tenant_dashboard_overview(
         "/admin/v1/dashboards/tenant/overview",
         &actor.tenant_id,
         now,
-    )?;
+    )
+    .await?;
     let tenant_id = actor.tenant_id;
-    Ok(Json(dashboard_overview_response(
-        &state,
-        &DashboardScopeInput {
-            schema: "gateway.admin.dashboard.tenant_overview.v1",
-            tenant_id: tenant_id.clone(),
-            scope_kind: "tenant",
-            scope_id: tenant_id,
-            organization_id: None,
-            project_id: None,
-            project_member_id: None,
-            principal_id: None,
-        },
-        now,
-    )))
+    Ok(Json(
+        dashboard_overview_response(
+            &state,
+            &DashboardScopeInput {
+                schema: "gateway.admin.dashboard.tenant_overview.v1",
+                tenant_id: tenant_id.clone(),
+                scope_kind: "tenant",
+                scope_id: tenant_id,
+                organization_id: None,
+                project_id: None,
+                project_member_id: None,
+                principal_id: None,
+            },
+            now,
+        )
+        .await?,
+    ))
 }
 
 async fn get_organization_dashboard_overview(
@@ -4864,23 +4967,27 @@ async fn get_organization_dashboard_overview(
         ADMIN_DASHBOARD_ORGANIZATION_PATH,
         &organization_id,
         now,
-    )?;
+    )
+    .await?;
     let organization = organization_for_actor(&state, &actor, &organization_id)?;
     let tenant_id = actor.tenant_id;
-    Ok(Json(dashboard_overview_response(
-        &state,
-        &DashboardScopeInput {
-            schema: "gateway.admin.dashboard.organization_overview.v1",
-            tenant_id,
-            scope_kind: "organization",
-            scope_id: organization.organization_id.clone(),
-            organization_id: Some(organization.organization_id),
-            project_id: None,
-            project_member_id: None,
-            principal_id: None,
-        },
-        now,
-    )))
+    Ok(Json(
+        dashboard_overview_response(
+            &state,
+            &DashboardScopeInput {
+                schema: "gateway.admin.dashboard.organization_overview.v1",
+                tenant_id,
+                scope_kind: "organization",
+                scope_id: organization.organization_id.clone(),
+                organization_id: Some(organization.organization_id),
+                project_id: None,
+                project_member_id: None,
+                principal_id: None,
+            },
+            now,
+        )
+        .await?,
+    ))
 }
 
 async fn get_project_dashboard_overview(
@@ -4896,23 +5003,27 @@ async fn get_project_dashboard_overview(
         ADMIN_DASHBOARD_PROJECT_PATH,
         &project_id,
         now,
-    )?;
+    )
+    .await?;
     let project = project_for_actor(&state, &actor, &project_id)?;
     let tenant_id = actor.tenant_id;
-    Ok(Json(dashboard_overview_response(
-        &state,
-        &DashboardScopeInput {
-            schema: "gateway.admin.dashboard.project_overview.v1",
-            tenant_id,
-            scope_kind: "project",
-            scope_id: project.project_id.clone(),
-            organization_id: Some(project.organization_id),
-            project_id: Some(project.project_id),
-            project_member_id: None,
-            principal_id: None,
-        },
-        now,
-    )))
+    Ok(Json(
+        dashboard_overview_response(
+            &state,
+            &DashboardScopeInput {
+                schema: "gateway.admin.dashboard.project_overview.v1",
+                tenant_id,
+                scope_kind: "project",
+                scope_id: project.project_id.clone(),
+                organization_id: Some(project.organization_id),
+                project_id: Some(project.project_id),
+                project_member_id: None,
+                principal_id: None,
+            },
+            now,
+        )
+        .await?,
+    ))
 }
 
 async fn get_project_member_dashboard_overview(
@@ -4928,23 +5039,27 @@ async fn get_project_member_dashboard_overview(
         ADMIN_DASHBOARD_PROJECT_MEMBER_PATH,
         &project_member_id,
         now,
-    )?;
+    )
+    .await?;
     let member = project_member_by_id_for_actor(&state, &actor, &project_member_id)?;
     let tenant_id = actor.tenant_id;
-    Ok(Json(dashboard_overview_response(
-        &state,
-        &DashboardScopeInput {
-            schema: "gateway.admin.dashboard.project_member_overview.v1",
-            tenant_id,
-            scope_kind: "project_member",
-            scope_id: member.project_member_id.clone(),
-            organization_id: Some(member.organization_id),
-            project_id: Some(member.project_id),
-            project_member_id: Some(member.project_member_id),
-            principal_id: Some(member.principal_id),
-        },
-        now,
-    )))
+    Ok(Json(
+        dashboard_overview_response(
+            &state,
+            &DashboardScopeInput {
+                schema: "gateway.admin.dashboard.project_member_overview.v1",
+                tenant_id,
+                scope_kind: "project_member",
+                scope_id: member.project_member_id.clone(),
+                organization_id: Some(member.organization_id),
+                project_id: Some(member.project_id),
+                project_member_id: Some(member.project_member_id),
+                principal_id: Some(member.principal_id),
+            },
+            now,
+        )
+        .await?,
+    ))
 }
 
 async fn get_api_key_dashboard_overview(
@@ -4960,23 +5075,27 @@ async fn get_api_key_dashboard_overview(
         ADMIN_DASHBOARD_API_KEY_PATH,
         &api_key_id,
         now,
-    )?;
+    )
+    .await?;
     let api_key = api_key_for_actor(&state, &actor, &api_key_id)?;
     let tenant_id = actor.tenant_id;
-    Ok(Json(dashboard_overview_response(
-        &state,
-        &DashboardScopeInput {
-            schema: "gateway.admin.dashboard.api_key_overview.v1",
-            tenant_id,
-            scope_kind: "api_key",
-            scope_id: api_key.api_key_id,
-            organization_id: api_key.organization_id,
-            project_id: api_key.project_id,
-            project_member_id: None,
-            principal_id: Some(api_key.owner_principal_id),
-        },
-        now,
-    )))
+    Ok(Json(
+        dashboard_overview_response(
+            &state,
+            &DashboardScopeInput {
+                schema: "gateway.admin.dashboard.api_key_overview.v1",
+                tenant_id,
+                scope_kind: "api_key",
+                scope_id: api_key.api_key_id,
+                organization_id: api_key.organization_id,
+                project_id: api_key.project_id,
+                project_member_id: None,
+                principal_id: Some(api_key.owner_principal_id),
+            },
+            now,
+        )
+        .await?,
+    ))
 }
 
 async fn get_service_account_dashboard_overview(
@@ -4992,23 +5111,27 @@ async fn get_service_account_dashboard_overview(
         ADMIN_DASHBOARD_SERVICE_ACCOUNT_PATH,
         &service_account_id,
         now,
-    )?;
+    )
+    .await?;
     let account = service_account_for_actor(&state, &actor, &service_account_id)?;
     let tenant_id = actor.tenant_id;
-    Ok(Json(dashboard_overview_response(
-        &state,
-        &DashboardScopeInput {
-            schema: "gateway.admin.dashboard.service_account_overview.v1",
-            tenant_id,
-            scope_kind: "service_account",
-            scope_id: account.service_account_id,
-            organization_id: account.organization_id,
-            project_id: account.project_id,
-            project_member_id: None,
-            principal_id: None,
-        },
-        now,
-    )))
+    Ok(Json(
+        dashboard_overview_response(
+            &state,
+            &DashboardScopeInput {
+                schema: "gateway.admin.dashboard.service_account_overview.v1",
+                tenant_id,
+                scope_kind: "service_account",
+                scope_id: account.service_account_id,
+                organization_id: account.organization_id,
+                project_id: account.project_id,
+                project_member_id: None,
+                principal_id: None,
+            },
+            now,
+        )
+        .await?,
+    ))
 }
 
 async fn get_model_alias_dashboard_overview(
@@ -5024,23 +5147,27 @@ async fn get_model_alias_dashboard_overview(
         ADMIN_MODEL_ALIAS_DASHBOARD_PATH,
         &model_alias_id,
         now,
-    )?;
+    )
+    .await?;
     let alias = model_alias_for_actor(&state, &actor, &model_alias_id)?;
     let tenant_id = actor.tenant_id;
-    Ok(Json(dashboard_overview_response(
-        &state,
-        &DashboardScopeInput {
-            schema: "gateway.admin.dashboard.model_alias_overview.v1",
-            tenant_id,
-            scope_kind: "model_alias",
-            scope_id: alias.model_alias_id,
-            organization_id: alias.organization_id,
-            project_id: alias.project_id,
-            project_member_id: None,
-            principal_id: None,
-        },
-        now,
-    )))
+    Ok(Json(
+        dashboard_overview_response(
+            &state,
+            &DashboardScopeInput {
+                schema: "gateway.admin.dashboard.model_alias_overview.v1",
+                tenant_id,
+                scope_kind: "model_alias",
+                scope_id: alias.model_alias_id,
+                organization_id: alias.organization_id,
+                project_id: alias.project_id,
+                project_member_id: None,
+                principal_id: None,
+            },
+            now,
+        )
+        .await?,
+    ))
 }
 
 async fn get_model_target_dashboard_overview(
@@ -5056,23 +5183,27 @@ async fn get_model_target_dashboard_overview(
         ADMIN_MODEL_TARGET_DASHBOARD_PATH,
         &model_target_id,
         now,
-    )?;
+    )
+    .await?;
     let target = model_target_for_actor(&state, &actor, &model_target_id)?;
     let tenant_id = actor.tenant_id;
-    Ok(Json(dashboard_overview_response(
-        &state,
-        &DashboardScopeInput {
-            schema: "gateway.admin.dashboard.model_target_overview.v1",
-            tenant_id,
-            scope_kind: "model_target",
-            scope_id: target.model_target_id,
-            organization_id: target.organization_id,
-            project_id: None,
-            project_member_id: None,
-            principal_id: None,
-        },
-        now,
-    )))
+    Ok(Json(
+        dashboard_overview_response(
+            &state,
+            &DashboardScopeInput {
+                schema: "gateway.admin.dashboard.model_target_overview.v1",
+                tenant_id,
+                scope_kind: "model_target",
+                scope_id: target.model_target_id,
+                organization_id: target.organization_id,
+                project_id: None,
+                project_member_id: None,
+                principal_id: None,
+            },
+            now,
+        )
+        .await?,
+    ))
 }
 
 async fn get_provider_endpoint_observability_usage(
@@ -5088,23 +5219,27 @@ async fn get_provider_endpoint_observability_usage(
         ADMIN_PROVIDER_ENDPOINT_OBSERVABILITY_USAGE_PATH,
         &provider_endpoint_id,
         now,
-    )?;
+    )
+    .await?;
     let endpoint = provider_endpoint_for_actor(&state, &actor, &provider_endpoint_id)?;
     let tenant_id = actor.tenant_id;
-    Ok(Json(dashboard_overview_response(
-        &state,
-        &DashboardScopeInput {
-            schema: "gateway.admin.observability.provider_endpoint_usage.v1",
-            tenant_id,
-            scope_kind: "provider_endpoint",
-            scope_id: endpoint.provider_endpoint_id,
-            organization_id: endpoint.organization_id,
-            project_id: None,
-            project_member_id: None,
-            principal_id: None,
-        },
-        now,
-    )))
+    Ok(Json(
+        dashboard_overview_response(
+            &state,
+            &DashboardScopeInput {
+                schema: "gateway.admin.observability.provider_endpoint_usage.v1",
+                tenant_id,
+                scope_kind: "provider_endpoint",
+                scope_id: endpoint.provider_endpoint_id,
+                organization_id: endpoint.organization_id,
+                project_id: None,
+                project_member_id: None,
+                principal_id: None,
+            },
+            now,
+        )
+        .await?,
+    ))
 }
 
 async fn list_projects(
@@ -5112,9 +5247,9 @@ async fn list_projects(
     Extension(actor): Extension<AuthenticatedActor>,
 ) -> Result<Json<Value>> {
     let now = chrono::Utc::now();
-    authorize_admin_route(&state, &actor, &Method::GET, "/admin/v1/projects", "*", now)?;
+    authorize_admin_route(&state, &actor, &Method::GET, "/admin/v1/projects", "*", now).await?;
     let route = route_metadata(&Method::GET, ADMIN_PROJECT_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -5154,7 +5289,8 @@ async fn get_project(
         ADMIN_PROJECT_GET_PATH,
         &project_id,
         now,
-    )?;
+    )
+    .await?;
     let project = project_for_actor(&state, &actor, &project_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.project.v1",
@@ -5176,7 +5312,8 @@ async fn update_project(
         ADMIN_PROJECT_GET_PATH,
         &project_id,
         now,
-    )?;
+    )
+    .await?;
     let before = project_for_actor(&state, &actor, &project_id)?;
     let updated = state.store.update_project_status(
         &project_id,
@@ -5220,9 +5357,10 @@ async fn list_organizations(
         "/admin/v1/organizations",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let route = route_metadata(&Method::GET, ADMIN_ORGANIZATION_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -5262,7 +5400,8 @@ async fn get_organization(
         ADMIN_ORGANIZATION_GET_PATH,
         &organization_id,
         now,
-    )?;
+    )
+    .await?;
     let organization = organization_for_actor(&state, &actor, &organization_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.organization.v1",
@@ -5284,7 +5423,8 @@ async fn update_organization(
         ADMIN_ORGANIZATION_GET_PATH,
         &organization_id,
         now,
-    )?;
+    )
+    .await?;
     let before = organization_for_actor(&state, &actor, &organization_id)?;
     let updated = state.store.update_organization_status(
         &organization_id,
@@ -5325,9 +5465,9 @@ async fn list_users(
     Extension(actor): Extension<AuthenticatedActor>,
 ) -> Result<Json<Value>> {
     let now = chrono::Utc::now();
-    authorize_admin_route(&state, &actor, &Method::GET, "/admin/v1/users", "*", now)?;
+    authorize_admin_route(&state, &actor, &Method::GET, "/admin/v1/users", "*", now).await?;
     let route = route_metadata(&Method::GET, ADMIN_USER_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -5367,7 +5507,8 @@ async fn get_user(
         ADMIN_USER_GET_PATH,
         &user_id,
         now,
-    )?;
+    )
+    .await?;
     let user = user_for_actor(&state, &actor, &user_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.user.v1",
@@ -5390,7 +5531,8 @@ async fn update_user(
         ADMIN_USER_GET_PATH,
         &user_id,
         now,
-    )?;
+    )
+    .await?;
     let before = user_for_actor(&state, &actor, &user_id)?;
     let updated =
         state
@@ -5447,9 +5589,10 @@ async fn list_user_sessions(
         ADMIN_USER_SESSION_LIST_PATH,
         "*",
         now,
-    )?;
+    )
+    .await?;
     let route = route_metadata(&Method::GET, ADMIN_USER_SESSION_LIST_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -5491,7 +5634,8 @@ async fn revoke_user_session(
         ADMIN_USER_SESSION_REVOKE_PATH,
         &auth_session_id,
         now,
-    )?;
+    )
+    .await?;
     let before = auth_session_for_actor(&state, &actor, &user.user_id, &auth_session_id)?;
     let revoked = state.store.revoke_session_for_principal(
         &actor.tenant_id,
@@ -5542,9 +5686,10 @@ async fn list_user_external_identities(
         ADMIN_USER_EXTERNAL_IDENTITY_LIST_PATH,
         "*",
         now,
-    )?;
+    )
+    .await?;
     let route = route_metadata(&Method::GET, ADMIN_USER_EXTERNAL_IDENTITY_LIST_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -5585,7 +5730,8 @@ async fn get_user_external_identity(
         ADMIN_USER_EXTERNAL_IDENTITY_GET_PATH,
         &external_identity_id,
         now,
-    )?;
+    )
+    .await?;
     let identity =
         external_identity_for_actor(&state, &actor, &user.user_id, &external_identity_id)?;
     Ok(Json(json!({
@@ -5609,7 +5755,8 @@ async fn unlink_user_external_identity(
         ADMIN_USER_EXTERNAL_IDENTITY_UNLINK_PATH,
         &external_identity_id,
         now,
-    )?;
+    )
+    .await?;
     let before = external_identity_for_actor(&state, &actor, &user.user_id, &external_identity_id)?;
     let unlinked = state.store.unlink_external_identity(
         &actor.tenant_id,
@@ -5661,9 +5808,10 @@ async fn list_organization_members(
         ADMIN_ORGANIZATION_MEMBER_LIST_PATH,
         "*",
         now,
-    )?;
+    )
+    .await?;
     let route = route_metadata(&Method::GET, ADMIN_ORGANIZATION_MEMBER_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -5703,7 +5851,8 @@ async fn get_organization_member(
         ADMIN_ORGANIZATION_MEMBER_GET_PATH,
         &organization_member_id,
         now,
-    )?;
+    )
+    .await?;
     let member =
         organization_member_for_actor(&state, &actor, &organization_id, &organization_member_id)?;
     Ok(Json(json!({
@@ -5726,7 +5875,8 @@ async fn update_organization_member(
         ADMIN_ORGANIZATION_MEMBER_GET_PATH,
         &organization_member_id,
         now,
-    )?;
+    )
+    .await?;
     let before =
         organization_member_for_actor(&state, &actor, &organization_id, &organization_member_id)?;
     let updated = state.store.update_organization_member_status(
@@ -5781,9 +5931,10 @@ async fn list_project_members(
         ADMIN_PROJECT_MEMBER_LIST_PATH,
         "*",
         now,
-    )?;
+    )
+    .await?;
     let route = route_metadata(&Method::GET, ADMIN_PROJECT_MEMBER_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -5843,7 +5994,8 @@ async fn create_project_member(
         ADMIN_PROJECT_MEMBER_LIST_PATH,
         "*",
         now,
-    )?;
+    )
+    .await?;
     let scope_key = idempotency_scope_key(
         "project_members:create",
         &format!("{}:{}", project.project_id, request.idempotency_key),
@@ -5915,7 +6067,8 @@ async fn get_project_member(
         ADMIN_PROJECT_MEMBER_GET_PATH,
         &project_member_id,
         now,
-    )?;
+    )
+    .await?;
     let member = project_member_for_actor(&state, &actor, &project_id, &project_member_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.project_member.v1",
@@ -5937,7 +6090,8 @@ async fn update_project_member(
         ADMIN_PROJECT_MEMBER_GET_PATH,
         &project_member_id,
         now,
-    )?;
+    )
+    .await?;
     let before = project_member_for_actor(&state, &actor, &project_id, &project_member_id)?;
     let updated = state.store.update_project_member_status(
         &project_member_id,
@@ -5984,9 +6138,10 @@ async fn list_service_accounts(
         "/admin/v1/service-accounts",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let route = route_metadata(&Method::GET, ADMIN_SERVICE_ACCOUNT_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -6026,7 +6181,8 @@ async fn create_service_account(
         "/admin/v1/service-accounts",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let scope_key = idempotency_scope_key("service_accounts:create", &request.idempotency_key);
     let request_hash = stable_request_hash(&request)?;
     if let Some(response) =
@@ -6096,7 +6252,8 @@ async fn get_service_account(
         ADMIN_SERVICE_ACCOUNT_GET_PATH,
         &service_account_id,
         now,
-    )?;
+    )
+    .await?;
     let account = service_account_for_actor(&state, &actor, &service_account_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.service_account.v1",
@@ -6118,7 +6275,8 @@ async fn update_service_account(
         ADMIN_SERVICE_ACCOUNT_GET_PATH,
         &service_account_id,
         now,
-    )?;
+    )
+    .await?;
     let before = service_account_for_actor(&state, &actor, &service_account_id)?;
     let updated = state.store.update_service_account_status(
         &service_account_id,
@@ -6166,9 +6324,10 @@ async fn list_provider_endpoints(
         "/admin/v1/provider-endpoints",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let route = route_metadata(&Method::GET, ADMIN_PROVIDER_ENDPOINT_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -6208,7 +6367,8 @@ async fn validate_provider_endpoint(
         "/admin/v1/provider-endpoints:validate",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let errors = provider_endpoint_validation_errors(&state, &actor, &request);
     Ok(validation_response(
         &state,
@@ -6238,7 +6398,8 @@ async fn create_provider_endpoint(
         "/admin/v1/provider-endpoints",
         "*",
         now,
-    )?;
+    )
+    .await?;
     reject_validation_errors(&provider_endpoint_validation_errors(
         &state, &actor, &request,
     ))?;
@@ -6312,7 +6473,8 @@ async fn get_provider_endpoint(
         ADMIN_PROVIDER_ENDPOINT_GET_PATH,
         &provider_endpoint_id,
         now,
-    )?;
+    )
+    .await?;
     let endpoint = provider_endpoint_for_actor(&state, &actor, &provider_endpoint_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.provider_endpoint.v1",
@@ -6334,7 +6496,8 @@ async fn update_provider_endpoint(
         ADMIN_PROVIDER_ENDPOINT_GET_PATH,
         &provider_endpoint_id,
         now,
-    )?;
+    )
+    .await?;
     let before = provider_endpoint_for_actor(&state, &actor, &provider_endpoint_id)?;
     let updated = state.store.update_provider_endpoint_status(
         &provider_endpoint_id,
@@ -6382,9 +6545,10 @@ async fn list_upstream_credentials(
         "/admin/v1/upstream-credentials",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let route = route_metadata(&Method::GET, ADMIN_UPSTREAM_CREDENTIAL_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -6424,7 +6588,8 @@ async fn validate_upstream_credential(
         "/admin/v1/upstream-credentials:validate",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let errors = upstream_credential_validation_errors(&state, &actor, &request);
     Ok(validation_response(
         &state,
@@ -6454,7 +6619,8 @@ async fn create_upstream_credential(
         "/admin/v1/upstream-credentials",
         "*",
         now,
-    )?;
+    )
+    .await?;
     reject_validation_errors(&upstream_credential_validation_errors(
         &state, &actor, &request,
     ))?;
@@ -6527,7 +6693,8 @@ async fn get_upstream_credential(
         ADMIN_UPSTREAM_CREDENTIAL_GET_PATH,
         &upstream_credential_id,
         now,
-    )?;
+    )
+    .await?;
     let credential = upstream_credential_for_actor(&state, &actor, &upstream_credential_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.upstream_credential.v1",
@@ -6549,7 +6716,8 @@ async fn update_upstream_credential(
         ADMIN_UPSTREAM_CREDENTIAL_GET_PATH,
         &upstream_credential_id,
         now,
-    )?;
+    )
+    .await?;
     let before = upstream_credential_for_actor(&state, &actor, &upstream_credential_id)?;
     let updated = state.store.update_upstream_credential_status(
         &upstream_credential_id,
@@ -6597,9 +6765,10 @@ async fn list_secret_refs(
         "/admin/v1/secret-refs",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let route = route_metadata(&Method::GET, ADMIN_SECRET_REF_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -6640,7 +6809,8 @@ async fn create_secret_ref(
         "/admin/v1/secret-refs",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let request_hash = stable_request_hash(&request)?;
     let scope_key = idempotency_scope_key("secret_refs:create", &request.idempotency_key);
     if let Some(response) =
@@ -6714,7 +6884,8 @@ async fn get_secret_ref(
         ADMIN_SECRET_REF_GET_PATH,
         &secret_ref_id,
         now,
-    )?;
+    )
+    .await?;
     let secret_ref = secret_ref_for_actor(&state, &actor, &secret_ref_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.secret_ref.v1",
@@ -6735,7 +6906,8 @@ async fn get_secret_ref_locator(
         ADMIN_SECRET_REF_LOCATOR_PATH,
         &secret_ref_id,
         now,
-    )?;
+    )
+    .await?;
     let secret_ref = secret_ref_for_actor(&state, &actor, &secret_ref_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.secret_ref_locator.v1",
@@ -6755,9 +6927,10 @@ async fn list_codex_oauth_connections(
         "/admin/v1/codex/oauth/connections",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let route = route_metadata(&Method::GET, ADMIN_CODEX_OAUTH_CONNECTION_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -6798,7 +6971,8 @@ async fn create_codex_oauth_connection(
         "/admin/v1/codex/oauth/connections",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let request_hash = stable_request_hash(&request)?;
     let scope_key =
         idempotency_scope_key("codex_oauth_connections:create", &request.idempotency_key);
@@ -6864,7 +7038,8 @@ async fn get_codex_oauth_connection(
         ADMIN_CODEX_OAUTH_CONNECTION_GET_PATH,
         &codex_oauth_connection_id,
         now,
-    )?;
+    )
+    .await?;
     let connection = codex_oauth_connection_for_actor(&state, &actor, &codex_oauth_connection_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.codex_oauth_connection.v1",
@@ -6887,7 +7062,8 @@ async fn update_codex_oauth_connection(
         ADMIN_CODEX_OAUTH_CONNECTION_GET_PATH,
         &codex_oauth_connection_id,
         now,
-    )?;
+    )
+    .await?;
     let before = codex_oauth_connection_for_actor(&state, &actor, &codex_oauth_connection_id)?;
     let updated = state.store.update_codex_oauth_connection_status(
         &codex_oauth_connection_id,
@@ -6937,7 +7113,8 @@ async fn list_codex_oauth_sessions(
         ADMIN_CODEX_OAUTH_SESSION_LIST_PATH,
         &codex_oauth_connection_id,
         now,
-    )?;
+    )
+    .await?;
     codex_oauth_connection_for_actor(&state, &actor, &codex_oauth_connection_id)?;
     let resources = state
         .store
@@ -6967,7 +7144,8 @@ async fn start_codex_oauth_session(
         ADMIN_CODEX_OAUTH_SESSION_LIST_PATH,
         &codex_oauth_connection_id,
         now,
-    )?;
+    )
+    .await?;
     codex_oauth_connection_for_actor(&state, &actor, &codex_oauth_connection_id)?;
     let request_hash = stable_request_hash(&request)?;
     let scope_key = idempotency_scope_key(
@@ -7036,7 +7214,8 @@ async fn get_codex_oauth_session(
         ADMIN_CODEX_OAUTH_SESSION_GET_PATH,
         &codex_oauth_session_id,
         now,
-    )?;
+    )
+    .await?;
     let session = codex_oauth_session_for_actor(&state, &actor, &codex_oauth_session_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.codex_oauth_session.v1",
@@ -7058,7 +7237,8 @@ async fn revoke_codex_oauth_session(
         ADMIN_CODEX_OAUTH_SESSION_REVOKE_PATH,
         &codex_oauth_session_id,
         now,
-    )?;
+    )
+    .await?;
     let before = codex_oauth_session_for_actor(&state, &actor, &codex_oauth_session_id)?;
     let revoked = state
         .store
@@ -7105,7 +7285,8 @@ async fn get_codex_oauth_refresh_status(
         ADMIN_CODEX_OAUTH_REFRESH_STATUS_GET_PATH,
         &codex_oauth_connection_id,
         now,
-    )?;
+    )
+    .await?;
     codex_oauth_connection_for_actor(&state, &actor, &codex_oauth_connection_id)?;
     let refresh = state
         .store
@@ -7131,9 +7312,10 @@ async fn list_model_targets(
         "/admin/v1/model-targets",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let route = route_metadata(&Method::GET, ADMIN_MODEL_TARGET_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -7173,7 +7355,8 @@ async fn validate_model_target(
         "/admin/v1/model-targets:validate",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let errors = model_target_validation_errors(&state, &actor, &request);
     Ok(validation_response(
         &state,
@@ -7203,7 +7386,8 @@ async fn create_model_target(
         "/admin/v1/model-targets",
         "*",
         now,
-    )?;
+    )
+    .await?;
     reject_validation_errors(&model_target_validation_errors(&state, &actor, &request))?;
     let request_hash = stable_request_hash(&request)?;
     let scope_key = idempotency_scope_key("model_targets:create", &request.idempotency_key);
@@ -7277,7 +7461,8 @@ async fn get_model_target(
         ADMIN_MODEL_TARGET_GET_PATH,
         &model_target_id,
         now,
-    )?;
+    )
+    .await?;
     let target = model_target_for_actor(&state, &actor, &model_target_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.model_target.v1",
@@ -7299,7 +7484,8 @@ async fn update_model_target(
         ADMIN_MODEL_TARGET_GET_PATH,
         &model_target_id,
         now,
-    )?;
+    )
+    .await?;
     let before = model_target_for_actor(&state, &actor, &model_target_id)?;
     let updated = state.store.update_model_target_status(
         &model_target_id,
@@ -7347,9 +7533,10 @@ async fn list_model_aliases(
         "/admin/v1/model-aliases",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let route = route_metadata(&Method::GET, ADMIN_MODEL_ALIAS_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -7389,7 +7576,8 @@ async fn validate_model_alias(
         "/admin/v1/model-aliases:validate",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let errors = model_alias_validation_errors(&state, &actor, &request);
     Ok(validation_response(
         &state,
@@ -7419,7 +7607,8 @@ async fn create_model_alias(
         "/admin/v1/model-aliases",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let request_hash = stable_request_hash(&request)?;
     let scope_key = idempotency_scope_key("model_aliases:create", &request.idempotency_key);
     if let Some(response) =
@@ -7493,7 +7682,8 @@ async fn get_model_alias(
         ADMIN_MODEL_ALIAS_GET_PATH,
         &model_alias_id,
         now,
-    )?;
+    )
+    .await?;
     let alias = model_alias_for_actor(&state, &actor, &model_alias_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.model_alias.v1",
@@ -7515,7 +7705,8 @@ async fn update_model_alias(
         ADMIN_MODEL_ALIAS_GET_PATH,
         &model_alias_id,
         now,
-    )?;
+    )
+    .await?;
     let before = model_alias_for_actor(&state, &actor, &model_alias_id)?;
     reject_validation_errors(&model_alias_update_validation_errors(
         &state,
@@ -7576,9 +7767,10 @@ async fn list_pricing_skus(
         "/admin/v1/pricing-skus",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let route = route_metadata(&Method::GET, ADMIN_PRICING_SKU_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -7618,7 +7810,8 @@ async fn validate_pricing_sku(
         "/admin/v1/pricing-skus:validate",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let errors = pricing_sku_validation_errors(&state, &actor, &request, now);
     Ok(validation_response(
         &state,
@@ -7648,7 +7841,8 @@ async fn create_pricing_sku(
         "/admin/v1/pricing-skus",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let request_hash = stable_request_hash(&request)?;
     let scope_key = idempotency_scope_key("pricing_skus:create", &request.idempotency_key);
     if let Some(response) =
@@ -7734,7 +7928,8 @@ async fn get_pricing_sku(
         ADMIN_PRICING_SKU_GET_PATH,
         &pricing_sku_id,
         now,
-    )?;
+    )
+    .await?;
     let sku = pricing_sku_for_actor(&state, &actor, &pricing_sku_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.pricing_sku.v1",
@@ -7756,7 +7951,8 @@ async fn update_pricing_sku(
         ADMIN_PRICING_SKU_GET_PATH,
         &pricing_sku_id,
         now,
-    )?;
+    )
+    .await?;
     let before = pricing_sku_for_actor(&state, &actor, &pricing_sku_id)?;
     let updated = state.store.update_pricing_sku_status(
         &pricing_sku_id,
@@ -7804,9 +8000,10 @@ async fn list_budget_policies(
         "/admin/v1/budget-policies",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let route = route_metadata(&Method::GET, ADMIN_BUDGET_POLICY_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -7846,7 +8043,8 @@ async fn validate_budget_policy(
         "/admin/v1/budget-policies:validate",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let errors = budget_policy_validation_errors(&state, &actor, &request);
     Ok(validation_response(
         &state,
@@ -7876,7 +8074,8 @@ async fn create_budget_policy(
         "/admin/v1/budget-policies",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let request_hash = stable_request_hash(&request)?;
     let scope_key = idempotency_scope_key("budget_policies:create", &request.idempotency_key);
     if let Some(response) =
@@ -7962,7 +8161,8 @@ async fn get_budget_policy(
         ADMIN_BUDGET_POLICY_GET_PATH,
         &budget_policy_id,
         now,
-    )?;
+    )
+    .await?;
     let policy = budget_policy_for_actor(&state, &actor, &budget_policy_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.budget_policy.v1",
@@ -7984,7 +8184,8 @@ async fn update_budget_policy(
         ADMIN_BUDGET_POLICY_GET_PATH,
         &budget_policy_id,
         now,
-    )?;
+    )
+    .await?;
     let before = budget_policy_for_actor(&state, &actor, &budget_policy_id)?;
     let updated = state.store.update_budget_policy_status(
         &budget_policy_id,
@@ -8032,9 +8233,10 @@ async fn list_quota_policies(
         "/admin/v1/quota-policies",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let route = route_metadata(&Method::GET, ADMIN_QUOTA_POLICY_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -8074,7 +8276,8 @@ async fn validate_quota_policy(
         "/admin/v1/quota-policies:validate",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let errors = quota_policy_validation_errors(&state, &actor, &request);
     Ok(validation_response(
         &state,
@@ -8104,7 +8307,8 @@ async fn create_quota_policy(
         "/admin/v1/quota-policies",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let request_hash = stable_request_hash(&request)?;
     let scope_key = idempotency_scope_key("quota_policies:create", &request.idempotency_key);
     if let Some(response) =
@@ -8184,7 +8388,8 @@ async fn get_quota_policy(
         ADMIN_QUOTA_POLICY_GET_PATH,
         &quota_policy_id,
         now,
-    )?;
+    )
+    .await?;
     let policy = quota_policy_for_actor(&state, &actor, &quota_policy_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.quota_policy.v1",
@@ -8206,7 +8411,8 @@ async fn update_quota_policy(
         ADMIN_QUOTA_POLICY_GET_PATH,
         &quota_policy_id,
         now,
-    )?;
+    )
+    .await?;
     let before = quota_policy_for_actor(&state, &actor, &quota_policy_id)?;
     let updated = state.store.update_quota_policy_status(
         &quota_policy_id,
@@ -8254,9 +8460,10 @@ async fn list_otel_export_configs(
         "/admin/v1/observability/otel-export/configs",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let route = route_metadata(&Method::GET, ADMIN_OTEL_EXPORT_CONFIG_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -8297,7 +8504,8 @@ async fn validate_otel_export_config(
         ADMIN_OTEL_EXPORT_CONFIG_VALIDATE_PATH,
         &otel_export_config_id,
         now,
-    )?;
+    )
+    .await?;
     let errors = otel_export_config_validation_errors(
         &state,
         &actor,
@@ -8332,7 +8540,8 @@ async fn create_otel_export_config(
         "/admin/v1/observability/otel-export/configs",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let request_hash = stable_request_hash(&request)?;
     let scope_key = idempotency_scope_key("otel_export_configs:create", &request.idempotency_key);
     if let Some(response) =
@@ -8406,7 +8615,8 @@ async fn get_otel_export_config(
         ADMIN_OTEL_EXPORT_CONFIG_GET_PATH,
         &otel_export_config_id,
         now,
-    )?;
+    )
+    .await?;
     let config = otel_export_config_for_actor(&state, &actor, &otel_export_config_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.otel_export_config.v1",
@@ -8428,7 +8638,8 @@ async fn update_otel_export_config(
         ADMIN_OTEL_EXPORT_CONFIG_GET_PATH,
         &otel_export_config_id,
         now,
-    )?;
+    )
+    .await?;
     let before = otel_export_config_for_actor(&state, &actor, &otel_export_config_id)?;
     let merged_request = merged_otel_export_config_request(&before, &request);
     reject_validation_errors(&otel_export_config_validation_errors(
@@ -8495,7 +8706,8 @@ async fn disable_otel_export_config(
         ADMIN_OTEL_EXPORT_CONFIG_DISABLE_PATH,
         &otel_export_config_id,
         now,
-    )?;
+    )
+    .await?;
     let before = otel_export_config_for_actor(&state, &actor, &otel_export_config_id)?;
     let updated = state.store.update_otel_export_config(
         &otel_export_config_id,
@@ -8550,8 +8762,9 @@ pub async fn run_otel_exporter_once(
     worker_id: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<OtelExporterRunSummary> {
-    run_otel_exporter_once_with_transport(
-        store,
+    let state = AppState::new(GatewayConfig::default(), store.clone());
+    run_otel_exporter_once_for_state(
+        &state,
         tenant_id,
         worker_id,
         now,
@@ -8568,8 +8781,19 @@ pub async fn run_otel_exporter_once_with_transport(
     now: chrono::DateTime<chrono::Utc>,
     transport: OtelExporterTransport,
 ) -> Result<OtelExporterRunSummary> {
+    let state = AppState::new(GatewayConfig::default(), store.clone());
+    run_otel_exporter_once_for_state(&state, tenant_id, worker_id, now, transport).await
+}
+
+async fn run_otel_exporter_once_for_state(
+    state: &AppState,
+    tenant_id: &str,
+    worker_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    transport: OtelExporterTransport,
+) -> Result<OtelExporterRunSummary> {
     run_otel_exporter_once_filtered(
-        store,
+        state,
         tenant_id,
         worker_id,
         now,
@@ -8587,8 +8811,22 @@ pub async fn run_due_otel_exporter_once_with_transport(
     now: chrono::DateTime<chrono::Utc>,
     transport: OtelExporterTransport,
 ) -> Result<OtelExporterRunSummary> {
+    let state = AppState::new(GatewayConfig::default(), store.clone());
+    run_due_otel_exporter_once_for_state_with_transport(
+        &state, tenant_id, worker_id, now, transport,
+    )
+    .await
+}
+
+async fn run_due_otel_exporter_once_for_state_with_transport(
+    state: &AppState,
+    tenant_id: &str,
+    worker_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    transport: OtelExporterTransport,
+) -> Result<OtelExporterRunSummary> {
     run_otel_exporter_once_filtered(
-        store,
+        state,
         tenant_id,
         worker_id,
         now,
@@ -8605,13 +8843,14 @@ enum OtelExporterTickMode {
 }
 
 async fn run_otel_exporter_once_filtered(
-    store: &InMemoryGatewayStore,
+    state: &AppState,
     tenant_id: &str,
     worker_id: &str,
     now: chrono::DateTime<chrono::Utc>,
     transport: OtelExporterTransport,
     tick_mode: OtelExporterTickMode,
 ) -> Result<OtelExporterRunSummary> {
+    let store = state.store();
     let configs = store.otel_export_configs_for_tenant(tenant_id);
     let http_client = match transport {
         OtelExporterTransport::Http => Some(reqwest::Client::new()),
@@ -8635,10 +8874,10 @@ async fn run_otel_exporter_once_filtered(
             continue;
         }
         summary.attempted_config_count += 1;
-        let metric_count = otel_export_metric_count(store, &config);
+        let metric_count = otel_export_metric_count(state, &config).await?;
         let export_result = if config.status == ResourceStatus::Active {
             execute_otel_export(
-                store,
+                state,
                 &config,
                 metric_count,
                 now,
@@ -8746,7 +8985,7 @@ impl OtelExportAttemptResult {
 }
 
 async fn execute_otel_export(
-    store: &InMemoryGatewayStore,
+    state: &AppState,
     config: &OtelExportConfigRecord,
     metric_count: i64,
     now: chrono::DateTime<chrono::Utc>,
@@ -8762,9 +9001,22 @@ async fn execute_otel_export(
             let Some(client) = http_client else {
                 return OtelExportAttemptResult::failed(metric_count, "otel_http_client_missing");
             };
-            let Some((body, headers)) = otel_export_http_request_parts(store, config, now) else {
-                return OtelExportAttemptResult::failed(metric_count, "otel_header_secret_missing");
+            let request_parts = match otel_export_http_request_parts(state, config, now).await {
+                Ok(Some(parts)) => parts,
+                Ok(None) => {
+                    return OtelExportAttemptResult::failed(
+                        metric_count,
+                        "otel_header_secret_missing",
+                    );
+                }
+                Err(_) => {
+                    return OtelExportAttemptResult::failed(
+                        metric_count,
+                        "otel_payload_read_failed",
+                    );
+                }
             };
+            let (body, headers) = request_parts;
             let Ok(body) = serde_json::to_vec(&body) else {
                 return OtelExportAttemptResult::failed(metric_count, "otel_payload_encode_failed");
             };
@@ -8802,22 +9054,34 @@ fn synthetic_otel_export_result(
     }
 }
 
-fn otel_export_http_request_parts(
-    store: &InMemoryGatewayStore,
+async fn otel_export_http_request_parts(
+    state: &AppState,
     config: &OtelExportConfigRecord,
     now: chrono::DateTime<chrono::Utc>,
-) -> Option<(
-    Value,
-    Vec<(reqwest::header::HeaderName, reqwest::header::HeaderValue)>,
-)> {
+) -> Result<
+    Option<(
+        Value,
+        Vec<(reqwest::header::HeaderName, reqwest::header::HeaderValue)>,
+    )>,
+> {
+    let store = state.store();
     let mut headers = Vec::new();
     for header_ref in &config.header_refs {
-        let secret = store.secret_value(&header_ref.secret_ref_id)?;
-        let name = reqwest::header::HeaderName::from_bytes(header_ref.name.as_bytes()).ok()?;
-        let value = reqwest::header::HeaderValue::from_str(secret.expose_secret()).ok()?;
+        let Some(secret) = store.secret_value(&header_ref.secret_ref_id) else {
+            return Ok(None);
+        };
+        let Some(name) = reqwest::header::HeaderName::from_bytes(header_ref.name.as_bytes()).ok()
+        else {
+            return Ok(None);
+        };
+        let Some(value) = reqwest::header::HeaderValue::from_str(secret.expose_secret()).ok()
+        else {
+            return Ok(None);
+        };
         headers.push((name, value));
     }
-    Some((otel_export_payload(store, config, now), headers))
+    let payload = otel_export_payload(state, config, now).await?;
+    Ok(Some((payload, headers)))
 }
 
 fn otel_export_timeout_seconds(config: &OtelExportConfigRecord) -> u64 {
@@ -8827,14 +9091,14 @@ fn otel_export_timeout_seconds(config: &OtelExportConfigRecord) -> u64 {
         .unwrap_or(10)
 }
 
-fn otel_export_payload(
-    store: &InMemoryGatewayStore,
+async fn otel_export_payload(
+    state: &AppState,
     config: &OtelExportConfigRecord,
     now: chrono::DateTime<chrono::Utc>,
-) -> Value {
-    let counts = otel_export_counts(store, config);
+) -> Result<Value> {
+    let counts = otel_export_counts(state, config).await?;
     let time_unix_nano = otel_time_unix_nano(now);
-    json!({
+    Ok(json!({
         "resourceMetrics": [{
             "resource": {
                 "attributes": otel_resource_attributes(config)
@@ -8852,7 +9116,7 @@ fn otel_export_payload(
                 ]
             }]
         }]
-    })
+    }))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -8863,12 +9127,12 @@ struct OtelExportCounts {
     metrics: i64,
 }
 
-fn otel_export_counts(
-    store: &InMemoryGatewayStore,
+async fn otel_export_counts(
+    state: &AppState,
     config: &OtelExportConfigRecord,
-) -> OtelExportCounts {
-    let ledger_buckets = store
-        .ledger_buckets_for_tenant(&config.tenant_id)
+) -> Result<OtelExportCounts> {
+    let ledger_buckets = ledger_buckets_for_analytics(state, &config.tenant_id)
+        .await?
         .into_iter()
         .filter(|bucket| {
             otel_config_scope_matches(
@@ -8878,8 +9142,8 @@ fn otel_export_counts(
             )
         })
         .fold(0_i64, |count, _| count.saturating_add(1));
-    let usage_events = store
-        .usage_events_for_tenant(&config.tenant_id)
+    let usage_events = usage_events_for_analytics(state, &config.tenant_id)
+        .await?
         .into_iter()
         .filter(|event| {
             otel_config_scope_matches(
@@ -8889,28 +9153,27 @@ fn otel_export_counts(
             )
         })
         .fold(0_i64, |count, _| count.saturating_add(1));
-    let route_decisions = store
-        .route_decisions()
+    let route_decisions = route_decision_evidence_for_tenant(state, &config.tenant_id)
+        .await?
         .into_iter()
         .filter(|decision| {
-            decision.tenant_id == config.tenant_id
-                && otel_config_scope_matches(
-                    config,
-                    decision.organization_id.as_deref(),
-                    decision.project_id.as_deref(),
-                )
+            otel_config_scope_matches(
+                config,
+                decision.organization_id.as_deref(),
+                decision.project_id.as_deref(),
+            )
         })
         .fold(0_i64, |count, _| count.saturating_add(1));
     let metrics = 6_i64
         .saturating_add(ledger_buckets.saturating_mul(6))
         .saturating_add(usage_events.saturating_mul(4))
         .saturating_add(route_decisions.saturating_mul(3));
-    OtelExportCounts {
+    Ok(OtelExportCounts {
         ledger_buckets,
         usage_events,
         route_decisions,
         metrics,
-    }
+    })
 }
 
 fn otel_resource_attributes(config: &OtelExportConfigRecord) -> Vec<Value> {
@@ -8954,8 +9217,11 @@ const fn otel_time_unix_nano(now: chrono::DateTime<chrono::Utc>) -> i64 {
     now.timestamp_micros().saturating_mul(1_000)
 }
 
-fn otel_export_metric_count(store: &InMemoryGatewayStore, config: &OtelExportConfigRecord) -> i64 {
-    otel_export_counts(store, config).metrics
+async fn otel_export_metric_count(
+    state: &AppState,
+    config: &OtelExportConfigRecord,
+) -> Result<i64> {
+    Ok(otel_export_counts(state, config).await?.metrics)
 }
 
 fn otel_config_scope_matches(
@@ -8992,9 +9258,10 @@ async fn list_notification_sinks(
         "/admin/v1/notification/sinks",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let route = route_metadata(&Method::GET, ADMIN_NOTIFICATION_SINK_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -9034,7 +9301,8 @@ async fn validate_notification_sink(
         "/admin/v1/notification/sinks:validate",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let errors = notification_sink_validation_errors(&state, &actor, &request);
     Ok(validation_response(
         &state,
@@ -9064,7 +9332,8 @@ async fn create_notification_sink(
         "/admin/v1/notification/sinks",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let request_hash = stable_request_hash(&request)?;
     let scope_key = idempotency_scope_key("notification_sinks:create", &request.idempotency_key);
     if let Some(response) =
@@ -9135,7 +9404,8 @@ async fn get_notification_sink(
         ADMIN_NOTIFICATION_SINK_GET_PATH,
         &notification_sink_id,
         now,
-    )?;
+    )
+    .await?;
     let sink = notification_sink_for_actor(&state, &actor, &notification_sink_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.notification_sink.v1",
@@ -9160,7 +9430,8 @@ async fn update_notification_sink(
         ADMIN_NOTIFICATION_SINK_GET_PATH,
         &notification_sink_id,
         now,
-    )?;
+    )
+    .await?;
     let before = notification_sink_for_actor(&state, &actor, &notification_sink_id)?;
     let merged_request = merged_notification_sink_request(&before, &request);
     reject_validation_errors(&notification_sink_validation_errors_with_excluded_id(
@@ -9219,7 +9490,8 @@ async fn list_notification_subscriptions(
         ADMIN_NOTIFICATION_SUBSCRIPTION_LIST_PATH,
         &notification_sink_id,
         now,
-    )?;
+    )
+    .await?;
     let sink = notification_sink_for_actor(&state, &actor, &notification_sink_id)?;
     let resources = state
         .store
@@ -9250,7 +9522,8 @@ async fn validate_notification_subscription(
         ADMIN_NOTIFICATION_SUBSCRIPTION_VALIDATE_PATH,
         &notification_sink_id,
         now,
-    )?;
+    )
+    .await?;
     let errors = notification_subscription_validation_errors(
         &state,
         &actor,
@@ -9286,7 +9559,8 @@ async fn create_notification_subscription(
         ADMIN_NOTIFICATION_SUBSCRIPTION_LIST_PATH,
         &notification_sink_id,
         now,
-    )?;
+    )
+    .await?;
     let request_hash = stable_request_hash(&request)?;
     let scope_key = idempotency_scope_key(
         &format!("notification_subscriptions:create:{notification_sink_id}"),
@@ -9360,7 +9634,8 @@ async fn get_notification_subscription(
         ADMIN_NOTIFICATION_SUBSCRIPTION_GET_PATH,
         &notification_sink_id,
         now,
-    )?;
+    )
+    .await?;
     let subscription = notification_subscription_for_actor(
         &state,
         &actor,
@@ -9388,7 +9663,8 @@ async fn update_notification_subscription(
         ADMIN_NOTIFICATION_SUBSCRIPTION_GET_PATH,
         &notification_sink_id,
         now,
-    )?;
+    )
+    .await?;
     let before = notification_subscription_for_actor(
         &state,
         &actor,
@@ -9446,7 +9722,8 @@ async fn replay_notification_outbox_event(
         ADMIN_NOTIFICATION_OUTBOX_REPLAY_PATH,
         &notification_outbox_event_id,
         now,
-    )?;
+    )
+    .await?;
     let before =
         notification_outbox_event_for_actor(&state, &actor, &notification_outbox_event_id)?;
     let request_hash = stable_request_hash(&request)?;
@@ -9508,7 +9785,8 @@ async fn list_login_providers(
         "/admin/v1/identity-providers",
         &actor.tenant_id,
         now,
-    )?;
+    )
+    .await?;
     let resources = state
         .store
         .login_providers_for_tenant(&actor.tenant_id)
@@ -9535,7 +9813,8 @@ async fn validate_login_provider(
         "/admin/v1/identity-providers:validate",
         &actor.tenant_id,
         now,
-    )?;
+    )
+    .await?;
     let errors = login_provider_validation_errors(&state, &actor, &request);
     Ok(validation_response(
         &state,
@@ -9565,7 +9844,8 @@ async fn create_login_provider(
         "/admin/v1/identity-providers",
         &actor.tenant_id,
         now,
-    )?;
+    )
+    .await?;
     let request_hash = stable_request_hash(&request)?;
     let scope_key = idempotency_scope_key("identity_providers:create", &request.idempotency_key);
     if let Some(response) =
@@ -9631,7 +9911,8 @@ async fn get_login_provider(
         ADMIN_LOGIN_PROVIDER_GET_PATH,
         &login_provider_id,
         now,
-    )?;
+    )
+    .await?;
     let provider = login_provider_for_actor(&state, &actor, &login_provider_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.identity_provider.v1",
@@ -9654,7 +9935,8 @@ async fn update_login_provider(
         ADMIN_LOGIN_PROVIDER_GET_PATH,
         &login_provider_id,
         now,
-    )?;
+    )
+    .await?;
     let before = login_provider_for_actor(&state, &actor, &login_provider_id)?;
     let updated = state.store.update_login_provider_status(
         &login_provider_id,
@@ -9703,7 +9985,8 @@ async fn list_organization_invitations(
         ADMIN_ORGANIZATION_INVITATION_LIST_PATH,
         &organization_id,
         now,
-    )?;
+    )
+    .await?;
     let organization = organization_for_actor(&state, &actor, &organization_id)?;
     let resources = state
         .store
@@ -9733,7 +10016,8 @@ async fn create_organization_invitation(
         ADMIN_ORGANIZATION_INVITATION_LIST_PATH,
         &organization_id,
         now,
-    )?;
+    )
+    .await?;
     let organization = active_organization_for_actor(&state, &actor, &organization_id)?;
     let request_hash = stable_request_hash(&request)?;
     let scope_key = idempotency_scope_key(
@@ -9826,7 +10110,8 @@ async fn get_organization_invitation(
         ADMIN_ORGANIZATION_INVITATION_GET_PATH,
         &invitation_id,
         now,
-    )?;
+    )
+    .await?;
     organization_for_actor(&state, &actor, &organization_id)?;
     let invitation =
         organization_invitation_for_actor(&state, &actor, &organization_id, &invitation_id)?;
@@ -9850,7 +10135,8 @@ async fn revoke_organization_invitation(
         ADMIN_ORGANIZATION_INVITATION_REVOKE_PATH,
         &invitation_id,
         now,
-    )?;
+    )
+    .await?;
     organization_for_actor(&state, &actor, &organization_id)?;
     let before =
         organization_invitation_for_actor(&state, &actor, &organization_id, &invitation_id)?;
@@ -10005,7 +10291,7 @@ async fn complete_auth_login_provider_callback(
     let expires_at = session.record.expires_at;
     let csrf_body = auth_session_csrf_body(&session.record);
     let session_body = auth_session_response_body(&state, &session.record);
-    state.store.insert_auth_session(session.record);
+    persist_auth_session(&state, session.record).await?;
     record_external_login_audit(&state, &provider, &user, &identity, created_user, now);
     Ok(Json(json!({
         "schema": "gateway.auth.external_login_callback.v1",
@@ -10058,7 +10344,7 @@ async fn accept_auth_invitation(
     Path(token): Path<String>,
 ) -> Result<Json<Value>> {
     let now = chrono::Utc::now();
-    let session = verify_mutating_auth_session_from_headers(&state, &headers, now)?;
+    let session = verify_mutating_auth_session_from_headers(&state, &headers, now).await?;
     let invitation = invitation_by_raw_token(&state, &token)?;
     verify_session_matches_invitation(&state, &session, &invitation)?;
     let accepted = state.store.accept_organization_invitation(
@@ -10066,12 +10352,14 @@ async fn accept_auth_invitation(
         &session.principal_id,
         now,
     )?;
-    let updated_session = state.store.update_session_active_context_by_hash(
+    let updated_session = update_auth_session_active_context_by_hash(
+        &state,
         &session.session_hash,
         Some(accepted.organization_id.clone()),
         accepted.project_id.clone(),
         now,
-    )?;
+    )
+    .await?;
     let actor = AuthenticatedActor::for_user_session(
         ActorScope::new(
             accepted.tenant_id.clone(),
@@ -10143,7 +10431,7 @@ async fn single_user_login(
     let raw_token = session.raw_token.expose_secret().to_owned();
     let expires_at = session.record.expires_at;
     let csrf_body = auth_session_csrf_body(&session.record);
-    state.store.insert_auth_session(session.record);
+    persist_auth_session(&state, session.record).await?;
     Ok(Json(json!({
         "schema": "gateway.auth.single_user_login.v1",
         "session": {
@@ -10177,7 +10465,7 @@ async fn get_current_auth_session(
     headers: HeaderMap,
 ) -> Result<Json<Value>> {
     let now = chrono::Utc::now();
-    let session = verify_auth_session_from_headers(&state, &headers, now)?;
+    let session = verify_auth_session_from_headers(&state, &headers, now).await?;
     Ok(Json(auth_session_response_body(&state, &session)))
 }
 
@@ -10187,7 +10475,7 @@ async fn update_session_default_organization(
     Json(request): Json<SessionDefaultOrganizationRequest>,
 ) -> Result<Json<Value>> {
     let now = chrono::Utc::now();
-    let session = verify_mutating_auth_session_from_headers(&state, &headers, now)?;
+    let session = verify_mutating_auth_session_from_headers(&state, &headers, now).await?;
     let organization_id = normalized_auth_context_id(&request.organization_id, "organization_id")?;
     let organization = active_organization_for_session(&state, &session, &organization_id)?;
     let project = select_session_project_for_organization(
@@ -10205,12 +10493,14 @@ async fn update_session_default_organization(
         active_project_id.clone(),
         now,
     )?;
-    let updated = state.store.update_session_active_context_by_hash(
+    let updated = update_auth_session_active_context_by_hash(
+        &state,
         &session.session_hash,
         Some(organization.organization_id),
         active_project_id,
         now,
-    )?;
+    )
+    .await?;
     Ok(Json(auth_session_response_body(&state, &updated)))
 }
 
@@ -10220,7 +10510,7 @@ async fn update_session_active_organization(
     Json(request): Json<SessionActiveOrganizationRequest>,
 ) -> Result<Json<Value>> {
     let now = chrono::Utc::now();
-    let session = verify_mutating_auth_session_from_headers(&state, &headers, now)?;
+    let session = verify_mutating_auth_session_from_headers(&state, &headers, now).await?;
     let organization_id = normalized_auth_context_id(&request.organization_id, "organization_id")?;
     let organization = active_organization_for_session(&state, &session, &organization_id)?;
     let project = select_session_project_for_organization(
@@ -10229,12 +10519,14 @@ async fn update_session_active_organization(
         &organization_id,
         request.project_id.as_deref(),
     )?;
-    let updated = state.store.update_session_active_context_by_hash(
+    let updated = update_auth_session_active_context_by_hash(
+        &state,
         &session.session_hash,
         Some(organization.organization_id),
         project.map(|membership| membership.project_id),
         now,
-    )?;
+    )
+    .await?;
     Ok(Json(auth_session_response_body(&state, &updated)))
 }
 
@@ -10244,15 +10536,17 @@ async fn update_session_active_project(
     Json(request): Json<SessionActiveProjectRequest>,
 ) -> Result<Json<Value>> {
     let now = chrono::Utc::now();
-    let session = verify_mutating_auth_session_from_headers(&state, &headers, now)?;
+    let session = verify_mutating_auth_session_from_headers(&state, &headers, now).await?;
     let project_id = normalized_auth_context_id(&request.project_id, "project_id")?;
     let project = active_project_for_session(&state, &session, &project_id, None)?;
-    let updated = state.store.update_session_active_context_by_hash(
+    let updated = update_auth_session_active_context_by_hash(
+        &state,
         &session.session_hash,
         Some(project.organization_id),
         Some(project.project_id),
         now,
-    )?;
+    )
+    .await?;
     Ok(Json(auth_session_response_body(&state, &updated)))
 }
 
@@ -10261,17 +10555,70 @@ async fn logout_current_auth_session(
     headers: HeaderMap,
 ) -> Result<Json<Value>> {
     let now = chrono::Utc::now();
-    let session = verify_mutating_auth_session_from_headers(&state, &headers, now)?;
-    let revoked = state
-        .store
-        .revoke_session_by_hash(&session.session_hash, now)?;
+    let session = verify_mutating_auth_session_from_headers(&state, &headers, now).await?;
+    let revoked = revoke_auth_session_by_hash(&state, &session.session_hash, now).await?;
     Ok(Json(json!({
         "schema": "gateway.auth.logout.v1",
         "session": safe_auth_session_body(&revoked)
     })))
 }
 
-fn verify_auth_session_from_headers(
+async fn persist_auth_session(state: &AppState, record: AuthSessionRecord) -> Result<()> {
+    if let Some(store) = state.postgres_store.as_ref() {
+        store.insert_auth_session(&record).await?;
+    }
+    state.store.insert_auth_session(record);
+    Ok(())
+}
+
+async fn update_auth_session_active_context_by_hash(
+    state: &AppState,
+    session_hash: &str,
+    active_organization_id: Option<String>,
+    active_project_id: Option<String>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<AuthSessionRecord> {
+    if let Some(store) = state.postgres_store.as_ref() {
+        let updated = store
+            .update_auth_session_active_context_by_hash(
+                session_hash,
+                active_organization_id.clone(),
+                active_project_id.clone(),
+                now,
+            )
+            .await?;
+        let _ = state.store.update_session_active_context_by_hash(
+            session_hash,
+            active_organization_id,
+            active_project_id,
+            now,
+        );
+        Ok(updated)
+    } else {
+        state.store.update_session_active_context_by_hash(
+            session_hash,
+            active_organization_id,
+            active_project_id,
+            now,
+        )
+    }
+}
+
+async fn revoke_auth_session_by_hash(
+    state: &AppState,
+    session_hash: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<AuthSessionRecord> {
+    if let Some(store) = state.postgres_store.as_ref() {
+        let revoked = store.revoke_auth_session_by_hash(session_hash, now).await?;
+        let _ = state.store.revoke_session_by_hash(session_hash, now);
+        Ok(revoked)
+    } else {
+        state.store.revoke_session_by_hash(session_hash, now)
+    }
+}
+
+async fn verify_auth_session_from_headers(
     state: &AppState,
     headers: &HeaderMap,
     now: chrono::DateTime<chrono::Utc>,
@@ -10279,6 +10626,17 @@ fn verify_auth_session_from_headers(
     let presented_token = bearer_token(headers)?;
     if !presented_token.starts_with(SESSION_TOKEN_PREFIX) {
         return Err(GatewayError::Authentication);
+    }
+    if let Some(store) = state.postgres_store.as_ref() {
+        let session = verify_session_token_with_postgres(store, presented_token, now).await?;
+        let user = store
+            .user_by_id(&session.principal_id)
+            .await?
+            .ok_or(GatewayError::Authentication)?;
+        if user.status != DirectoryStatus::Active {
+            return Err(GatewayError::Authentication);
+        }
+        return Ok(session);
     }
     let session = verify_session_token(state.store(), presented_token, now)?;
     let user = state
@@ -10291,12 +10649,12 @@ fn verify_auth_session_from_headers(
     Ok(session)
 }
 
-fn verify_mutating_auth_session_from_headers(
+async fn verify_mutating_auth_session_from_headers(
     state: &AppState,
     headers: &HeaderMap,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<AuthSessionRecord> {
-    let session = verify_auth_session_from_headers(state, headers, now)?;
+    let session = verify_auth_session_from_headers(state, headers, now).await?;
     verify_auth_session_csrf(headers, &session)?;
     Ok(session)
 }
@@ -10574,9 +10932,10 @@ async fn list_route_policies(
         "/admin/v1/route-policies",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let route = route_metadata(&Method::GET, ADMIN_ROUTE_POLICY_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -10616,7 +10975,8 @@ async fn validate_route_policy(
         "/admin/v1/route-policies:validate",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let errors = route_policy_validation_errors(&state, &actor, &request);
     Ok(validation_response(
         &state,
@@ -10646,7 +11006,8 @@ async fn create_route_policy(
         "/admin/v1/route-policies",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let request_hash = stable_request_hash(&request)?;
     let scope_key = idempotency_scope_key("route_policies:create", &request.idempotency_key);
     if let Some(response) =
@@ -10718,7 +11079,8 @@ async fn get_route_policy(
         ADMIN_ROUTE_POLICY_GET_PATH,
         &route_policy_id,
         now,
-    )?;
+    )
+    .await?;
     let policy = route_policy_for_actor(&state, &actor, &route_policy_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.route_policy.v1",
@@ -10740,7 +11102,8 @@ async fn update_route_policy(
         ADMIN_ROUTE_POLICY_GET_PATH,
         &route_policy_id,
         now,
-    )?;
+    )
+    .await?;
     let before = route_policy_for_actor(&state, &actor, &route_policy_id)?;
     let updated = state.store.update_route_policy_status(
         &route_policy_id,
@@ -10788,9 +11151,10 @@ async fn list_provider_grants(
         "/admin/v1/provider-grants",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let route = route_metadata(&Method::GET, ADMIN_PROVIDER_GRANT_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -10830,7 +11194,8 @@ async fn validate_provider_grant(
         "/admin/v1/provider-grants:validate",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let errors = provider_grant_validation_errors(&state, &actor, &request);
     Ok(validation_response(
         &state,
@@ -10860,7 +11225,8 @@ async fn create_provider_grant(
         "/admin/v1/provider-grants",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let request_hash = stable_request_hash(&request)?;
     let scope_key = idempotency_scope_key("provider_grants:create", &request.idempotency_key);
     if let Some(response) =
@@ -10936,7 +11302,8 @@ async fn get_provider_grant(
         ADMIN_PROVIDER_GRANT_GET_PATH,
         &provider_grant_id,
         now,
-    )?;
+    )
+    .await?;
     let grant = provider_grant_for_actor(&state, &actor, &provider_grant_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.provider_grant.v1",
@@ -10958,7 +11325,8 @@ async fn update_provider_grant(
         ADMIN_PROVIDER_GRANT_GET_PATH,
         &provider_grant_id,
         now,
-    )?;
+    )
+    .await?;
     let before = provider_grant_for_actor(&state, &actor, &provider_grant_id)?;
     let updated = state.store.update_provider_grant_status(
         &provider_grant_id,
@@ -11006,9 +11374,10 @@ async fn list_routing_groups(
         "/admin/v1/routing-groups",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let route = route_metadata(&Method::GET, ADMIN_ROUTING_GROUP_GET_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -11048,7 +11417,8 @@ async fn validate_routing_group(
         "/admin/v1/routing-groups:validate",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let errors = routing_group_validation_errors(&state, &actor, &request);
     Ok(validation_response(
         &state,
@@ -11078,7 +11448,8 @@ async fn create_routing_group(
         "/admin/v1/routing-groups",
         "*",
         now,
-    )?;
+    )
+    .await?;
     let request_hash = stable_request_hash(&request)?;
     let scope_key = idempotency_scope_key("routing_groups:create", &request.idempotency_key);
     if let Some(response) =
@@ -11150,7 +11521,8 @@ async fn get_routing_group(
         ADMIN_ROUTING_GROUP_GET_PATH,
         &routing_group_id,
         now,
-    )?;
+    )
+    .await?;
     let group = routing_group_for_actor(&state, &actor, &routing_group_id)?;
     Ok(Json(json!({
         "schema": "gateway.admin.routing_group.v1",
@@ -11172,7 +11544,8 @@ async fn update_routing_group(
         ADMIN_ROUTING_GROUP_GET_PATH,
         &routing_group_id,
         now,
-    )?;
+    )
+    .await?;
     let before = routing_group_for_actor(&state, &actor, &routing_group_id)?;
     let updated = state.store.update_routing_group_status(
         &routing_group_id,
@@ -11221,10 +11594,11 @@ async fn list_routing_group_targets(
         ADMIN_ROUTING_GROUP_TARGET_LIST_PATH,
         &routing_group_id,
         now,
-    )?;
+    )
+    .await?;
     routing_group_for_actor(&state, &actor, &routing_group_id)?;
     let route = route_metadata(&Method::GET, ADMIN_ROUTING_GROUP_TARGET_LIST_PATH)?;
-    let (engine, _) = authorization_engine_for_actor(&state, &actor)?;
+    let (engine, _) = authorization_engine_for_actor(&state, &actor).await?;
     let authorized = authorize_item_list(
         engine.as_ref(),
         &actor,
@@ -11265,7 +11639,8 @@ async fn validate_routing_group_target(
         ADMIN_ROUTING_GROUP_TARGET_VALIDATE_PATH,
         &routing_group_id,
         now,
-    )?;
+    )
+    .await?;
     let errors =
         routing_group_target_validation_errors(&state, &actor, &routing_group_id, &request);
     Ok(validation_response(
@@ -11297,7 +11672,8 @@ async fn create_routing_group_target(
         ADMIN_ROUTING_GROUP_TARGET_LIST_PATH,
         &routing_group_id,
         now,
-    )?;
+    )
+    .await?;
     let request_hash = stable_request_hash(&request)?;
     let scope_key = idempotency_scope_key(
         &format!("routing_group_targets:{routing_group_id}:create"),
@@ -11377,7 +11753,8 @@ async fn get_routing_group_target(
         ADMIN_ROUTING_GROUP_TARGET_GET_PATH,
         &routing_group_id,
         now,
-    )?;
+    )
+    .await?;
     let target = routing_group_target_for_actor(
         &state,
         &actor,
@@ -11404,7 +11781,8 @@ async fn update_routing_group_target(
         ADMIN_ROUTING_GROUP_TARGET_GET_PATH,
         &routing_group_id,
         now,
-    )?;
+    )
+    .await?;
     let before = routing_group_target_for_actor(
         &state,
         &actor,
@@ -11467,24 +11845,13 @@ async fn model_ingress(
         route_affinity_hash.as_deref(),
     )
     .await?;
-    let (engine, policy_snapshot_id) =
-        runtime_authorization_engine_for_actor(&state, &actor).await?;
     let attempt_started_at = chrono::Utc::now();
     let provider_target = FakeProviderReplayTarget {
         alias_resource_id: route_target.authorization_resource_id.clone(),
         upstream_model_id: route_target.upstream_model_id.clone(),
     };
-    let authorization = authorize_fake_provider_replay_target(
-        replay_case,
-        engine.as_ref(),
-        state.store(),
-        actor.clone(),
-        &provider_target,
-        FakeProviderReplayEvidence {
-            policy_snapshot_id,
-            occurred_at: chrono::Utc::now(),
-        },
-    )?;
+    let authorization =
+        authorize_runtime_provider_target(&state, &actor, replay_case, &provider_target).await?;
     if !authorization.authorization.allowed {
         return Err(GatewayError::Authorization {
             reason: authorization.authorization.reason,
@@ -11512,10 +11879,23 @@ async fn model_ingress(
             return Err(error);
         }
     };
-    let _provider_request_metadata =
-        runtime_provider_adapter_metadata(&state, replay_case, &route_target, &body)?;
-    let response =
-        fake_provider_response_for_authorization(&authorization, &provider_target, &body);
+    let response = match execute_runtime_provider_or_record_failure(
+        &state,
+        replay_case,
+        &authorization,
+        &provider_target,
+        &route_target,
+        &body,
+        attempt_started_at,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            release_runtime_policy_reservations(&state, &preflight);
+            return Err(error);
+        }
+    };
     if let (Some(route_decision_id), Some(selected)) = (
         route_target.route_decision_id.as_deref(),
         route_target.selected_route.as_ref(),
@@ -11541,10 +11921,90 @@ async fn model_ingress(
                 started_at: attempt_started_at,
                 ended_at: attempt_ended_at,
             },
-        );
+        )
+        .await?;
     }
     release_runtime_policy_reservations(&state, &preflight);
     Ok(Json(response))
+}
+
+async fn authorize_runtime_provider_target(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    replay_case: &GatewayReplayCase,
+    provider_target: &FakeProviderReplayTarget,
+) -> Result<FakeProviderAuthorization> {
+    let (engine, policy_snapshot_id) = runtime_authorization_engine_for_actor(state, actor).await?;
+    authorize_fake_provider_replay_target(
+        replay_case,
+        engine.as_ref(),
+        state.store(),
+        actor.clone(),
+        provider_target,
+        FakeProviderReplayEvidence {
+            policy_snapshot_id,
+            occurred_at: chrono::Utc::now(),
+        },
+    )
+}
+
+async fn execute_runtime_provider_or_record_failure(
+    state: &AppState,
+    replay_case: &GatewayReplayCase,
+    authorization: &FakeProviderAuthorization,
+    provider_target: &FakeProviderReplayTarget,
+    route_target: &RuntimeRouteTarget,
+    body: &Value,
+    attempt_started_at: chrono::DateTime<chrono::Utc>,
+) -> Result<RuntimeIngressResponse> {
+    let response = match runtime_provider_adapter_request(state, replay_case, route_target, body) {
+        Ok(provider_request) => {
+            runtime_provider_response(
+                state,
+                authorization,
+                provider_target,
+                provider_request,
+                body,
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
+    match response {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            record_failed_route_attempt_for_target(
+                state,
+                route_target,
+                attempt_started_at,
+                chrono::Utc::now(),
+            )
+            .await?;
+            Err(error)
+        }
+    }
+}
+
+async fn record_failed_route_attempt_for_target(
+    state: &AppState,
+    route_target: &RuntimeRouteTarget,
+    attempt_started_at: chrono::DateTime<chrono::Utc>,
+    attempt_ended_at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    if let (Some(route_decision_id), Some(selected)) = (
+        route_target.route_decision_id.as_deref(),
+        route_target.selected_route.as_ref(),
+    ) {
+        record_failed_route_attempt_evidence(
+            state,
+            route_decision_id,
+            selected,
+            attempt_started_at,
+            attempt_ended_at,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn runtime_request_body(body: Body, max_body_bytes: usize) -> Result<(usize, Value)> {
@@ -11559,16 +12019,33 @@ async fn runtime_request_body(body: Body, max_body_bytes: usize) -> Result<(usiz
     Ok((request_body_bytes, body))
 }
 
-fn runtime_provider_adapter_metadata(
+fn runtime_provider_adapter_request(
     state: &AppState,
     replay_case: &GatewayReplayCase,
     route_target: &RuntimeRouteTarget,
     body: &Value,
-) -> Result<Option<ProviderAdapterRequestMetadata>> {
+) -> Result<Option<ProviderAdapterRequest>> {
     let Some(provider_endpoint) = route_target.provider_endpoint.clone() else {
         return Ok(None);
     };
-    let upstream_credential = route_target
+    let upstream_credential = runtime_provider_adapter_credential(state, route_target);
+    let request = build_provider_adapter_request(
+        &ProviderAdapterTarget {
+            protocol_family: replay_case.protocol_family,
+            provider_endpoint,
+            upstream_model_id: route_target.upstream_model_id.clone(),
+            upstream_credential,
+        },
+        body,
+    )?;
+    Ok(Some(request))
+}
+
+fn runtime_provider_adapter_credential(
+    state: &AppState,
+    route_target: &RuntimeRouteTarget,
+) -> Option<ProviderAdapterCredential> {
+    if let Some(credential) = route_target
         .upstream_credential_id
         .as_deref()
         .and_then(|credential_id| state.store.upstream_credential(credential_id))
@@ -11581,17 +12058,136 @@ fn runtime_provider_adapter_metadata(
                     credential_kind: credential.credential_kind,
                     secret_value,
                 })
+        })
+    {
+        return Some(credential);
+    }
+    route_target
+        .upstream_credential_id
+        .as_ref()
+        .zip(route_target.upstream_credential_snapshot.as_ref())
+        .and_then(|(upstream_credential_id, snapshot)| {
+            state
+                .store
+                .secret_value(&snapshot.secret_ref_id)
+                .map(|secret_value| ProviderAdapterCredential {
+                    upstream_credential_id: upstream_credential_id.clone(),
+                    credential_kind: snapshot.credential_kind.clone(),
+                    secret_value,
+                })
+        })
+}
+
+async fn runtime_provider_response(
+    state: &AppState,
+    authorization: &FakeProviderAuthorization,
+    provider_target: &FakeProviderReplayTarget,
+    provider_request: Option<ProviderAdapterRequest>,
+    body: &Value,
+) -> Result<RuntimeIngressResponse> {
+    match state.config.provider_transport_mode {
+        ProviderTransportMode::Fake => Ok(fake_provider_response_for_authorization(
+            authorization,
+            provider_target,
+            body,
+        )),
+        ProviderTransportMode::Http => {
+            let Some(provider_request) = provider_request else {
+                return Err(GatewayError::NoRoute {
+                    reason: "provider_route_required",
+                });
+            };
+            execute_live_provider_request(state, authorization, provider_request).await
+        }
+    }
+}
+
+async fn execute_live_provider_request(
+    state: &AppState,
+    authorization: &FakeProviderAuthorization,
+    provider_request: ProviderAdapterRequest,
+) -> Result<RuntimeIngressResponse> {
+    if authorization.streaming {
+        return Err(GatewayError::Upstream {
+            reason: "live_streaming_not_supported",
         });
-    let request = build_provider_adapter_request(
-        &ProviderAdapterTarget {
-            protocol_family: replay_case.protocol_family,
-            provider_endpoint,
-            upstream_model_id: route_target.upstream_model_id.clone(),
-            upstream_credential,
-        },
-        body,
-    )?;
-    Ok(Some(request.into_safe_metadata()))
+    }
+    if provider_request.method != "POST" {
+        return Err(GatewayError::Internal {
+            message: "provider adapter request method is unsupported".to_owned(),
+        });
+    }
+    let protocol_family = provider_request.protocol_family;
+    let metadata: ProviderAdapterRequestMetadata = provider_request.safe_metadata.clone();
+    if metadata.protocol_family != protocol_family {
+        return Err(GatewayError::Internal {
+            message: "provider adapter request metadata is inconsistent".to_owned(),
+        });
+    }
+    let body = serde_json::to_vec(&provider_request.body).map_err(|_| GatewayError::Internal {
+        message: "provider request body serialization failed".to_owned(),
+    })?;
+    let timeout = Duration::from_millis(
+        state
+            .config
+            .request_timeout_ms
+            .clamp(MIN_REQUEST_TIMEOUT_MS, MAX_REQUEST_TIMEOUT_MS),
+    );
+    let client = reqwest::Client::new();
+    let mut request = client
+        .post(&provider_request.url)
+        .timeout(timeout)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json")
+        .header(header::USER_AGENT, "starweaver-gateway");
+    for provider_header in provider_request.headers {
+        request = request.header(provider_header.name, provider_header.value.expose_secret());
+    }
+    let response = request
+        .body(body)
+        .send()
+        .await
+        .map_err(|_| GatewayError::Upstream {
+            reason: "provider_unavailable",
+        })?;
+    if !response.status().is_success() {
+        return Err(GatewayError::Upstream {
+            reason: "provider_rejected_request",
+        });
+    }
+    let upstream_text = response.text().await.map_err(|_| GatewayError::Upstream {
+        reason: "provider_body_read_failed",
+    })?;
+    let upstream_body =
+        serde_json::from_str::<Value>(&upstream_text).map_err(|_| GatewayError::Upstream {
+            reason: "provider_json_decode_failed",
+        })?;
+    Ok(RuntimeIngressResponse {
+        protocol_family,
+        authorization: authorization.authorization.clone(),
+        body: upstream_body,
+        streaming: false,
+    })
+}
+
+async fn record_failed_route_attempt_evidence(
+    state: &AppState,
+    route_decision_id: &str,
+    selected: &SelectedRouteEvidence,
+    attempt_started_at: chrono::DateTime<chrono::Utc>,
+    attempt_ended_at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    record_route_attempt_evidence(
+        state,
+        RouteAttemptRecord::failed(
+            route_decision_id,
+            0,
+            selected,
+            attempt_started_at,
+            attempt_ended_at,
+        ),
+    )
+    .await
 }
 
 async fn record_completed_route_attempt_evidence(
@@ -11649,11 +12245,11 @@ enum RuntimePolicyCounterBackend {
     LossAllowance,
 }
 
-fn record_terminal_usage_event(
+async fn record_terminal_usage_event(
     state: &AppState,
     actor: &AuthenticatedActor,
     input: &TerminalUsageInput<'_>,
-) {
+) -> Result<()> {
     let (usage_payload, usage_confidence) =
         normalized_usage_payload(input.response.protocol_family, &input.response.body);
     let latency_ms = input
@@ -11674,7 +12270,7 @@ fn record_terminal_usage_event(
     let service_account_id =
         matches!(actor.actor_kind, ActorKind::ServiceAccount).then(|| actor.actor_id.clone());
     let cost_payload = unpriced_cost_payload();
-    state.store.record_usage_event(UsageEventRecord {
+    let record = UsageEventRecord {
         usage_event_id: new_prefixed_id("use"),
         tenant_id: actor.tenant_id.clone(),
         organization_id: actor.organization_id.clone(),
@@ -11700,8 +12296,13 @@ fn record_terminal_usage_event(
         usage_payload: usage_payload.clone(),
         cost_payload: cost_payload.clone(),
         occurred_at: input.ended_at,
-    });
+    };
+    state.store.record_usage_event(record.clone());
+    if let Some(store) = state.postgres_store.as_ref() {
+        store.insert_usage_event(&record).await?;
+    }
     finalize_runtime_policy_terminal(state, actor, input, &usage_payload, &cost_payload);
+    Ok(())
 }
 
 fn unpriced_cost_payload() -> Value {
@@ -13184,7 +13785,7 @@ struct ExportBuildResult {
     manifest_document: Value,
 }
 
-fn build_export_page(
+async fn build_export_page(
     state: &AppState,
     export_kind: &str,
     scope: &DashboardScopeInput,
@@ -13193,9 +13794,8 @@ fn build_export_page(
 ) -> Result<ExportPage> {
     match export_kind {
         "usage" => {
-            let mut events = state
-                .store
-                .usage_events_for_tenant(&scope.tenant_id)
+            let mut events = usage_events_for_analytics(state, &scope.tenant_id)
+                .await?
                 .into_iter()
                 .filter(|event| dashboard_usage_event_matches_scope(event, scope))
                 .collect::<Vec<_>>();
@@ -14275,11 +14875,11 @@ fn first_i64(value: &Value, keys: &[&str]) -> Option<i64> {
         .find_map(|key| value.get(*key).and_then(Value::as_i64))
 }
 
-fn authorization_engine_for_actor(
+async fn authorization_engine_for_actor(
     state: &AppState,
     actor: &AuthenticatedActor,
 ) -> Result<(Box<dyn AuthorizationEngine>, Option<String>)> {
-    let Some(snapshot) = latest_snapshot_for_actor_in_memory(state, actor)? else {
+    let Some(snapshot) = latest_snapshot_for_actor(state, actor).await? else {
         return Ok((
             Box::new(FoundationAuthorizationEngine::new(
                 state.store.action_grants(),
@@ -14308,29 +14908,7 @@ async fn runtime_authorization_engine_for_actor(
     state: &AppState,
     actor: &AuthenticatedActor,
 ) -> Result<(Box<dyn AuthorizationEngine>, Option<String>)> {
-    let Some(snapshot) = latest_snapshot_for_actor(state, actor).await? else {
-        return Ok((
-            Box::new(FoundationAuthorizationEngine::new(
-                state.store.action_grants(),
-            )),
-            None,
-        ));
-    };
-    let Some(policy_bundle) = snapshot
-        .document
-        .payload
-        .get("cedar_policy_bundle")
-        .and_then(Value::as_str)
-    else {
-        return Ok((
-            Box::new(FoundationAuthorizationEngine::new(
-                state.store.action_grants(),
-            )),
-            None,
-        ));
-    };
-    let engine = CedarAuthorizationEngine::from_policy_source(policy_bundle)?;
-    Ok((Box::new(engine), Some(snapshot.metadata.snapshot_id)))
+    authorization_engine_for_actor(state, actor).await
 }
 
 fn replay_case_for_request(method: &Method, path: &str) -> Result<&'static GatewayReplayCase> {
@@ -14514,7 +15092,7 @@ fn authenticated_actor_from_extensions(extensions: &Extensions) -> Result<Authen
         })
 }
 
-fn authorize_admin_route(
+async fn authorize_admin_route(
     state: &AppState,
     actor: &AuthenticatedActor,
     method: &Method,
@@ -14524,7 +15102,7 @@ fn authorize_admin_route(
 ) -> Result<()> {
     let route = route_metadata(method, path_pattern)?;
     reject_frozen_config_mutation(state, route, method, actor, now)?;
-    let (engine, policy_snapshot_id) = authorization_engine_for_actor(state, actor)?;
+    let (engine, policy_snapshot_id) = authorization_engine_for_actor(state, actor).await?;
     let decision = authorize_route_with_evidence(
         route,
         engine.as_ref(),
@@ -20183,18 +20761,23 @@ fn realtime_budget_summary(state: &AppState, tenant_id: &str) -> Value {
     })
 }
 
-fn dashboard_overview_response(
+async fn dashboard_overview_response(
     state: &AppState,
     scope: &DashboardScopeInput,
     generated_at: chrono::DateTime<chrono::Utc>,
-) -> Value {
-    let route_rollup = dashboard_route_rollup(state, scope);
-    let usage_rollup = dashboard_usage_rollup(state, scope);
+) -> Result<Value> {
+    let route_decisions = route_decision_evidence_for_tenant(state, &scope.tenant_id).await?;
+    let route_attempts = route_attempt_evidence_for_tenant(state, &scope.tenant_id).await?;
+    let route_rollup =
+        dashboard_route_rollup_from_records(&route_decisions, &route_attempts, scope);
+    let ledger_buckets = ledger_buckets_for_analytics(state, &scope.tenant_id).await?;
+    let usage_events = usage_events_for_analytics(state, &scope.tenant_id).await?;
+    let usage_rollup = dashboard_usage_rollup_from_records(&ledger_buckets, &usage_events, scope);
     let usage_available = usage_rollup.request_count > 0;
     let source_freshness_timestamp = route_rollup
         .latest_decision_at
         .max(usage_rollup.latest_source_at);
-    json!({
+    Ok(json!({
         "schema": scope.schema,
         "scope": dashboard_scope_body(scope),
         "generated_at": generated_at,
@@ -20211,7 +20794,7 @@ fn dashboard_overview_response(
             "quota_hot_state": "unavailable"
         },
         "unavailable_sources": dashboard_unavailable_sources(usage_available)
-    })
+    }))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -20233,7 +20816,7 @@ impl UsageBreakdownDimension {
     }
 }
 
-fn get_usage_breakdown(
+async fn get_usage_breakdown(
     state: &AppState,
     actor: &AuthenticatedActor,
     query: &AdminUsageBreakdownQuery,
@@ -20254,13 +20837,13 @@ fn get_usage_breakdown(
         path_pattern,
         &scope.scope_id,
         now,
-    )?;
+    )
+    .await?;
     let limit = usage_list_limit(query.limit)?;
     let offset = usage_list_offset(query.cursor.as_deref())?;
     let mut groups: HashMap<String, (String, String, DashboardUsageRollup)> = HashMap::new();
-    for bucket in state
-        .store
-        .ledger_buckets_for_tenant(&scope.tenant_id)
+    for bucket in ledger_buckets_for_analytics(state, &scope.tenant_id)
+        .await?
         .into_iter()
         .filter(|bucket| bucket.bucket_kind == "event")
         .filter(|bucket| dashboard_bucket_matches_scope(bucket, &scope))
@@ -20608,20 +21191,31 @@ fn usage_bucket_kind(bucket_kind: Option<&str>) -> Result<&'static str> {
     }
 }
 
-fn usage_timeseries_points(
+async fn usage_timeseries_points(
     state: &AppState,
+    scope: &DashboardScopeInput,
+    bucket_kind: &str,
+) -> Result<Vec<Value>> {
+    let ledger_buckets = ledger_buckets_for_analytics(state, &scope.tenant_id).await?;
+    Ok(usage_timeseries_points_from_buckets(
+        &ledger_buckets,
+        scope,
+        bucket_kind,
+    ))
+}
+
+fn usage_timeseries_points_from_buckets(
+    ledger_buckets: &[LedgerBucketRecord],
     scope: &DashboardScopeInput,
     bucket_kind: &str,
 ) -> Vec<Value> {
     let mut points: BTreeMap<chrono::DateTime<chrono::Utc>, DashboardUsageRollup> = BTreeMap::new();
-    for bucket in state
-        .store
-        .ledger_buckets_for_tenant(&scope.tenant_id)
-        .into_iter()
+    for bucket in ledger_buckets
+        .iter()
         .filter(|bucket| bucket.bucket_kind == bucket_kind)
         .filter(|bucket| dashboard_bucket_matches_scope(bucket, scope))
     {
-        accumulate_usage_bucket(points.entry(bucket.bucket_start).or_default(), &bucket);
+        accumulate_usage_bucket(points.entry(bucket.bucket_start).or_default(), bucket);
     }
     points
         .into_iter()
@@ -20767,21 +21361,21 @@ struct DashboardRouteRollup {
     latest_decision_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-fn dashboard_route_rollup(state: &AppState, scope: &DashboardScopeInput) -> DashboardRouteRollup {
-    let decisions = state
-        .store
-        .route_decisions()
-        .into_iter()
+fn dashboard_route_rollup_from_records(
+    decisions: &[RouteDecisionRecord],
+    attempts: &[RouteAttemptRecord],
+    scope: &DashboardScopeInput,
+) -> DashboardRouteRollup {
+    let decisions = decisions
+        .iter()
         .filter(|decision| dashboard_decision_matches_scope(decision, scope))
         .collect::<Vec<_>>();
     let decision_ids = decisions
         .iter()
         .map(|decision| decision.route_decision_id.as_str())
         .collect::<HashSet<_>>();
-    let attempts = state
-        .store
-        .route_attempts()
-        .into_iter()
+    let attempts = attempts
+        .iter()
         .filter(|attempt| decision_ids.contains(attempt.route_decision_id.as_str()))
         .collect::<Vec<_>>();
     let latest_decision_at = decisions.iter().map(|decision| decision.occurred_at).max();
@@ -20986,38 +21580,28 @@ impl DashboardUsageRollup {
     }
 }
 
-fn dashboard_usage_rollup(state: &AppState, scope: &DashboardScopeInput) -> DashboardUsageRollup {
+fn dashboard_usage_rollup_from_records(
+    ledger_buckets: &[LedgerBucketRecord],
+    usage_events: &[UsageEventRecord],
+    scope: &DashboardScopeInput,
+) -> DashboardUsageRollup {
     let mut rollup = DashboardUsageRollup::default();
-    for bucket in state
-        .store
-        .ledger_buckets_for_tenant(&scope.tenant_id)
-        .into_iter()
+    for bucket in ledger_buckets
+        .iter()
         .filter(|bucket| bucket.bucket_kind == "event")
         .filter(|bucket| dashboard_bucket_matches_scope(bucket, scope))
     {
-        rollup.request_count += bucket.request_count;
-        rollup.success_count += bucket.success_count;
-        rollup.error_count += bucket.error_count;
-        rollup.input_tokens += bucket.input_tokens;
-        rollup.output_tokens += bucket.output_tokens;
-        rollup.reasoning_tokens += bucket.reasoning_tokens;
-        rollup.media_units += bucket.media_units;
-        rollup.estimated_cost_micros += bucket.estimated_cost_micros;
-        rollup.usage_missing_count += bucket.usage_missing_count;
-        rollup.usage_estimated_count += bucket.usage_estimated_count;
-        rollup.latest_source_at = rollup.latest_source_at.max(Some(bucket.updated_at));
+        accumulate_usage_bucket(&mut rollup, bucket);
     }
-    let usage_events = state
-        .store
-        .usage_events_for_tenant(&scope.tenant_id)
-        .into_iter()
+    let scoped_usage_events = usage_events
+        .iter()
         .filter(|event| dashboard_usage_event_matches_scope(event, scope))
         .collect::<Vec<_>>();
-    let latencies = usage_events
+    let latencies = scoped_usage_events
         .iter()
         .filter_map(|event| event.latency_ms)
         .collect::<Vec<_>>();
-    let ttfts = usage_events
+    let ttfts = scoped_usage_events
         .iter()
         .filter_map(|event| event.time_to_first_token_ms)
         .collect::<Vec<_>>();
@@ -21329,9 +21913,16 @@ struct RuntimeRouteTarget {
     upstream_model_id: String,
     provider_endpoint: Option<ProviderEndpoint>,
     upstream_credential_id: Option<String>,
+    upstream_credential_snapshot: Option<RuntimeCredentialSnapshot>,
     route_decision_id: Option<String>,
     selected_route: Option<SelectedRouteEvidence>,
     decision_request: Option<RouteDecisionRequest>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RuntimeCredentialSnapshot {
+    credential_kind: String,
+    secret_ref_id: String,
 }
 
 async fn runtime_route_target(
@@ -21347,6 +21938,7 @@ async fn runtime_route_target(
             upstream_model_id: requested_model.to_owned(),
             provider_endpoint: None,
             upstream_credential_id: None,
+            upstream_credential_snapshot: None,
             route_decision_id: None,
             selected_route: None,
             decision_request: None,
@@ -21372,11 +21964,14 @@ async fn runtime_route_target(
         })?;
     match plan.outcome {
         RoutePlanOutcome::Selected(selection) => {
+            let upstream_credential_snapshot =
+                runtime_credential_snapshot(&loaded_catalog.catalog, &selection);
             selected_runtime_route_target(
                 state,
                 actor,
                 decision_request,
                 *selection,
+                upstream_credential_snapshot,
                 loaded_catalog.version,
                 route_affinity_hash,
             )
@@ -21424,6 +22019,7 @@ async fn selected_runtime_route_target(
     actor: &AuthenticatedActor,
     decision_request: RouteDecisionRequest,
     selection: RouteSelection,
+    upstream_credential_snapshot: Option<RuntimeCredentialSnapshot>,
     config_version: i64,
     route_affinity_hash: Option<&str>,
 ) -> Result<RuntimeRouteTarget> {
@@ -21458,9 +22054,26 @@ async fn selected_runtime_route_target(
         upstream_model_id: selection.upstream_model_id,
         provider_endpoint: Some(selection.provider_endpoint),
         upstream_credential_id: selection.upstream_credential_id,
+        upstream_credential_snapshot,
         route_decision_id: Some(route_decision_id),
         selected_route: Some(selected_evidence),
         decision_request: Some(decision_request),
+    })
+}
+
+fn runtime_credential_snapshot(
+    catalog: &GatewayCatalogSnapshot,
+    selection: &RouteSelection,
+) -> Option<RuntimeCredentialSnapshot> {
+    selection.upstream_credential_id.as_deref().and_then(|id| {
+        catalog
+            .upstream_credentials
+            .iter()
+            .find(|credential| credential.upstream_credential_id == id)
+            .map(|credential| RuntimeCredentialSnapshot {
+                credential_kind: credential.credential_kind.clone(),
+                secret_ref_id: credential.secret_ref_id.clone(),
+            })
     })
 }
 
@@ -21540,6 +22153,55 @@ async fn latest_snapshot_for_actor(
     latest_snapshot_for_actor_in_memory(state, actor)
 }
 
+async fn latest_published_snapshot_for_readiness(
+    state: &AppState,
+) -> Result<Option<ConfigSnapshot>> {
+    if let Some(store) = state.postgres_store.as_ref() {
+        return store.latest_published_snapshot().await;
+    }
+    Ok(state.store.latest_published_snapshot())
+}
+
+async fn config_snapshots_for_actor(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+) -> Result<Vec<crate::config::PublishedConfigSnapshot>> {
+    if let Some(store) = state.postgres_store.as_ref() {
+        return store
+            .config_snapshots_for_tenant(&actor.tenant_id, CONFIG_SNAPSHOT_DURABLE_SCAN_LIMIT)
+            .await;
+    }
+    Ok(state
+        .store
+        .config_snapshots()
+        .into_iter()
+        .filter(|snapshot| snapshot.metadata.tenant_id == actor.tenant_id)
+        .collect())
+}
+
+async fn config_snapshot_for_actor(
+    state: &AppState,
+    actor: &AuthenticatedActor,
+    snapshot_id: &str,
+) -> Result<crate::config::PublishedConfigSnapshot> {
+    if let Some(store) = state.postgres_store.as_ref() {
+        return store
+            .config_snapshot_by_id(snapshot_id)
+            .await?
+            .filter(|snapshot| snapshot.metadata.tenant_id == actor.tenant_id)
+            .ok_or_else(|| GatewayError::NotFound {
+                resource: format!("config snapshot {snapshot_id}"),
+            });
+    }
+    state
+        .store
+        .config_snapshot(snapshot_id)
+        .filter(|snapshot| snapshot.metadata.tenant_id == actor.tenant_id)
+        .ok_or_else(|| GatewayError::NotFound {
+            resource: format!("config snapshot {snapshot_id}"),
+        })
+}
+
 fn latest_snapshot_for_actor_in_memory(
     state: &AppState,
     actor: &AuthenticatedActor,
@@ -21586,8 +22248,8 @@ mod tests {
         runtime_budget_reservation_key, runtime_quota_counter_key,
         runtime_quota_loss_allowance_key, runtime_route_target, validate_gateway_config, AppState,
         BackgroundWorkerMode, DependencyProbeMode, ExportObjectStorageHttpConfig, GatewayConfig,
-        NotificationDeliveryTransport, OtelExporterTransport, SingleUserAuthConfig,
-        ADMIN_ROUTE_ATTEMPT_LIST_PATH, ADMIN_ROUTE_DECISION_LIST_PATH,
+        NotificationDeliveryTransport, OtelExporterTransport, ProviderTransportMode,
+        SingleUserAuthConfig, ADMIN_ROUTE_ATTEMPT_LIST_PATH, ADMIN_ROUTE_DECISION_LIST_PATH,
         ADMIN_ROUTE_SIMULATION_LIST_PATH, CODEX_API_BASE_URL, CSRF_TOKEN_HEADER,
         GATEWAY_SESSION_ID_HEADER, PROJECT_ID_HEADER, REQUEST_ID_HEADER,
         RUNTIME_BUDGET_LEASE_TTL_SECONDS, SESSION_TOKEN_PREFIX, SINGLE_USER_ID,
@@ -21839,6 +22501,36 @@ mod tests {
     }
 
     #[test]
+    fn gateway_config_from_env_reads_provider_transport_mode() {
+        const KEYS: &[&str] = &["STARWEAVER_GATEWAY_PROVIDER_TRANSPORT"];
+
+        let _lock = ENV_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = EnvRestore::capture(KEYS);
+        for key in KEYS {
+            std::env::remove_var(key);
+        }
+
+        assert_eq!(
+            GatewayConfig::from_env().provider_transport_mode,
+            ProviderTransportMode::Fake
+        );
+
+        std::env::set_var("STARWEAVER_GATEWAY_PROVIDER_TRANSPORT", " http ");
+        assert_eq!(
+            GatewayConfig::from_env().provider_transport_mode,
+            ProviderTransportMode::Http
+        );
+
+        std::env::set_var("STARWEAVER_GATEWAY_PROVIDER_TRANSPORT", "unexpected");
+        assert_eq!(
+            GatewayConfig::from_env().provider_transport_mode,
+            ProviderTransportMode::Fake
+        );
+    }
+
+    #[test]
     fn gateway_config_from_env_reads_external_object_storage_controls() {
         const KEYS: &[&str] = &[
             "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_URL",
@@ -22071,6 +22763,7 @@ mod tests {
         }
 
         std::env::set_var("STARWEAVER_GATEWAY_ENV", "production");
+        std::env::set_var("STARWEAVER_GATEWAY_RUNTIME_STORE", "postgres");
         std::env::set_var(
             "STARWEAVER_GATEWAY_DATABASE_URL",
             "postgres://gateway.example/starweaver",
@@ -22106,16 +22799,8 @@ mod tests {
         assert!(config.session_cookie_secure);
         assert!(config.session_cookie_http_only);
         assert_eq!(config.session_cookie_same_site, "strict");
-        let error = match validate_gateway_config(&config) {
-            Ok(()) => panic!("production memory runtime store should be rejected"),
-            Err(error) => error,
-        };
-        let error_text = error.to_string();
-        assert!(error_text.contains("durable_runtime_store_required"));
-        assert!(!error_text.contains("public_base_url_https_required"));
-        assert!(!error_text.contains("cors_allowed_origins"));
-        assert!(!error_text.contains("secure_session_cookie_required"));
-        assert!(!error_text.contains("session_cookie_same_site_invalid"));
+        assert_eq!(config.runtime_store_profile, "postgres");
+        assert!(validate_gateway_config(&config).is_ok());
     }
 
     #[tokio::test]
@@ -22210,6 +22895,7 @@ mod tests {
             environment: "production".to_owned(),
             database_url: Some("postgres://gateway.example/starweaver".to_owned()),
             redis_url: Some("rediss://redis.example/0".to_owned()),
+            runtime_store_profile: "postgres".to_owned(),
             public_base_url: Some("http://gateway.example.com".to_owned()),
             cors_allowed_origins: vec!["*".to_owned()],
             secret_backend_profile: "gcp-secret-manager".to_owned(),
@@ -22237,8 +22923,19 @@ mod tests {
             .to_string()
             .contains("session_cookie_same_site_invalid"));
 
-        let unsupported_store = match validate_gateway_config(&GatewayConfig {
+        let missing_postgres_url = match validate_gateway_config(&GatewayConfig {
             runtime_store_profile: "postgres".to_owned(),
+            ..GatewayConfig::default()
+        }) {
+            Ok(()) => panic!("postgres runtime store should require a database URL"),
+            Err(error) => error,
+        };
+        assert!(missing_postgres_url
+            .to_string()
+            .contains("postgres_runtime_store_database_url_required"));
+
+        let unsupported_store = match validate_gateway_config(&GatewayConfig {
+            runtime_store_profile: "sqlite".to_owned(),
             ..GatewayConfig::default()
         }) {
             Ok(()) => panic!("unsupported runtime store should be rejected"),
@@ -23425,6 +24122,150 @@ mod tests {
                 .sum::<i64>(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn model_ingress_http_provider_transport_executes_upstream_json() {
+        let (store, raw_key) = gateway_store_with_runtime_access(true);
+        let secret_ref_id = seed_secret_ref_for_test(
+            &store,
+            Some(TEST_ORGANIZATION_ID),
+            Some(TEST_PROJECT_ID),
+            "live provider authorization",
+            "openai-test-secret",
+        );
+        let (provider_url, captured_requests, provider_handle) = spawn_local_provider_receiver(
+            StatusCode::OK,
+            json!({
+                "id": "resp_live",
+                "object": "response",
+                "model": "gpt-4.1-mini",
+                "output": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "live provider"}]
+                }],
+                "usage": {
+                    "input_tokens": 7,
+                    "output_tokens": 11,
+                    "total_tokens": 18
+                }
+            }),
+        )
+        .await;
+        let mut payload = catalog_payload();
+        payload["provider_endpoints"][0]["upstream_base_url"] = json!(provider_url);
+        payload["upstream_credentials"][0]["secret_ref_id"] = json!(secret_ref_id);
+        publish_catalog_snapshot(&store, payload);
+        let state = AppState::new(
+            GatewayConfig {
+                provider_transport_mode: ProviderTransportMode::Http,
+                ..GatewayConfig::default()
+            },
+            store.clone(),
+        );
+
+        let response = match router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, format!("Bearer {raw_key}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({"model": "gpt-test", "input": "hi"}).to_string(),
+                    ))
+                    .unwrap_or_else(|error| panic!("request should build: {error}")),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => panic!("request should complete: {error}"),
+        };
+        let captured = captured_requests
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap_or_else(|error| panic!("provider should capture request: {error}"));
+        provider_handle.abort();
+        let status = response.status();
+        let body = response_json(response).await;
+        let upstream_body: Value = serde_json::from_slice(&captured.body)
+            .unwrap_or_else(|error| panic!("captured provider body should be json: {error}"));
+        let route_attempts = store.route_attempts();
+        let usage_events = store.usage_events_for_tenant(TEST_TENANT_ID);
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["body"]["id"], "resp_live");
+        assert_eq!(
+            body["body"]["output"][0]["content"][0]["text"],
+            "live provider"
+        );
+        assert_eq!(upstream_body["model"], "gpt-4.1-mini");
+        assert_eq!(upstream_body["input"], "hi");
+        assert_eq!(
+            captured
+                .headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer openai-test-secret")
+        );
+        assert_eq!(route_attempts.len(), 1);
+        assert_eq!(route_attempts[0].status, RouteAttemptStatus::Completed);
+        assert_eq!(usage_events.len(), 1);
+        assert_eq!(usage_events[0].usage_payload["input_tokens"], 7);
+        assert_eq!(usage_events[0].usage_payload["output_tokens"], 11);
+    }
+
+    #[tokio::test]
+    async fn model_ingress_http_provider_transport_records_failed_attempt_without_usage() {
+        let (store, raw_key) = gateway_store_with_runtime_access(true);
+        let (provider_url, captured_requests, provider_handle) = spawn_local_provider_receiver(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"error": {"message": "provider unavailable"}}),
+        )
+        .await;
+        let mut payload = catalog_payload();
+        payload["provider_endpoints"][0]["upstream_base_url"] = json!(provider_url);
+        publish_catalog_snapshot(&store, payload);
+        let state = AppState::new(
+            GatewayConfig {
+                provider_transport_mode: ProviderTransportMode::Http,
+                ..GatewayConfig::default()
+            },
+            store.clone(),
+        );
+
+        let response = match router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, format!("Bearer {raw_key}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({"model": "gpt-test"}).to_string()))
+                    .unwrap_or_else(|error| panic!("request should build: {error}")),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => panic!("request should complete: {error}"),
+        };
+        let _captured = captured_requests
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap_or_else(|error| panic!("provider should capture request: {error}"));
+        provider_handle.abort();
+        let status = response.status();
+        let body = response_json(response).await;
+        let route_attempts = store.route_attempts();
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"]["code"], "gateway.upstream.failed");
+        assert_eq!(
+            body["error"]["message"],
+            "upstream provider failed: provider_rejected_request"
+        );
+        assert_eq!(route_attempts.len(), 1);
+        assert_eq!(route_attempts[0].status, RouteAttemptStatus::Failed);
+        assert!(store.usage_events_for_tenant(TEST_TENANT_ID).is_empty());
     }
 
     #[tokio::test]
@@ -32896,6 +33737,53 @@ oFnGY0OFksX/ye0/XGpy2SFxYRwGU98HPYeBvAQQrVjdkzfy7BmXQQ==
         let handle = tokio::spawn(async move {
             if let Err(error) = axum::serve(listener, app).await {
                 panic!("webhook receiver should serve requests: {error}");
+            }
+        });
+        (format!("http://{address}/gateway"), receiver, handle)
+    }
+
+    async fn spawn_local_provider_receiver(
+        status: StatusCode,
+        response_body: Value,
+    ) -> (
+        String,
+        mpsc::Receiver<CapturedWebhookRequest>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (sender, receiver) = mpsc::channel();
+        let sender = Arc::new(Mutex::new(Some(sender)));
+        let app = Router::new().route(
+            "/gateway/responses",
+            post({
+                let sender = Arc::clone(&sender);
+                move |headers: HeaderMap, body: Bytes| {
+                    let sender = Arc::clone(&sender);
+                    let response_body = response_body.clone();
+                    async move {
+                        let mut sender = sender
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let Some(sender) = sender.take() {
+                            let _ = sender.send(CapturedWebhookRequest {
+                                headers,
+                                body: body.to_vec(),
+                            });
+                        }
+                        drop(sender);
+                        (status, Json(response_body))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("provider listener should bind: {error}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("provider listener address should resolve: {error}"));
+        let handle = tokio::spawn(async move {
+            if let Err(error) = axum::serve(listener, app).await {
+                panic!("provider receiver should serve requests: {error}");
             }
         });
         (format!("http://{address}/gateway"), receiver, handle)

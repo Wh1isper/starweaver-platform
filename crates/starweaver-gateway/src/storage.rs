@@ -3361,6 +3361,28 @@ impl NotificationOutboxRepository for InMemoryGatewayStore {
     }
 }
 
+fn ledger_bucket_record_for_event(
+    record: &UsageEventRecord,
+    bucket_kind: &str,
+) -> Result<LedgerBucketRecord> {
+    let mut buckets = HashMap::new();
+    fold_usage_event_into_bucket(&mut buckets, record, bucket_kind);
+    let bucket_start = usage_bucket_start(bucket_kind, record.occurred_at);
+    let key = usage_bucket_key(record, bucket_kind, bucket_start);
+    let Some(mut bucket) = buckets.remove(&key) else {
+        return Err(GatewayError::Internal {
+            message: "folded usage event did not create a ledger bucket".to_owned(),
+        });
+    };
+    bucket.ledger_bucket_id = stable_ledger_bucket_id(&key);
+    Ok(bucket)
+}
+
+fn stable_ledger_bucket_id(key: &str) -> String {
+    let digest = Sha256::digest(key.as_bytes());
+    format!("lb_{digest:x}")
+}
+
 fn fold_usage_event_into_bucket(
     buckets: &mut HashMap<String, LedgerBucketRecord>,
     record: &UsageEventRecord,
@@ -8457,6 +8479,127 @@ impl PostgresGatewayStore {
         row.map_or(Ok(None), |row| auth_session_record_from_row(&row).map(Some))
     }
 
+    /// Inserts an auth session record.
+    pub async fn insert_auth_session(&self, record: &AuthSessionRecord) -> Result<()> {
+        sqlx::query(
+            r"
+            INSERT INTO gateway_auth_sessions (
+                auth_session_id,
+                tenant_id,
+                principal_id,
+                active_organization_id,
+                active_project_id,
+                session_hash,
+                status,
+                expires_at,
+                created_at,
+                updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (auth_session_id) DO NOTHING
+            ",
+        )
+        .bind(&record.auth_session_id)
+        .bind(&record.tenant_id)
+        .bind(&record.principal_id)
+        .bind(&record.active_organization_id)
+        .bind(&record.active_project_id)
+        .bind(&record.session_hash)
+        .bind(auth_session_status_as_str(&record.status))
+        .bind(record.expires_at)
+        .bind(record.created_at)
+        .bind(record.updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| GatewayError::Internal {
+            message: format!("failed to insert auth session: {error}"),
+        })?;
+        Ok(())
+    }
+
+    /// Updates active organization and project context for one active session.
+    pub async fn update_auth_session_active_context_by_hash(
+        &self,
+        session_hash: &str,
+        active_organization_id: Option<String>,
+        active_project_id: Option<String>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<AuthSessionRecord> {
+        let row = sqlx::query(
+            r"
+            UPDATE gateway_auth_sessions
+            SET active_organization_id = $2,
+                active_project_id = $3,
+                updated_at = $4
+            WHERE session_hash = $1
+              AND status = 'active'
+              AND expires_at > $4
+            RETURNING
+                auth_session_id,
+                tenant_id,
+                principal_id,
+                active_organization_id,
+                active_project_id,
+                session_hash,
+                status,
+                expires_at,
+                created_at,
+                updated_at
+            ",
+        )
+        .bind(session_hash)
+        .bind(active_organization_id)
+        .bind(active_project_id)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| GatewayError::Internal {
+            message: format!("failed to update auth session context: {error}"),
+        })?;
+
+        row.map_or(Err(GatewayError::Authentication), |row| {
+            auth_session_record_from_row(&row)
+        })
+    }
+
+    /// Revokes an auth session by opaque token hash.
+    pub async fn revoke_auth_session_by_hash(
+        &self,
+        session_hash: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<AuthSessionRecord> {
+        let row = sqlx::query(
+            r"
+            UPDATE gateway_auth_sessions
+            SET status = 'revoked',
+                updated_at = $2
+            WHERE session_hash = $1
+            RETURNING
+                auth_session_id,
+                tenant_id,
+                principal_id,
+                active_organization_id,
+                active_project_id,
+                session_hash,
+                status,
+                expires_at,
+                created_at,
+                updated_at
+            ",
+        )
+        .bind(session_hash)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| GatewayError::Internal {
+            message: format!("failed to revoke auth session: {error}"),
+        })?;
+
+        row.map_or(Err(GatewayError::Authentication), |row| {
+            auth_session_record_from_row(&row)
+        })
+    }
+
     /// Loads tenant metadata by id.
     pub async fn tenant_by_id(&self, tenant_id: &str) -> Result<Option<TenantRecord>> {
         let row = sqlx::query(
@@ -8784,6 +8927,44 @@ impl PostgresGatewayStore {
         })
     }
 
+    /// Lists published config snapshots for one tenant.
+    pub async fn config_snapshots_for_tenant(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+    ) -> Result<Vec<PublishedConfigSnapshot>> {
+        let rows = sqlx::query(
+            r"
+            SELECT
+                config_snapshot_id,
+                tenant_id,
+                version,
+                checksum,
+                status,
+                compiled_at,
+                snapshot_document,
+                created_by,
+                published_at
+            FROM gateway_config_snapshots
+            WHERE tenant_id = $1
+              AND status = 'published'
+            ORDER BY version DESC, config_snapshot_id ASC
+            LIMIT $2
+            ",
+        )
+        .bind(tenant_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| GatewayError::Internal {
+            message: format!("failed to list config snapshots: {error}"),
+        })?;
+
+        rows.iter()
+            .map(published_config_snapshot_from_row)
+            .collect()
+    }
+
     /// Inserts a published config snapshot.
     pub async fn insert_config_snapshot(&self, snapshot: &PublishedConfigSnapshot) -> Result<()> {
         let mut transaction = self
@@ -9010,6 +9191,215 @@ impl PostgresGatewayStore {
         Ok(())
     }
 
+    /// Records a durable usage event and folds it into ledger buckets.
+    pub async fn insert_usage_event(&self, record: &UsageEventRecord) -> Result<()> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| GatewayError::Internal {
+                message: format!("failed to begin usage event transaction: {error}"),
+            })?;
+        let insert = sqlx::query(
+            r"
+            INSERT INTO gateway_usage_events (
+                usage_event_id,
+                tenant_id,
+                organization_id,
+                project_id,
+                principal_id,
+                project_member_id,
+                service_account_id,
+                api_key_id,
+                request_id,
+                trace_id,
+                protocol_family,
+                route_decision_id,
+                model_alias_id,
+                model_target_id,
+                route_policy_id,
+                routing_group_id,
+                provider_endpoint_id,
+                upstream_credential_id,
+                usage_confidence,
+                latency_ms,
+                time_to_first_token_ms,
+                status,
+                usage_payload,
+                cost_payload,
+                occurred_at
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8,
+                $9, $10, $11, $12, $13, $14, $15, $16,
+                $17, $18, $19, $20, $21, $22, $23, $24,
+                $25
+            )
+            ON CONFLICT DO NOTHING
+            ",
+        )
+        .bind(&record.usage_event_id)
+        .bind(&record.tenant_id)
+        .bind(&record.organization_id)
+        .bind(&record.project_id)
+        .bind(&record.principal_id)
+        .bind(&record.project_member_id)
+        .bind(&record.service_account_id)
+        .bind(&record.api_key_id)
+        .bind(&record.request_id)
+        .bind(&record.trace_id)
+        .bind(record.protocol_family.as_str())
+        .bind(&record.route_decision_id)
+        .bind(&record.model_alias_id)
+        .bind(&record.model_target_id)
+        .bind(&record.route_policy_id)
+        .bind(&record.routing_group_id)
+        .bind(&record.provider_endpoint_id)
+        .bind(&record.upstream_credential_id)
+        .bind(&record.usage_confidence)
+        .bind(record.latency_ms)
+        .bind(record.time_to_first_token_ms)
+        .bind(&record.status)
+        .bind(&record.usage_payload)
+        .bind(&record.cost_payload)
+        .bind(record.occurred_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| GatewayError::Internal {
+            message: format!("failed to insert usage event: {error}"),
+        })?;
+        if insert.rows_affected() == 0 {
+            transaction
+                .commit()
+                .await
+                .map_err(|error| GatewayError::Internal {
+                    message: format!("failed to commit duplicate usage event transaction: {error}"),
+                })?;
+            return Ok(());
+        }
+        for bucket_kind in ["event", "minute", "hour", "day", "month"] {
+            let bucket = ledger_bucket_record_for_event(record, bucket_kind)?;
+            upsert_ledger_bucket(&mut transaction, &bucket, record).await?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| GatewayError::Internal {
+                message: format!("failed to commit usage event transaction: {error}"),
+            })?;
+        Ok(())
+    }
+
+    /// Lists usage events for one tenant.
+    pub async fn usage_events_for_tenant(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+    ) -> Result<Vec<UsageEventRecord>> {
+        let rows = sqlx::query(
+            r"
+            SELECT
+                usage_event_id,
+                tenant_id,
+                organization_id,
+                project_id,
+                principal_id,
+                project_member_id,
+                service_account_id,
+                api_key_id,
+                request_id,
+                trace_id,
+                protocol_family,
+                route_decision_id,
+                model_alias_id,
+                model_target_id,
+                route_policy_id,
+                routing_group_id,
+                provider_endpoint_id,
+                upstream_credential_id,
+                usage_confidence,
+                latency_ms,
+                time_to_first_token_ms,
+                status,
+                usage_payload,
+                cost_payload,
+                occurred_at
+            FROM gateway_usage_events
+            WHERE tenant_id = $1
+            ORDER BY occurred_at DESC, usage_event_id ASC
+            LIMIT $2
+            ",
+        )
+        .bind(tenant_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| GatewayError::Internal {
+            message: format!("failed to list usage events: {error}"),
+        })?;
+
+        rows.iter().map(usage_event_record_from_row).collect()
+    }
+
+    /// Lists ledger buckets for one tenant.
+    pub async fn ledger_buckets_for_tenant(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+    ) -> Result<Vec<LedgerBucketRecord>> {
+        let rows = sqlx::query(
+            r"
+            SELECT
+                ledger_bucket_id,
+                tenant_id,
+                organization_id,
+                project_id,
+                principal_id,
+                project_member_id,
+                service_account_id,
+                api_key_id,
+                model_alias_id,
+                model_target_id,
+                provider_endpoint_id,
+                upstream_credential_id,
+                route_policy_id,
+                routing_group_id,
+                protocol_family,
+                status,
+                usage_confidence,
+                bucket_kind,
+                bucket_start,
+                currency_code,
+                input_tokens,
+                output_tokens,
+                reasoning_tokens,
+                media_units,
+                request_count,
+                success_count,
+                error_count,
+                blocked_count,
+                usage_missing_count,
+                usage_estimated_count,
+                estimated_cost_micros,
+                pricing_version,
+                updated_at
+            FROM gateway_ledger_buckets
+            WHERE tenant_id = $1
+            ORDER BY bucket_start DESC, ledger_bucket_id ASC
+            LIMIT $2
+            ",
+        )
+        .bind(tenant_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| GatewayError::Internal {
+            message: format!("failed to list ledger buckets: {error}"),
+        })?;
+
+        rows.iter().map(ledger_bucket_record_from_row).collect()
+    }
+
     /// Lists route decisions for one tenant.
     pub async fn route_decisions_for_tenant(
         &self,
@@ -9215,6 +9605,128 @@ async fn upsert_config_publication_pointer(
     Ok(())
 }
 
+const LEDGER_BUCKET_UPSERT_SQL: &str = r"
+    INSERT INTO gateway_ledger_buckets (
+        ledger_bucket_id,
+        tenant_id,
+        organization_id,
+        project_id,
+        principal_id,
+        project_member_id,
+        service_account_id,
+        api_key_id,
+        model_alias_id,
+        model_target_id,
+        provider_endpoint_id,
+        upstream_credential_id,
+        route_policy_id,
+        routing_group_id,
+        protocol_family,
+        status,
+        usage_confidence,
+        bucket_kind,
+        bucket_start,
+        currency_code,
+        input_tokens,
+        output_tokens,
+        reasoning_tokens,
+        media_units,
+        request_count,
+        success_count,
+        error_count,
+        blocked_count,
+        usage_missing_count,
+        usage_estimated_count,
+        estimated_cost_micros,
+        latency_ms_sum,
+        latency_sample_count,
+        ttft_ms_sum,
+        ttft_sample_count,
+        pricing_version,
+        updated_at
+    )
+    VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8,
+        $9, $10, $11, $12, $13, $14, $15, $16,
+        $17, $18, $19, $20, $21, $22, $23, $24,
+        $25, $26, $27, $28, $29, $30, $31, $32,
+        $33, $34, $35, $36, $37
+    )
+    ON CONFLICT (ledger_bucket_id) DO UPDATE SET
+        input_tokens = gateway_ledger_buckets.input_tokens + EXCLUDED.input_tokens,
+        output_tokens = gateway_ledger_buckets.output_tokens + EXCLUDED.output_tokens,
+        reasoning_tokens = gateway_ledger_buckets.reasoning_tokens + EXCLUDED.reasoning_tokens,
+        media_units = gateway_ledger_buckets.media_units + EXCLUDED.media_units,
+        request_count = gateway_ledger_buckets.request_count + EXCLUDED.request_count,
+        success_count = gateway_ledger_buckets.success_count + EXCLUDED.success_count,
+        error_count = gateway_ledger_buckets.error_count + EXCLUDED.error_count,
+        blocked_count = gateway_ledger_buckets.blocked_count + EXCLUDED.blocked_count,
+        usage_missing_count = gateway_ledger_buckets.usage_missing_count + EXCLUDED.usage_missing_count,
+        usage_estimated_count = gateway_ledger_buckets.usage_estimated_count + EXCLUDED.usage_estimated_count,
+        estimated_cost_micros = gateway_ledger_buckets.estimated_cost_micros + EXCLUDED.estimated_cost_micros,
+        latency_ms_sum = gateway_ledger_buckets.latency_ms_sum + EXCLUDED.latency_ms_sum,
+        latency_sample_count = gateway_ledger_buckets.latency_sample_count + EXCLUDED.latency_sample_count,
+        ttft_ms_sum = gateway_ledger_buckets.ttft_ms_sum + EXCLUDED.ttft_ms_sum,
+        ttft_sample_count = gateway_ledger_buckets.ttft_sample_count + EXCLUDED.ttft_sample_count,
+        updated_at = GREATEST(gateway_ledger_buckets.updated_at, EXCLUDED.updated_at)
+    ";
+
+async fn upsert_ledger_bucket(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    bucket: &LedgerBucketRecord,
+    source_event: &UsageEventRecord,
+) -> Result<()> {
+    let protocol_family = bucket.protocol_family.map(ProtocolFamily::as_str);
+    let latency_ms_sum = source_event.latency_ms.unwrap_or(0);
+    let latency_sample_count = i64::from(source_event.latency_ms.is_some());
+    let ttft_ms_sum = source_event.time_to_first_token_ms.unwrap_or(0);
+    let ttft_sample_count = i64::from(source_event.time_to_first_token_ms.is_some());
+    sqlx::query(LEDGER_BUCKET_UPSERT_SQL)
+        .bind(&bucket.ledger_bucket_id)
+        .bind(&bucket.tenant_id)
+        .bind(&bucket.organization_id)
+        .bind(&bucket.project_id)
+        .bind(&bucket.principal_id)
+        .bind(&bucket.project_member_id)
+        .bind(&bucket.service_account_id)
+        .bind(&bucket.api_key_id)
+        .bind(&bucket.model_alias_id)
+        .bind(&bucket.model_target_id)
+        .bind(&bucket.provider_endpoint_id)
+        .bind(&bucket.upstream_credential_id)
+        .bind(&bucket.route_policy_id)
+        .bind(&bucket.routing_group_id)
+        .bind(protocol_family)
+        .bind(&bucket.status)
+        .bind(&bucket.usage_confidence)
+        .bind(&bucket.bucket_kind)
+        .bind(bucket.bucket_start)
+        .bind(&bucket.currency_code)
+        .bind(bucket.input_tokens)
+        .bind(bucket.output_tokens)
+        .bind(bucket.reasoning_tokens)
+        .bind(bucket.media_units)
+        .bind(bucket.request_count)
+        .bind(bucket.success_count)
+        .bind(bucket.error_count)
+        .bind(bucket.blocked_count)
+        .bind(bucket.usage_missing_count)
+        .bind(bucket.usage_estimated_count)
+        .bind(bucket.estimated_cost_micros)
+        .bind(latency_ms_sum)
+        .bind(latency_sample_count)
+        .bind(ttft_ms_sum)
+        .bind(ttft_sample_count)
+        .bind(&bucket.pricing_version)
+        .bind(bucket.updated_at)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| GatewayError::Internal {
+            message: format!("failed to upsert ledger bucket: {error}"),
+        })?;
+    Ok(())
+}
+
 fn api_key_record_from_row(row: &sqlx::postgres::PgRow) -> Result<ApiKeyRecord> {
     let allowed_actions = row.get("allowed_actions");
     let allowed_resources = row.get("allowed_resources");
@@ -9412,6 +9924,79 @@ fn route_attempt_record_from_row(row: &sqlx::postgres::PgRow) -> Result<RouteAtt
     })
 }
 
+fn usage_event_record_from_row(row: &sqlx::postgres::PgRow) -> Result<UsageEventRecord> {
+    Ok(UsageEventRecord {
+        usage_event_id: row.get("usage_event_id"),
+        tenant_id: row.get("tenant_id"),
+        organization_id: row.get("organization_id"),
+        project_id: row.get("project_id"),
+        principal_id: row.get("principal_id"),
+        project_member_id: row.get("project_member_id"),
+        service_account_id: row.get("service_account_id"),
+        api_key_id: row.get("api_key_id"),
+        request_id: row.get("request_id"),
+        trace_id: row.get("trace_id"),
+        protocol_family: parse_protocol_family(row.get("protocol_family"))?,
+        route_decision_id: row.get("route_decision_id"),
+        model_alias_id: row.get("model_alias_id"),
+        model_target_id: row.get("model_target_id"),
+        route_policy_id: row.get("route_policy_id"),
+        routing_group_id: row.get("routing_group_id"),
+        provider_endpoint_id: row.get("provider_endpoint_id"),
+        upstream_credential_id: row.get("upstream_credential_id"),
+        usage_confidence: row.get("usage_confidence"),
+        latency_ms: row.get("latency_ms"),
+        time_to_first_token_ms: row.get("time_to_first_token_ms"),
+        status: row.get("status"),
+        usage_payload: row.get("usage_payload"),
+        cost_payload: row.get("cost_payload"),
+        occurred_at: row.get("occurred_at"),
+    })
+}
+
+fn ledger_bucket_record_from_row(row: &sqlx::postgres::PgRow) -> Result<LedgerBucketRecord> {
+    let protocol_family = row
+        .get::<Option<String>, _>("protocol_family")
+        .as_deref()
+        .map(parse_protocol_family)
+        .transpose()?;
+    Ok(LedgerBucketRecord {
+        ledger_bucket_id: row.get("ledger_bucket_id"),
+        tenant_id: row.get("tenant_id"),
+        organization_id: row.get("organization_id"),
+        project_id: row.get("project_id"),
+        principal_id: row.get("principal_id"),
+        project_member_id: row.get("project_member_id"),
+        service_account_id: row.get("service_account_id"),
+        api_key_id: row.get("api_key_id"),
+        model_alias_id: row.get("model_alias_id"),
+        model_target_id: row.get("model_target_id"),
+        provider_endpoint_id: row.get("provider_endpoint_id"),
+        upstream_credential_id: row.get("upstream_credential_id"),
+        route_policy_id: row.get("route_policy_id"),
+        routing_group_id: row.get("routing_group_id"),
+        protocol_family,
+        status: row.get("status"),
+        usage_confidence: row.get("usage_confidence"),
+        bucket_kind: row.get("bucket_kind"),
+        bucket_start: row.get("bucket_start"),
+        currency_code: row.get("currency_code"),
+        input_tokens: row.get("input_tokens"),
+        output_tokens: row.get("output_tokens"),
+        reasoning_tokens: row.get("reasoning_tokens"),
+        media_units: row.get("media_units"),
+        request_count: row.get("request_count"),
+        success_count: row.get("success_count"),
+        error_count: row.get("error_count"),
+        blocked_count: row.get("blocked_count"),
+        usage_missing_count: row.get("usage_missing_count"),
+        usage_estimated_count: row.get("usage_estimated_count"),
+        estimated_cost_micros: row.get("estimated_cost_micros"),
+        pricing_version: row.get("pricing_version"),
+        updated_at: row.get("updated_at"),
+    })
+}
+
 fn checked_u16(value: i32, field: &str) -> Result<u16> {
     u16::try_from(value).map_err(|error| GatewayError::Internal {
         message: format!("invalid {field}: {error}"),
@@ -9515,6 +10100,14 @@ fn parse_auth_session_status(value: &str) -> Result<AuthSessionStatus> {
     }
 }
 
+const fn auth_session_status_as_str(status: &AuthSessionStatus) -> &'static str {
+    match status {
+        AuthSessionStatus::Active => "active",
+        AuthSessionStatus::Revoked => "revoked",
+        AuthSessionStatus::Expired => "expired",
+    }
+}
+
 fn parse_directory_status(value: &str) -> Result<DirectoryStatus> {
     match value {
         "active" => Ok(DirectoryStatus::Active),
@@ -9552,13 +10145,21 @@ fn parse_membership_status(value: &str) -> Result<MembershipStatus> {
 
 #[cfg(test)]
 mod tests {
-    use crate::domain::DirectoryStatus;
+    use serde_json::json;
+
+    use crate::domain::{DirectoryStatus, UsageEventRecord};
     use crate::fixtures::bootstrap_request;
-    use crate::storage::{InMemoryGatewayStore, TenancyBootstrapRepository, TenancyRepository};
+    use crate::storage::{
+        ledger_bucket_record_for_event, InMemoryGatewayStore, TenancyBootstrapRepository,
+        TenancyRepository,
+    };
+    use crate::ProtocolFamily;
 
     const CORE_SCHEMA: &str = include_str!("../migrations/20260625000001_core_schema.sql");
     const ROUTE_EVIDENCE_FIELDS_MIGRATION: &str =
         include_str!("../migrations/20260628000001_route_evidence_fields.sql");
+    const USAGE_EVENT_TRACE_ID_MIGRATION: &str =
+        include_str!("../migrations/20260628000002_usage_event_trace_id.sql");
 
     #[test]
     fn in_memory_bootstrap_default_project_is_idempotent() {
@@ -9755,6 +10356,39 @@ mod tests {
     }
 
     #[test]
+    fn usage_event_trace_migration_preserves_runtime_trace_evidence() {
+        for token in [
+            "ADD COLUMN IF NOT EXISTS trace_id TEXT",
+            "ALTER COLUMN trace_id SET NOT NULL",
+            "gateway_usage_trace_time_idx",
+        ] {
+            assert!(
+                USAGE_EVENT_TRACE_ID_MIGRATION.contains(token),
+                "missing usage trace migration token {token}"
+            );
+        }
+    }
+
+    #[test]
+    fn usage_ledger_bucket_ids_are_stable_for_nullable_dimensions() {
+        let record = usage_event_for_ledger_test();
+        let left = match ledger_bucket_record_for_event(&record, "minute") {
+            Ok(bucket) => bucket,
+            Err(error) => panic!("left bucket should fold: {error}"),
+        };
+        let right = match ledger_bucket_record_for_event(&record, "minute") {
+            Ok(bucket) => bucket,
+            Err(error) => panic!("right bucket should fold: {error}"),
+        };
+
+        assert_eq!(left.ledger_bucket_id, right.ledger_bucket_id);
+        assert!(left.ledger_bucket_id.starts_with("lb_"));
+        assert_eq!(left.request_count, 1);
+        assert_eq!(left.input_tokens, 3);
+        assert_eq!(left.output_tokens, 5);
+    }
+
+    #[test]
     fn core_schema_stores_config_snapshot_documents_for_runtime_replay() {
         for token in [
             "snapshot_document JSONB NOT NULL DEFAULT '{}'::jsonb",
@@ -9766,6 +10400,43 @@ mod tests {
                 CORE_SCHEMA.contains(token),
                 "missing config snapshot schema token {token}"
             );
+        }
+    }
+
+    fn usage_event_for_ledger_test() -> UsageEventRecord {
+        UsageEventRecord {
+            usage_event_id: "use_test".to_owned(),
+            tenant_id: "ten_test".to_owned(),
+            organization_id: Some("org_test".to_owned()),
+            project_id: Some("prj_test".to_owned()),
+            principal_id: Some("usr_test".to_owned()),
+            project_member_id: None,
+            service_account_id: None,
+            api_key_id: Some("ak_test".to_owned()),
+            request_id: "req_test".to_owned(),
+            trace_id: "tr_test".to_owned(),
+            protocol_family: ProtocolFamily::OpenAiResponses,
+            route_decision_id: Some("rd_test".to_owned()),
+            model_alias_id: Some("ma_test".to_owned()),
+            model_target_id: Some("mt_test".to_owned()),
+            route_policy_id: Some("rp_test".to_owned()),
+            routing_group_id: Some("rg_test".to_owned()),
+            provider_endpoint_id: Some("pe_test".to_owned()),
+            upstream_credential_id: None,
+            usage_confidence: "exact".to_owned(),
+            latency_ms: Some(42),
+            time_to_first_token_ms: Some(11),
+            status: "success".to_owned(),
+            usage_payload: json!({
+                "input_tokens": 3,
+                "output_tokens": 5
+            }),
+            cost_payload: json!({
+                "currency": "USD",
+                "total_cost": 7,
+                "pricing_version": "test"
+            }),
+            occurred_at: chrono::DateTime::from_timestamp_nanos(1_800_000_123_000_000_000),
         }
     }
 
