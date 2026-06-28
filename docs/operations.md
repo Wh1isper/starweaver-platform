@@ -67,6 +67,20 @@ STARWEAVER_GATEWAY_RUNTIME_STORE=postgres
 STARWEAVER_GATEWAY_DATABASE_URL=postgres://gateway:gateway@postgres:5432/starweaver_gateway
 ```
 
+Self-hosted deployments can use the local file secret backend for provider
+credentials, webhook signing secrets, OTel collector headers, and OIDC client
+secrets. The backend stores secret material outside PostgreSQL while keeping
+only safe `secret_ref` metadata in the database:
+
+```bash
+STARWEAVER_GATEWAY_SECRET_BACKEND=file
+STARWEAVER_GATEWAY_SECRET_BACKEND_FILE_DIR=/data/gateway-secrets
+```
+
+The current gateway binary accepts only `memory` and `file` secret backend
+profiles. Production startup rejects `memory`, and external or KMS-backed
+profiles must not be configured until their backend is implemented.
+
 ## Gateway Fake-Provider Load And Soak Harnesses
 
 The repository includes deterministic load and soak harnesses that run against

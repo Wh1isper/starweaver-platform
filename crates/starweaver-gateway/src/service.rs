@@ -93,10 +93,11 @@ use crate::storage::{
     ExternalIdentityRepository, IdempotencyRecord, InMemoryGatewayStore,
     NotificationOutboxRepository, NullablePatch, OrganizationInvitationRepository,
     PostgresGatewayStore, ProviderAdminRepository, RecordOtelExporterHealthRequest,
-    RuntimePolicyRepository, SecretRefAdminRepository, ServiceAccountAdminRepository,
-    StartCodexOAuthSessionRequest, TenancyBootstrapRepository, TenancyRepository,
-    UpdateModelAliasRequest, UpdateNotificationSinkRequest, UpdateOtelExportConfigRequest,
-    UpsertExternalLoginIdentityRequest, UsageAccountingRepository, ValidationDiagnosticRepository,
+    RotateSecretRefRequest, RuntimePolicyRepository, SecretRefAdminRepository,
+    ServiceAccountAdminRepository, StartCodexOAuthSessionRequest, TenancyBootstrapRepository,
+    TenancyRepository, UpdateModelAliasRequest, UpdateNotificationSinkRequest,
+    UpdateOtelExportConfigRequest, UpsertExternalLoginIdentityRequest, UsageAccountingRepository,
+    ValidationDiagnosticRepository,
 };
 use crate::{ProtocolFamily, SERVICE_NAME};
 
@@ -226,6 +227,8 @@ const ADMIN_CODEX_OAUTH_REFRESH_STATUS_GET_PATH: &str = concat!(
 const ADMIN_SECRET_REF_GET_PATH: &str = concat!("/admin/v1/secret-refs/", "{secret_ref_id}");
 const ADMIN_SECRET_REF_LOCATOR_PATH: &str =
     concat!("/admin/v1/secret-refs/", "{secret_ref_id}", "/locator");
+const ADMIN_SECRET_REF_ROTATE_PATH: &str =
+    concat!("/admin/v1/secret-refs/", "{secret_ref_id}", "/rotate");
 const ADMIN_MODEL_TARGET_GET_PATH: &str = concat!("/admin/v1/model-targets/", "{model_target_id}");
 const ADMIN_MODEL_ALIAS_GET_PATH: &str = concat!("/admin/v1/model-aliases/", "{model_alias_id}");
 const ADMIN_SERVICE_ACCOUNT_GET_PATH: &str =
@@ -417,6 +420,8 @@ pub struct GatewayConfig {
     pub cors_allowed_origins: Vec<String>,
     /// Secret backend profile name.
     pub secret_backend_profile: String,
+    /// Optional local file secret backend root.
+    pub secret_backend_file_dir: Option<String>,
     /// Telemetry profile name.
     pub telemetry_profile: String,
     /// Whether browser session cookies must be marked Secure.
@@ -613,6 +618,7 @@ impl Default for GatewayConfig {
             public_base_url: None,
             cors_allowed_origins: Vec::new(),
             secret_backend_profile: "memory".to_owned(),
+            secret_backend_file_dir: None,
             telemetry_profile: "disabled".to_owned(),
             session_cookie_secure: false,
             session_cookie_http_only: true,
@@ -664,8 +670,11 @@ impl GatewayConfig {
         }
         if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_SECRET_BACKEND") {
             if let Some(value) = non_empty_env(&value) {
-                config.secret_backend_profile = value;
+                config.secret_backend_profile = value.to_ascii_lowercase();
             }
+        }
+        if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_SECRET_BACKEND_FILE_DIR") {
+            config.secret_backend_file_dir = non_empty_env(&value);
         }
         if let Ok(value) = std::env::var("STARWEAVER_GATEWAY_TELEMETRY") {
             if let Some(value) = non_empty_env(&value) {
@@ -807,6 +816,7 @@ struct StartupDiagnostic {
 fn production_profile_diagnostics(config: &GatewayConfig) -> Vec<StartupDiagnostic> {
     let mut diagnostics = Vec::new();
     push_runtime_store_diagnostics(config, &mut diagnostics);
+    push_secret_backend_profile_diagnostics(config, &mut diagnostics);
     if !is_production_environment(&config.environment) {
         return diagnostics;
     }
@@ -832,6 +842,21 @@ fn push_runtime_store_diagnostics(
             diagnostics.push(StartupDiagnostic {
                 code: "runtime_store_profile_unsupported",
                 message: "HTTP runtime store profile must be memory or postgres",
+            });
+        }
+    }
+}
+
+fn push_secret_backend_profile_diagnostics(
+    config: &GatewayConfig,
+    diagnostics: &mut Vec<StartupDiagnostic>,
+) {
+    match config.secret_backend_profile.as_str() {
+        "memory" | "file" => {}
+        _ => {
+            diagnostics.push(StartupDiagnostic {
+                code: "secret_backend_profile_unsupported",
+                message: "secret backend profile must be memory or file",
             });
         }
     }
@@ -863,6 +888,12 @@ fn push_production_dependency_diagnostics(
         diagnostics.push(StartupDiagnostic {
             code: "durable_secret_backend_required",
             message: "production must not use the in-memory secret backend",
+        });
+    }
+    if config.secret_backend_profile == "file" && config.secret_backend_file_dir.is_none() {
+        diagnostics.push(StartupDiagnostic {
+            code: "secret_backend_file_dir_required",
+            message: "file secret backend requires STARWEAVER_GATEWAY_SECRET_BACKEND_FILE_DIR",
         });
     }
     if config.telemetry_profile == "disabled" {
@@ -1310,8 +1341,12 @@ fn secret_ref_admin_routes() -> Router<AppState> {
             "/admin/v1/secret-refs",
             get(list_secret_refs).post(create_secret_ref),
         )
-        .route(ADMIN_SECRET_REF_GET_PATH, get(get_secret_ref))
+        .route(
+            ADMIN_SECRET_REF_GET_PATH,
+            get(get_secret_ref).patch(update_secret_ref),
+        )
         .route(ADMIN_SECRET_REF_LOCATOR_PATH, get(get_secret_ref_locator))
+        .route(ADMIN_SECRET_REF_ROTATE_PATH, post(rotate_secret_ref))
 }
 
 fn codex_oauth_admin_routes() -> Router<AppState> {
@@ -1754,6 +1789,9 @@ pub async fn run(config: GatewayConfig) -> crate::error::Result<()> {
 pub async fn build_app_state(config: GatewayConfig) -> crate::error::Result<AppState> {
     validate_gateway_config(&config)?;
     let store = InMemoryGatewayStore::default();
+    if let Some(dir) = config.secret_backend_file_dir.as_ref() {
+        store.set_secret_file_backend_dir(dir);
+    }
     bootstrap_single_user_if_configured(&store, &config, chrono::Utc::now())?;
     if let Some(database_url) = config.database_url.as_deref() {
         let pool = PgPoolOptions::new()
@@ -2242,6 +2280,21 @@ struct AdminCreateSecretRefRequest {
     #[serde(default = "default_secret_ref_backend_kind")]
     backend_kind: String,
     secret_value: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AdminUpdateSecretRefRequest {
+    expected_version: i64,
+    status: SecretRefStatus,
+    reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AdminRotateSecretRefRequest {
+    idempotency_key: String,
+    expected_version: i64,
+    secret_value: String,
+    reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -3144,10 +3197,10 @@ fn redis_host_port(redis_url: &str) -> Option<(String, u16)> {
 }
 
 fn secret_backend_readiness_status(config: &GatewayConfig) -> &'static str {
-    if config.secret_backend_profile == "memory" {
-        "memory"
-    } else {
-        "profile_configured"
+    match config.secret_backend_profile.as_str() {
+        "memory" => "memory",
+        "file" => "file",
+        _ => "unsupported",
     }
 }
 
@@ -6893,6 +6946,57 @@ async fn get_secret_ref(
     })))
 }
 
+async fn update_secret_ref(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(secret_ref_id): Path<String>,
+    Json(request): Json<AdminUpdateSecretRefRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::PATCH,
+        ADMIN_SECRET_REF_GET_PATH,
+        &secret_ref_id,
+        now,
+    )
+    .await?;
+    let before = secret_ref_for_actor(&state, &actor, &secret_ref_id)?;
+    let updated = state.store.update_secret_ref_status(
+        &secret_ref_id,
+        request.expected_version,
+        request.status,
+        now,
+    )?;
+    let audit_event_id = record_admin_resource_audit(
+        &state,
+        &actor,
+        AdminResourceAuditInput {
+            event_type: "gateway.secret_ref.update",
+            scope_kind: "tenant",
+            scope_id: actor.tenant_id.clone(),
+            resource_kind: "SecretRef",
+            resource_id: updated.secret_ref_id.clone(),
+            before_version: Some(before.resource_version),
+            after_version: Some(updated.resource_version),
+            redacted_diff: json!({
+                "status": {
+                    "before": before.status.as_str(),
+                    "after": updated.status.as_str()
+                },
+                "reason": request.reason
+            }),
+            occurred_at: now,
+        },
+    );
+    Ok(Json(json!({
+        "schema": "gateway.admin.secret_ref_mutation.v1",
+        "resource": secret_ref_resource_body(&updated),
+        "audit_event_id": audit_event_id
+    })))
+}
+
 async fn get_secret_ref_locator(
     State(state): State<AppState>,
     Extension(actor): Extension<AuthenticatedActor>,
@@ -6913,6 +7017,90 @@ async fn get_secret_ref_locator(
         "schema": "gateway.admin.secret_ref_locator.v1",
         "resource": secret_ref_locator_resource_body(&secret_ref)
     })))
+}
+
+async fn rotate_secret_ref(
+    State(state): State<AppState>,
+    Extension(actor): Extension<AuthenticatedActor>,
+    Path(secret_ref_id): Path<String>,
+    Json(request): Json<AdminRotateSecretRefRequest>,
+) -> Result<Json<Value>> {
+    let now = chrono::Utc::now();
+    validate_idempotency_key(&request.idempotency_key)?;
+    authorize_admin_route(
+        &state,
+        &actor,
+        &Method::POST,
+        ADMIN_SECRET_REF_ROTATE_PATH,
+        &secret_ref_id,
+        now,
+    )
+    .await?;
+    let before = secret_ref_for_actor(&state, &actor, &secret_ref_id)?;
+    let request_hash = stable_request_hash(&request)?;
+    let scope_key = idempotency_scope_key(
+        &format!("secret_refs:rotate:{secret_ref_id}"),
+        &request.idempotency_key,
+    );
+    if let Some(response) =
+        state
+            .store
+            .idempotency_response(&actor.tenant_id, &scope_key, &request_hash, now)?
+    {
+        return Ok(Json(response_with_replay_flag(response, true)));
+    }
+    let updated = state.store.rotate_secret_ref(
+        RotateSecretRefRequest {
+            secret_ref_id: secret_ref_id.clone(),
+            expected_version: request.expected_version,
+            secret_value: SecretString::from(request.secret_value),
+        },
+        now,
+    )?;
+    let audit_event_id = record_admin_resource_audit(
+        &state,
+        &actor,
+        AdminResourceAuditInput {
+            event_type: "gateway.secret_ref.rotate",
+            scope_kind: "tenant",
+            scope_id: actor.tenant_id.clone(),
+            resource_kind: "SecretRef",
+            resource_id: updated.secret_ref_id.clone(),
+            before_version: Some(before.resource_version),
+            after_version: Some(updated.resource_version),
+            redacted_diff: json!({
+                "display_mask": {
+                    "before": before.display_mask,
+                    "after": updated.display_mask
+                },
+                "fingerprint": {
+                    "before": before.fingerprint,
+                    "after": updated.fingerprint
+                },
+                "status": {
+                    "before": before.status.as_str(),
+                    "after": updated.status.as_str()
+                },
+                "reason": request.reason
+            }),
+            occurred_at: now,
+        },
+    );
+    let response = json!({
+        "schema": "gateway.admin.secret_ref_mutation.v1",
+        "resource": secret_ref_resource_body(&updated),
+        "audit_event_id": audit_event_id,
+        "idempotency_replayed": false
+    });
+    state.store.record_idempotency_response(IdempotencyRecord {
+        tenant_id: actor.tenant_id,
+        scope_key,
+        request_hash,
+        response_record: response.clone(),
+        expires_at: now + chrono::Duration::hours(IDEMPOTENCY_TTL_HOURS),
+        created_at: now,
+    });
+    Ok(Json(response))
 }
 
 async fn list_codex_oauth_connections(
@@ -16839,7 +17027,9 @@ fn validate_otel_export_shape_fields(
     if safe_otel_endpoint_host_for_config(config, &request.endpoint_url).is_none() {
         errors.push(validation_error("endpoint_url", "invalid_endpoint_url"));
     }
-    if !matches!(request.protocol.as_str(), "otlp_http" | "otlp_grpc") {
+    if request.protocol == "otlp_grpc" {
+        errors.push(validation_error("protocol", "unsupported_protocol"));
+    } else if request.protocol != "otlp_http" {
         errors.push(validation_error("protocol", "invalid_protocol"));
     }
     validate_otel_header_ref_fields(&request.header_refs, errors);
@@ -22326,6 +22516,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn build_app_state_configures_file_secret_backend_dir() {
+        let dir = std::env::temp_dir().join(new_prefixed_id("gateway_file_secret_state_test"));
+        let dir_text = dir.to_string_lossy().to_string();
+        let state = build_app_state(GatewayConfig {
+            secret_backend_profile: "file".to_owned(),
+            secret_backend_file_dir: Some(dir_text),
+            background_worker_mode: BackgroundWorkerMode::Disabled,
+            ..GatewayConfig::default()
+        })
+        .await
+        .unwrap_or_else(|error| panic!("file secret app state should build: {error}"));
+        let record = state
+            .store()
+            .create_secret_ref(
+                CreateSecretRefRequest {
+                    tenant_id: TEST_TENANT_ID.to_owned(),
+                    organization_id: None,
+                    project_id: None,
+                    purpose: "state file backend secret".to_owned(),
+                    backend_kind: "file".to_owned(),
+                    secret_value: secrecy::SecretString::from("state-file-secret"),
+                    created_by: TEST_USER_ID.to_owned(),
+                },
+                chrono::Utc::now(),
+            )
+            .unwrap_or_else(|error| panic!("file secret ref should create: {error}"));
+
+        assert_eq!(record.backend_kind, "file");
+        assert_eq!(
+            state
+                .store()
+                .secret_value(&record.secret_ref_id)
+                .map(|value| value.expose_secret().to_owned()),
+            Some("state-file-secret".to_owned())
+        );
+        let _ = std::fs::remove_file(dir.join(format!("{}.secret", record.secret_ref_id)));
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    #[tokio::test]
     async fn build_app_state_with_database_url_requires_connectable_postgres_for_route_evidence() {
         let Err(error) = build_app_state(GatewayConfig {
             database_url: Some("not-a-postgres-url".to_owned()),
@@ -22531,6 +22761,66 @@ mod tests {
     }
 
     #[test]
+    fn gateway_config_from_env_reads_file_secret_backend_controls() {
+        const KEYS: &[&str] = &[
+            "STARWEAVER_GATEWAY_SECRET_BACKEND",
+            "STARWEAVER_GATEWAY_SECRET_BACKEND_FILE_DIR",
+        ];
+
+        let _lock = ENV_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = EnvRestore::capture(KEYS);
+        for key in KEYS {
+            std::env::remove_var(key);
+        }
+
+        std::env::set_var("STARWEAVER_GATEWAY_SECRET_BACKEND", " File ");
+        std::env::set_var(
+            "STARWEAVER_GATEWAY_SECRET_BACKEND_FILE_DIR",
+            " /var/lib/starweaver-gateway/secrets ",
+        );
+        let config = GatewayConfig::from_env();
+        assert_eq!(config.secret_backend_profile, "file");
+        assert_eq!(
+            config.secret_backend_file_dir.as_deref(),
+            Some("/var/lib/starweaver-gateway/secrets")
+        );
+
+        let missing_dir = match validate_gateway_config(&GatewayConfig {
+            environment: "production".to_owned(),
+            database_url: Some("postgres://gateway.example/starweaver".to_owned()),
+            redis_url: Some("rediss://redis.example/0".to_owned()),
+            runtime_store_profile: "postgres".to_owned(),
+            secret_backend_profile: "file".to_owned(),
+            telemetry_profile: "otlp".to_owned(),
+            public_base_url: Some("https://gateway.example.com".to_owned()),
+            cors_allowed_origins: vec!["https://admin.example.com".to_owned()],
+            session_cookie_secure: true,
+            require_published_snapshot: true,
+            dependency_probe_mode: DependencyProbeMode::Live,
+            ..GatewayConfig::default()
+        }) {
+            Ok(()) => panic!("file secret backend should require a file directory"),
+            Err(error) => error,
+        };
+        assert!(missing_dir
+            .to_string()
+            .contains("secret_backend_file_dir_required"));
+
+        let unsupported_profile = match validate_gateway_config(&GatewayConfig {
+            secret_backend_profile: "gcp-secret-manager".to_owned(),
+            ..GatewayConfig::default()
+        }) {
+            Ok(()) => panic!("unsupported secret backend profile should be rejected"),
+            Err(error) => error,
+        };
+        assert!(unsupported_profile
+            .to_string()
+            .contains("secret_backend_profile_unsupported"));
+    }
+
+    #[test]
     fn gateway_config_from_env_reads_external_object_storage_controls() {
         const KEYS: &[&str] = &[
             "STARWEAVER_GATEWAY_EXPORT_OBJECT_STORAGE_URL",
@@ -22594,7 +22884,8 @@ mod tests {
             database_url: Some("postgres://gateway.example/starweaver".to_owned()),
             redis_url: Some("rediss://redis.example/0".to_owned()),
             runtime_store_profile: "postgres".to_owned(),
-            secret_backend_profile: "gcp-secret-manager".to_owned(),
+            secret_backend_profile: "file".to_owned(),
+            secret_backend_file_dir: Some("/var/lib/starweaver-gateway/secrets".to_owned()),
             telemetry_profile: "otlp".to_owned(),
             public_base_url: Some("https://gateway.example.com".to_owned()),
             cors_allowed_origins: vec!["https://admin.example.com".to_owned()],
@@ -22738,6 +23029,7 @@ mod tests {
             "STARWEAVER_GATEWAY_RUNTIME_STORE",
             "STARWEAVER_GATEWAY_ENV",
             "STARWEAVER_GATEWAY_SECRET_BACKEND",
+            "STARWEAVER_GATEWAY_SECRET_BACKEND_FILE_DIR",
             "STARWEAVER_GATEWAY_TELEMETRY",
             "STARWEAVER_GATEWAY_REQUIRE_SNAPSHOT",
             "STARWEAVER_GATEWAY_PUBLIC_BASE_URL",
@@ -22769,7 +23061,11 @@ mod tests {
             "postgres://gateway.example/starweaver",
         );
         std::env::set_var("STARWEAVER_GATEWAY_REDIS_URL", "rediss://redis.example/0");
-        std::env::set_var("STARWEAVER_GATEWAY_SECRET_BACKEND", "gcp-secret-manager");
+        std::env::set_var("STARWEAVER_GATEWAY_SECRET_BACKEND", "file");
+        std::env::set_var(
+            "STARWEAVER_GATEWAY_SECRET_BACKEND_FILE_DIR",
+            "/var/lib/starweaver-gateway/secrets",
+        );
         std::env::set_var("STARWEAVER_GATEWAY_TELEMETRY", "otlp");
         std::env::set_var("STARWEAVER_GATEWAY_REQUIRE_SNAPSHOT", "true");
         std::env::set_var(
@@ -22898,7 +23194,8 @@ mod tests {
             runtime_store_profile: "postgres".to_owned(),
             public_base_url: Some("http://gateway.example.com".to_owned()),
             cors_allowed_origins: vec!["*".to_owned()],
-            secret_backend_profile: "gcp-secret-manager".to_owned(),
+            secret_backend_profile: "file".to_owned(),
+            secret_backend_file_dir: Some("/var/lib/starweaver-gateway/secrets".to_owned()),
             telemetry_profile: "otlp".to_owned(),
             session_cookie_secure: true,
             session_cookie_http_only: false,
@@ -22944,6 +23241,17 @@ mod tests {
         assert!(unsupported_store
             .to_string()
             .contains("runtime_store_profile_unsupported"));
+
+        let unsupported_secret_backend = match validate_gateway_config(&GatewayConfig {
+            secret_backend_profile: "gcp-secret-manager".to_owned(),
+            ..GatewayConfig::default()
+        }) {
+            Ok(()) => panic!("unsupported secret backend profile should be rejected"),
+            Err(error) => error,
+        };
+        assert!(unsupported_secret_backend
+            .to_string()
+            .contains("secret_backend_profile_unsupported"));
     }
 
     #[tokio::test]
@@ -22954,7 +23262,8 @@ mod tests {
                 redis_url: Some("not-a-redis-url".to_owned()),
                 public_base_url: Some("https://gateway.example.com".to_owned()),
                 cors_allowed_origins: vec!["https://app.example.com".to_owned()],
-                secret_backend_profile: "gcp-secret-manager".to_owned(),
+                secret_backend_profile: "file".to_owned(),
+                secret_backend_file_dir: Some("/var/lib/starweaver-gateway/secrets".to_owned()),
                 telemetry_profile: "otlp".to_owned(),
                 session_cookie_secure: true,
                 dependency_probe_mode: DependencyProbeMode::Live,
@@ -22994,11 +23303,8 @@ mod tests {
             0
         );
         assert_eq!(body["dependencies"]["hot_state"], "invalid");
-        assert_eq!(body["dependencies"]["secret_backend"], "profile_configured");
-        assert_eq!(
-            body["dependencies"]["secret_backend_profile"],
-            "gcp-secret-manager"
-        );
+        assert_eq!(body["dependencies"]["secret_backend"], "file");
+        assert_eq!(body["dependencies"]["secret_backend_profile"], "file");
         assert_eq!(body["dependencies"]["telemetry"], "profile_configured");
         assert_eq!(body["dependencies"]["telemetry_profile"], "otlp");
         assert_eq!(body["dependencies"]["otel_exporter"], "not_configured");
@@ -27414,6 +27720,171 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_secret_ref_create_supports_file_backend_without_response_secret_material() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let dir = std::env::temp_dir().join(new_prefixed_id("gateway_file_secret_api_test"));
+        store.set_secret_file_backend_dir(&dir);
+        let mut request =
+            valid_secret_ref_request("idem_secret_ref_file_create", "file-api-secret");
+        request["backend_kind"] = json!("file");
+
+        let response = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/secret-refs",
+            request,
+        )
+        .await;
+        let status = response.status();
+        let body = response_json(response).await;
+        let secret_ref_id = body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("secret ref id should be present"))
+            .to_owned();
+        let locator = get_admin(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/secret-refs/{secret_ref_id}/locator"),
+        )
+        .await;
+        let locator_body = response_json(locator).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["resource"]["backend_kind"], "file");
+        assert!(body["resource"].get("secret_value").is_none());
+        assert!(body["resource"].get("backend_locator").is_none());
+        assert!(locator_body["resource"]["backend_locator"]
+            .as_str()
+            .is_some_and(|locator| locator.starts_with("file://")));
+        assert_eq!(
+            store
+                .secret_value(&secret_ref_id)
+                .map(|value| value.expose_secret().to_owned()),
+            Some("file-api-secret".to_owned())
+        );
+        assert!(!body.to_string().contains("file-api-secret"));
+        assert!(!locator_body.to_string().contains("file-api-secret"));
+        let _ = std::fs::remove_file(dir.join(format!("{secret_ref_id}.secret")));
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    #[tokio::test]
+    async fn admin_secret_ref_rotate_updates_value_and_redacts_secret_material() {
+        let (store, raw_session, raw_key) = gateway_store_with_admin_session_and_runtime_access();
+        let create = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/secret-refs",
+            valid_secret_ref_request("idem_secret_ref_rotate_create", "old-secret-value-1111"),
+        )
+        .await;
+        let create_body = response_json(create).await;
+        let secret_ref_id = create_body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("secret ref id should be present"))
+            .to_owned();
+
+        let api_key_rotate = post_admin_json_with_bearer(
+            store.clone(),
+            &raw_key,
+            &format!("/admin/v1/secret-refs/{secret_ref_id}/rotate"),
+            json!({
+                "idempotency_key": "idem_secret_ref_api_key_rotate",
+                "expected_version": 1,
+                "secret_value": "api-key-secret-value",
+                "reason": "API keys cannot rotate secret refs."
+            }),
+        )
+        .await;
+        let first = post_admin_json(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/secret-refs/{secret_ref_id}/rotate"),
+            json!({
+                "idempotency_key": "idem_secret_ref_rotate",
+                "expected_version": 1,
+                "secret_value": "rotated-secret-value-2222",
+                "reason": "Rotate provider key."
+            }),
+        )
+        .await;
+        let first_status = first.status();
+        let first_body = response_json(first).await;
+        let second = post_admin_json(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/secret-refs/{secret_ref_id}/rotate"),
+            json!({
+                "idempotency_key": "idem_secret_ref_rotate",
+                "expected_version": 1,
+                "secret_value": "rotated-secret-value-2222",
+                "reason": "Rotate provider key."
+            }),
+        )
+        .await;
+        let second_body = response_json(second).await;
+        let audit_text = serde_json::to_string(&store.audit_events())
+            .unwrap_or_else(|error| panic!("audit events should serialize: {error}"));
+
+        assert_eq!(api_key_rotate.status(), StatusCode::FORBIDDEN);
+        assert_eq!(first_status, StatusCode::OK);
+        assert_eq!(first_body["resource"]["id"], secret_ref_id);
+        assert_eq!(first_body["resource"]["display_mask"], "****2222");
+        assert_eq!(first_body["resource"]["status"], "rotating");
+        assert_eq!(first_body["resource"]["version"], 2);
+        assert_eq!(second_body["idempotency_replayed"], true);
+        assert_eq!(
+            store
+                .secret_value(&secret_ref_id)
+                .map(|value| value.expose_secret().to_owned()),
+            Some("rotated-secret-value-2222".to_owned())
+        );
+        assert!(!first_body.to_string().contains("rotated-secret-value-2222"));
+        assert!(!audit_text.contains("old-secret-value-1111"));
+        assert!(!audit_text.contains("rotated-secret-value-2222"));
+    }
+
+    #[tokio::test]
+    async fn admin_secret_ref_status_update_disables_runtime_resolution() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let create = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/secret-refs",
+            valid_secret_ref_request("idem_secret_ref_disable_create", "disable-secret-value"),
+        )
+        .await;
+        let create_body = response_json(create).await;
+        let secret_ref_id = create_body["resource"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("secret ref id should be present"))
+            .to_owned();
+
+        let update = patch_admin_json(
+            store.clone(),
+            &raw_session,
+            &format!("/admin/v1/secret-refs/{secret_ref_id}"),
+            json!({
+                "expected_version": 1,
+                "status": "disabled",
+                "reason": "Disable leaked key."
+            }),
+        )
+        .await;
+        let status = update.status();
+        let body = response_json(update).await;
+        let audit_text = serde_json::to_string(&store.audit_events())
+            .unwrap_or_else(|error| panic!("audit events should serialize: {error}"));
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["resource"]["status"], "disabled");
+        assert_eq!(body["resource"]["version"], 2);
+        assert!(store.secret_value(&secret_ref_id).is_none());
+        assert!(!body.to_string().contains("disable-secret-value"));
+        assert!(!audit_text.contains("disable-secret-value"));
+    }
+
+    #[tokio::test]
     async fn admin_upstream_credential_validate_is_dry_run() {
         let (store, raw_session) = gateway_store_with_admin_session();
 
@@ -28462,6 +28933,58 @@ mod tests {
         assert!(errors.iter().any(|error| {
             error["field"] == "timeout_seconds" && error["reason"] == "invalid_timeout"
         }));
+        assert!(store
+            .otel_export_configs_for_tenant(TEST_TENANT_ID)
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn admin_otel_export_config_rejects_otlp_grpc_until_transport_exists() {
+        let (store, raw_session) = gateway_store_with_admin_session();
+        let secret_ref_id = seed_secret_ref_for_test(
+            &store,
+            Some(TEST_ORGANIZATION_ID),
+            Some(TEST_PROJECT_ID),
+            "otel collector authorization",
+            "otel-collector-token-value",
+        );
+        let mut request =
+            valid_otel_export_config_request_with_secret("idem_otel_grpc", &secret_ref_id);
+        request["protocol"] = json!("otlp_grpc");
+        request["endpoint_url"] = json!("https://otel.example:4317");
+
+        let validation = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/observability/otel-export/configs/otel_candidate/validate",
+            request.clone(),
+        )
+        .await;
+        let validation_status = validation.status();
+        let validation_body = response_json(validation).await;
+        let create = post_admin_json(
+            store.clone(),
+            &raw_session,
+            "/admin/v1/observability/otel-export/configs",
+            request,
+        )
+        .await;
+        let create_status = create.status();
+        let create_body = response_json(create).await;
+
+        assert_eq!(validation_status, StatusCode::OK);
+        assert_eq!(validation_body["valid"], false);
+        assert!(validation_body["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.iter().any(|error| {
+                error["field"] == "protocol" && error["reason"] == "unsupported_protocol"
+            })));
+        assert_eq!(create_status, StatusCode::BAD_REQUEST);
+        assert_eq!(create_body["error"]["code"], "gateway.request.invalid");
+        assert_eq!(
+            create_body["error"]["message"],
+            "bad request: validation_failed"
+        );
         assert!(store
             .otel_export_configs_for_tenant(TEST_TENANT_ID)
             .is_empty());

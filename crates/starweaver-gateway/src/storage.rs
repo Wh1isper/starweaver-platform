@@ -1,6 +1,7 @@
 //! Storage boundaries for gateway resources.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use chrono::Datelike;
@@ -648,6 +649,22 @@ pub trait SecretRefAdminRepository: Send + Sync {
     /// Loads secret reference metadata.
     fn secret_ref(&self, secret_ref_id: &str) -> Option<SecretRefRecord>;
 
+    /// Updates secret reference lifecycle status.
+    fn update_secret_ref_status(
+        &self,
+        secret_ref_id: &str,
+        expected_version: i64,
+        status: SecretRefStatus,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<SecretRefRecord>;
+
+    /// Rotates secret material for an existing reference.
+    fn rotate_secret_ref(
+        &self,
+        request: RotateSecretRefRequest,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<SecretRefRecord>;
+
     /// Resolves secret material for runtime use.
     fn secret_value(&self, secret_ref_id: &str) -> Option<SecretString>;
 }
@@ -1102,6 +1119,17 @@ pub struct CreateSecretRefRequest {
     pub secret_value: SecretString,
     /// Creating actor.
     pub created_by: String,
+}
+
+/// Request to rotate a secret reference value.
+#[derive(Clone, Debug)]
+pub struct RotateSecretRefRequest {
+    /// Secret reference to rotate.
+    pub secret_ref_id: String,
+    /// Expected optimistic concurrency version.
+    pub expected_version: i64,
+    /// New raw secret value to store in the backend.
+    pub secret_value: SecretString,
 }
 
 /// Request to create an upstream credential admin resource.
@@ -1811,6 +1839,7 @@ pub struct InMemoryGatewayStore {
     provider_endpoints: Arc<RwLock<HashMap<String, ProviderEndpointRecord>>>,
     secret_refs: Arc<RwLock<HashMap<String, SecretRefRecord>>>,
     secret_values: Arc<RwLock<HashMap<String, SecretString>>>,
+    secret_file_backend_dir: Arc<RwLock<Option<PathBuf>>>,
     upstream_credentials: Arc<RwLock<HashMap<String, UpstreamCredentialRecord>>>,
     codex_oauth_connections: Arc<RwLock<HashMap<String, CodexOAuthConnectionRecord>>>,
     codex_oauth_sessions: Arc<RwLock<HashMap<String, CodexOAuthSessionRecord>>>,
@@ -2206,6 +2235,11 @@ impl InMemoryGatewayStore {
     /// Records an immutable audit event.
     pub fn record_audit_event(&self, record: AuditEventRecord) {
         write_lock(&self.audit_events).push(record);
+    }
+
+    /// Configures the local file secret backend root.
+    pub fn set_secret_file_backend_dir(&self, dir: impl Into<PathBuf>) {
+        *write_lock(&self.secret_file_backend_dir) = Some(dir.into());
     }
 
     /// Restores one secret reference with its backend value for backup rehearsal.
@@ -4141,14 +4175,17 @@ impl SecretRefAdminRepository for InMemoryGatewayStore {
         let secret_ref_id = crate::domain::new_prefixed_id("sec");
         let display_mask = secret_display_mask(request.secret_value.expose_secret());
         let fingerprint = secret_fingerprint(request.secret_value.expose_secret());
+        let backend_kind = request.backend_kind.clone();
+        let backend_locator =
+            secret_backend_locator(self, &backend_kind, &secret_ref_id, &request.secret_value)?;
         let record = SecretRefRecord {
-            backend_locator: format!("memory://gateway-secrets/{secret_ref_id}"),
+            backend_locator,
             secret_ref_id: secret_ref_id.clone(),
             tenant_id: request.tenant_id,
             organization_id,
             project_id,
             purpose: request.purpose.trim().to_owned(),
-            backend_kind: request.backend_kind,
+            backend_kind: backend_kind.clone(),
             display_mask,
             fingerprint,
             status: SecretRefStatus::Active,
@@ -4159,7 +4196,9 @@ impl SecretRefAdminRepository for InMemoryGatewayStore {
             updated_at: now,
         };
         write_lock(&self.secret_refs).insert(secret_ref_id.clone(), record.clone());
-        write_lock(&self.secret_values).insert(secret_ref_id, request.secret_value);
+        if backend_kind == "memory" {
+            write_lock(&self.secret_values).insert(secret_ref_id, request.secret_value);
+        }
         Ok(record)
     }
 
@@ -4183,6 +4222,80 @@ impl SecretRefAdminRepository for InMemoryGatewayStore {
         read_lock(&self.secret_refs).get(secret_ref_id).cloned()
     }
 
+    fn update_secret_ref_status(
+        &self,
+        secret_ref_id: &str,
+        expected_version: i64,
+        status: SecretRefStatus,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<SecretRefRecord> {
+        let mut refs = write_lock(&self.secret_refs);
+        let Some(secret_ref) = refs.get_mut(secret_ref_id) else {
+            return Err(GatewayError::NotFound {
+                resource: format!("secret ref {secret_ref_id}"),
+            });
+        };
+        if secret_ref.resource_version != expected_version {
+            return Err(GatewayError::BadRequest {
+                message: "stale_resource_version".to_owned(),
+            });
+        }
+        secret_ref.status = status;
+        secret_ref.resource_version += 1;
+        secret_ref.updated_at = now;
+        let updated = secret_ref.clone();
+        drop(refs);
+        Ok(updated)
+    }
+
+    fn rotate_secret_ref(
+        &self,
+        request: RotateSecretRefRequest,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<SecretRefRecord> {
+        if request.secret_value.expose_secret().is_empty() {
+            return Err(GatewayError::BadRequest {
+                message: "secret_ref_value_required".to_owned(),
+            });
+        }
+        let display_mask = secret_display_mask(request.secret_value.expose_secret());
+        let fingerprint = secret_fingerprint(request.secret_value.expose_secret());
+        let mut refs = write_lock(&self.secret_refs);
+        let Some(secret_ref) = refs.get_mut(&request.secret_ref_id) else {
+            return Err(GatewayError::NotFound {
+                resource: format!("secret ref {}", request.secret_ref_id),
+            });
+        };
+        if secret_ref.resource_version != request.expected_version {
+            return Err(GatewayError::BadRequest {
+                message: "stale_resource_version".to_owned(),
+            });
+        }
+        if secret_ref.status == SecretRefStatus::Deleted {
+            return Err(GatewayError::BadRequest {
+                message: "secret_ref_deleted".to_owned(),
+            });
+        }
+        let backend_locator = secret_backend_locator(
+            self,
+            &secret_ref.backend_kind,
+            &request.secret_ref_id,
+            &request.secret_value,
+        )?;
+        secret_ref.backend_locator = backend_locator;
+        secret_ref.display_mask = display_mask;
+        secret_ref.fingerprint = fingerprint;
+        secret_ref.status = SecretRefStatus::Rotating;
+        secret_ref.resource_version += 1;
+        secret_ref.updated_at = now;
+        let updated = secret_ref.clone();
+        drop(refs);
+        if updated.backend_kind == "memory" {
+            write_lock(&self.secret_values).insert(request.secret_ref_id, request.secret_value);
+        }
+        Ok(updated)
+    }
+
     fn secret_value(&self, secret_ref_id: &str) -> Option<SecretString> {
         let active = read_lock(&self.secret_refs)
             .get(secret_ref_id)
@@ -4195,9 +4308,14 @@ impl SecretRefAdminRepository for InMemoryGatewayStore {
         if !active {
             return None;
         }
-        read_lock(&self.secret_values)
-            .get(secret_ref_id)
-            .map(|value| SecretString::from(value.expose_secret().to_owned()))
+        let record = read_lock(&self.secret_refs).get(secret_ref_id).cloned()?;
+        match record.backend_kind.as_str() {
+            "memory" => read_lock(&self.secret_values)
+                .get(secret_ref_id)
+                .map(|value| SecretString::from(value.expose_secret().to_owned())),
+            "file" => read_file_secret_value(&record.backend_locator),
+            _ => None,
+        }
     }
 }
 
@@ -7311,7 +7429,12 @@ fn validate_otel_export_shape(
             message: "otel_export_endpoint_url_invalid".to_owned(),
         });
     }
-    if !matches!(request.protocol.as_str(), "otlp_http" | "otlp_grpc") {
+    if request.protocol == "otlp_grpc" {
+        return Err(GatewayError::BadRequest {
+            message: "otel_export_protocol_unsupported".to_owned(),
+        });
+    }
+    if request.protocol != "otlp_http" {
         return Err(GatewayError::BadRequest {
             message: "otel_export_protocol_invalid".to_owned(),
         });
@@ -7343,7 +7466,7 @@ fn validate_secret_ref_request(
             message: "secret_ref_purpose_invalid".to_owned(),
         });
     }
-    if request.backend_kind != "memory" {
+    if !matches!(request.backend_kind.as_str(), "memory" | "file") {
         return Err(GatewayError::BadRequest {
             message: "secret_ref_backend_kind_unsupported".to_owned(),
         });
@@ -7359,6 +7482,52 @@ fn validate_secret_ref_request(
         request.organization_id.as_deref(),
         request.project_id.as_deref(),
     )
+}
+
+fn secret_backend_locator(
+    store: &InMemoryGatewayStore,
+    backend_kind: &str,
+    secret_ref_id: &str,
+    secret_value: &SecretString,
+) -> Result<String> {
+    match backend_kind {
+        "memory" => Ok(format!("memory://gateway-secrets/{secret_ref_id}")),
+        "file" => write_file_secret_value(store, secret_ref_id, secret_value),
+        _ => Err(GatewayError::BadRequest {
+            message: "secret_ref_backend_kind_unsupported".to_owned(),
+        }),
+    }
+}
+
+fn write_file_secret_value(
+    store: &InMemoryGatewayStore,
+    secret_ref_id: &str,
+    secret_value: &SecretString,
+) -> Result<String> {
+    let Some(dir) = read_lock(&store.secret_file_backend_dir).clone() else {
+        return Err(GatewayError::BadRequest {
+            message: "secret_ref_file_backend_dir_required".to_owned(),
+        });
+    };
+    std::fs::create_dir_all(&dir).map_err(|error| GatewayError::Internal {
+        message: format!("failed to create file secret backend directory: {error}"),
+    })?;
+    let path = file_secret_path(&dir, secret_ref_id);
+    std::fs::write(&path, secret_value.expose_secret()).map_err(|error| {
+        GatewayError::Internal {
+            message: format!("failed to write file secret backend value: {error}"),
+        }
+    })?;
+    Ok(format!("file://{}", path.display()))
+}
+
+fn read_file_secret_value(locator: &str) -> Option<SecretString> {
+    let path = locator.strip_prefix("file://")?;
+    std::fs::read_to_string(path).ok().map(SecretString::from)
+}
+
+fn file_secret_path(dir: &Path, secret_ref_id: &str) -> PathBuf {
+    dir.join(format!("{secret_ref_id}.secret"))
 }
 
 fn ensure_secret_ref_usable(
@@ -10145,13 +10314,18 @@ fn parse_membership_status(value: &str) -> Result<MembershipStatus> {
 
 #[cfg(test)]
 mod tests {
+    use secrecy::ExposeSecret;
     use serde_json::json;
 
-    use crate::domain::{DirectoryStatus, UsageEventRecord};
+    use super::{file_secret_path, read_lock};
+    use crate::domain::{
+        new_prefixed_id, DirectoryStatus, OtelResourceAttribute, UsageEventRecord,
+    };
     use crate::fixtures::bootstrap_request;
     use crate::storage::{
-        ledger_bucket_record_for_event, InMemoryGatewayStore, TenancyBootstrapRepository,
-        TenancyRepository,
+        ledger_bucket_record_for_event, CatalogAdminRepository, CreateOtelExportConfigRequest,
+        CreateSecretRefRequest, InMemoryGatewayStore, SecretRefAdminRepository,
+        TenancyBootstrapRepository, TenancyRepository,
     };
     use crate::ProtocolFamily;
 
@@ -10201,6 +10375,76 @@ mod tests {
 
         assert!(error.to_string().contains("project_seed_conflict"));
         assert!(store.organization("org_other").is_none());
+    }
+
+    #[test]
+    fn file_secret_backend_writes_and_resolves_without_memory_value() {
+        let store = InMemoryGatewayStore::default();
+        let dir = std::env::temp_dir().join(new_prefixed_id("gateway_file_secret_test"));
+        store.set_secret_file_backend_dir(&dir);
+
+        let record = store
+            .create_secret_ref(
+                CreateSecretRefRequest {
+                    tenant_id: "ten_test".to_owned(),
+                    organization_id: None,
+                    project_id: None,
+                    purpose: "file backend secret".to_owned(),
+                    backend_kind: "file".to_owned(),
+                    secret_value: secrecy::SecretString::from("file-secret-value"),
+                    created_by: "usr_test".to_owned(),
+                },
+                chrono::Utc::now(),
+            )
+            .unwrap_or_else(|error| panic!("file secret ref should create: {error}"));
+        let path = file_secret_path(&dir, &record.secret_ref_id);
+
+        assert_eq!(record.backend_kind, "file");
+        assert!(record.backend_locator.starts_with("file://"));
+        assert_eq!(
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("file secret should be readable: {error}")),
+            "file-secret-value"
+        );
+        assert!(!read_lock(&store.secret_values).contains_key(&record.secret_ref_id));
+        assert_eq!(
+            store
+                .secret_value(&record.secret_ref_id)
+                .map(|value| value.expose_secret().to_owned()),
+            Some("file-secret-value".to_owned())
+        );
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn otel_export_config_rejects_otlp_grpc_until_transport_exists() {
+        let store = InMemoryGatewayStore::default();
+        let request = CreateOtelExportConfigRequest {
+            tenant_id: "ten_test".to_owned(),
+            organization_id: None,
+            project_id: None,
+            endpoint_url: "https://otel.example:4317".to_owned(),
+            protocol: "otlp_grpc".to_owned(),
+            header_refs: Vec::new(),
+            enabled_signals: vec!["metrics".to_owned()],
+            resource_attributes: vec![OtelResourceAttribute {
+                key: "service.namespace".to_owned(),
+                value: "starweaver".to_owned(),
+            }],
+            export_interval_seconds: 60,
+            timeout_seconds: 10,
+            created_by: "usr_test".to_owned(),
+        };
+
+        let Err(error) = store.create_otel_export_config(request, chrono::Utc::now()) else {
+            panic!("otlp_grpc config should be rejected until a gRPC transport exists");
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "bad request: otel_export_protocol_unsupported"
+        );
     }
 
     #[test]

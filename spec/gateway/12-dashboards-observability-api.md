@@ -308,9 +308,9 @@ dashboards in their metrics backend.
 The v1 worker sends OTLP/HTTP metrics as bounded JSON payloads with
 secret-backed collector headers. Local and test profiles may use loopback HTTP
 collectors for deterministic integration tests; production collector endpoints
-must use HTTPS. `otlp_grpc` remains a configuration shape until a real gRPC
-transport is implemented and must be reported as failed instead of silently
-pretending to export.
+must use HTTPS. `otlp_grpc` configs are rejected until a real gRPC transport is
+implemented, so unsupported telemetry protocols fail during validation instead
+of becoming periodic exporter failures.
 
 Example endpoints:
 

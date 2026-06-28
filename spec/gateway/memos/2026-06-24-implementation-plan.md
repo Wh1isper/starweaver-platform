@@ -182,6 +182,20 @@ Completed foundation slices:
   endpoint validation rejects unsafe base URLs, and upstream credential read
   APIs return only safe credential metadata and `secret_ref_id`, never raw
   secret material.
+- Secret refs now support both `memory` and local `file` backend kinds. The
+  file backend writes secret material outside the metadata store, resolves
+  runtime secret values through the backend locator, keeps admin responses and
+  audit diffs redacted, and requires an explicit file backend directory before
+  production can use `STARWEAVER_GATEWAY_SECRET_BACKEND=file`.
+- Gateway startup now fail-closes unsupported secret backend profiles. The
+  current binary accepts only `memory` and `file`; production still rejects
+  `memory`, requires a file backend directory for `file`, and rejects external
+  backend profile names until their backend is implemented.
+- Secret ref lifecycle APIs now support status mutation and strong-auth
+  rotation. Rotation rewrites backend material, updates safe mask and
+  fingerprint metadata, advances the resource version, keeps runtime resolution
+  enabled during the rotation window, rejects API-key callers, and keeps raw
+  secret values out of responses and audit evidence.
 - Codex-only upstream OAuth foundations now expose strong-auth admin APIs for
   connection create/list/get/status update, connection-scoped session
   start/list, session get/revoke, and refresh status. Token bundles are stored
@@ -246,8 +260,9 @@ Completed foundation slices:
   timeouts, collector response handling, dropped-metric accounting, exporter
   health evidence, and readiness/realtime-dashboard health reporting. Synthetic
   exporter transport remains available only for deterministic outage tests and
-  dry-run harnesses. `otlp_grpc` configs are not treated as delivered until a
-  real gRPC transport is implemented.
+  dry-run harnesses. `otlp_grpc` configs are rejected during validation and
+  persistence until a real gRPC transport is implemented, so unsupported
+  telemetry protocols cannot become periodic exporter failures.
 - Production background worker scheduling now runs inside the gateway process
   when enabled. Each tick scans known tenants, delivers due notification outbox
   events with a bounded per-tenant batch limit, exports only due OpenTelemetry
@@ -646,8 +661,8 @@ Next implementation focus:
 
 - Keep shared auth/authz extraction deferred behind the two-owner contract-test
   gate now that both gateway and platform have concrete auth evidence.
-- Continue hardening any required OTLP/gRPC transport only when the metrics
-  backend contract needs it.
+- Continue any required OTLP/gRPC transport work only when the metrics backend
+  contract needs it; until then, keep `otlp_grpc` fail-closed at config time.
 
 ## Implementation Principles
 
@@ -873,8 +888,9 @@ aliases, pricing SKUs, and Codex upstream OAuth without leaking secrets.
 
 Work items:
 
-- Implement `SecretBackend` trait with memory, file, database-encrypted, and
-  external backend placeholders.
+- Implement `SecretBackend` trait boundaries with delivered memory and file
+  backends; keep database-encrypted and external backends as rejected planned
+  profiles until their resolvers are implemented.
 - Implement secret write, rotate, validate, masked read, and strong-auth raw
   locator read paths.
 - Implement provider endpoint catalog using `upstream_base_url`, protocol
@@ -890,6 +906,11 @@ Acceptance evidence:
 
 - Tests prove no admin read, audit diff, log, trace, route decision, usage
   event, or dashboard response includes raw secret values.
+- File secret backend tests prove secret material is written outside the
+  in-memory secret map and resolved only through the backend locator.
+- Secret rotation tests prove API keys cannot rotate secret refs, rotated
+  values replace runtime material, disabled refs stop resolving, and responses
+  plus audits stay free of raw secret material.
 - Catalog validation rejects protocol family mismatches, disabled credential
   references, invalid `upstream_base_url`, missing pricing for budget-enforced
   aliases, and attempts to configure generic upstream OAuth in v1.
@@ -900,8 +921,9 @@ Feasibility review:
 
 - Provider catalog is feasible once schema and config lifecycle exist. Secret
   backends are the main risk because production deployments vary widely.
-- Keep backend-specific code behind a trait and start with memory/file/test
-  implementations plus database-encrypted for small self-hosted deployments.
+- Keep backend-specific code behind explicit resolver boundaries. Start with
+  memory/file/test implementations, and reject database-encrypted or external
+  profiles until their production resolver and validation path exists.
 
 Ordering rationale:
 

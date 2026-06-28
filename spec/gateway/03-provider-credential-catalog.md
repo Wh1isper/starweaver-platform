@@ -173,9 +173,12 @@ Credential kinds:
 
 ## SecretRef
 
-Secret references abstract storage.
+Secret references abstract storage. The current gateway binary accepts only the
+delivered `memory` and `file` secret backend profiles at startup. The external
+locator classes below are contract shapes for future backend implementations and
+must fail closed until their backend resolver is implemented and enabled.
 
-Supported ref kinds:
+Secret ref locator classes:
 
 | Kind                      | Example                | Runtime Fetch                                  |
 | ------------------------- | ---------------------- | ---------------------------------------------- |

@@ -63,15 +63,15 @@ embedded development secret backend.
 
 ## Secret Backends
 
-Supported backend classes:
+Backend classes:
 
-| Backend                | Use                           |
-| ---------------------- | ----------------------------- |
-| `memory`               | tests only                    |
-| `file`                 | local development only        |
-| `database_encrypted`   | small self-hosted deployment  |
-| `cloud_secret_manager` | managed production deployment |
-| `external_vault`       | enterprise deployment         |
+| Backend                | Use                          | Current startup support                        |
+| ---------------------- | ---------------------------- | ---------------------------------------------- |
+| `memory`               | tests only                   | accepted outside production                    |
+| `file`                 | self-hosted deployments      | accepted; production requires an explicit root |
+| `database_encrypted`   | small self-hosted deployment | planned; rejected until backend is implemented |
+| `cloud_secret_manager` | managed production           | planned; rejected until backend is implemented |
+| `external_vault`       | enterprise deployment        | planned; rejected until backend is implemented |
 
 The API should expose a `SecretRef` abstraction so provider credentials can move
 between backends without changing routing resources.
@@ -320,8 +320,8 @@ error class, and region.
 
 Metric export requirements:
 
-- support OTLP/HTTP first, with `otlp_grpc` requiring a real gRPC transport
-  before it is reported as delivered
+- support OTLP/HTTP first, and reject `otlp_grpc` configs until a real gRPC
+  transport is implemented
 - support periodic export interval, timeout, and retry configuration
 - tolerate collector outages without blocking model requests
 - expose exporter failure count and dropped metric count
@@ -339,20 +339,20 @@ deterministic integration tests; production collector endpoints must use HTTPS.
 `OpenTelemetryExportConfig` is the admin-managed resource for exporting
 telemetry to an operator-owned collector/backend.
 
-| Field                     | Meaning                                               |
-| ------------------------- | ----------------------------------------------------- |
-| `otel_export_config_id`   | stable id                                             |
-| `tenant_id`               | owning tenant or system scope                         |
-| `signals`                 | `metrics` required, `traces` optional, `logs` later   |
-| `protocol`                | `otlp_grpc` or `otlp_http`                            |
-| `endpoint`                | collector endpoint URL                                |
-| `headers_secret_ref_id`   | optional secret reference id for exporter headers     |
-| `resource_attributes`     | bounded deployment attributes                         |
-| `metric_temporality`      | cumulative or delta, if supported by selected backend |
-| `export_interval_seconds` | periodic metrics export interval                      |
-| `export_timeout_seconds`  | exporter request timeout                              |
-| `enabled`                 | whether the exporter is active                        |
-| `status`                  | last validation and export health                     |
+| Field                     | Meaning                                                |
+| ------------------------- | ------------------------------------------------------ |
+| `otel_export_config_id`   | stable id                                              |
+| `tenant_id`               | owning tenant or system scope                          |
+| `signals`                 | `metrics`; traces and logs are outside v1              |
+| `protocol`                | `otlp_http`; `otlp_grpc` is rejected until implemented |
+| `endpoint`                | collector endpoint URL                                 |
+| `headers_secret_ref_id`   | optional secret reference id for exporter headers      |
+| `resource_attributes`     | bounded deployment attributes                          |
+| `metric_temporality`      | cumulative or delta, if supported by selected backend  |
+| `export_interval_seconds` | periodic metrics export interval                       |
+| `export_timeout_seconds`  | exporter request timeout                               |
+| `enabled`                 | whether the exporter is active                         |
+| `status`                  | last validation and export health                      |
 
 Read APIs return exporter metadata and health only. They must not return raw
 headers, auth tokens, or other exporter secrets. A missing or unhealthy
